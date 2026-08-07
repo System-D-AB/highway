@@ -54,8 +54,15 @@ internal abstract partial class HighwayCommandBase
             if (span.Length < RpcProcessingHeaderSize)
                 continue; // malformed — cannot be recovered, and re-queuing it would poison the queue
 
-            Envelope.DecodeRpcProcessingEntry(span, out _, out var requestId, out var payload);
-            api.ListRightPush(queueKey, CreateArgSlice(Envelope.EncodeRpcEntry(requestId, payload)), out _);
+            Envelope.DecodeRpcProcessingEntry(span, out _, out var requestId, out var payload, out var attempts);
+
+            // A prune is a redelivery like any other, so it counts. Not counting it here
+            // would let a request escape MaxDeliveryAttempts indefinitely by always being
+            // recovered through the dead-node path rather than the lease sweep.
+            api.ListRightPush(
+                queueKey,
+                CreateArgSlice(Envelope.EncodeRpcEntry(requestId, payload, Envelope.NextAttempt(attempts))),
+                out _);
             requeued++;
         }
 

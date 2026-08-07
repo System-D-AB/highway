@@ -22,7 +22,7 @@ public class EnvelopeTests
     {
         var encoded = Envelope.EncodeRpcEntry(SampleRequestId, SamplePayload);
 
-        Envelope.DecodeRpcEntry(encoded, out var requestId, out var payload);
+        Envelope.DecodeRpcEntry(encoded, out var requestId, out var payload, out _);
 
         requestId.ToArray().Should().Equal(SampleRequestId);
         payload.ToArray().Should().Equal(SamplePayload);
@@ -33,7 +33,7 @@ public class EnvelopeTests
     {
         var encoded = Envelope.EncodeRpcEntry(SampleRequestId, ReadOnlySpan<byte>.Empty);
 
-        Envelope.DecodeRpcEntry(encoded, out var requestId, out var payload);
+        Envelope.DecodeRpcEntry(encoded, out var requestId, out var payload, out _);
 
         requestId.ToArray().Should().Equal(SampleRequestId);
         payload.IsEmpty.Should().BeTrue();
@@ -45,7 +45,7 @@ public class EnvelopeTests
         var encoded = Envelope.EncodeRpcEntry(SampleRequestId, SamplePayload);
         var truncated = encoded.AsSpan(0, 1).ToArray(); // only 1 byte — can't even read u16
 
-        var act = () => Envelope.DecodeRpcEntry(truncated, out _, out _);
+        var act = () => Envelope.DecodeRpcEntry(truncated, out _, out _, out _);
         act.Should().Throw<InvalidDataException>();
     }
 
@@ -57,7 +57,7 @@ public class EnvelopeTests
         System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(buf, 100);
         buf[2] = 0x01; buf[3] = 0x02; buf[4] = 0x03; buf[5] = 0x04; buf[6] = 0x05;
 
-        var act = () => Envelope.DecodeRpcEntry(buf, out _, out _);
+        var act = () => Envelope.DecodeRpcEntry(buf, out _, out _, out _);
         act.Should().Throw<InvalidDataException>();
     }
 
@@ -71,7 +71,7 @@ public class EnvelopeTests
         var claimTicks = DateTime.UtcNow.Ticks;
 
         var encoded = Envelope.EncodeRpcProcessingEntry(claimTicks, SampleRequestId, SamplePayload);
-        Envelope.DecodeRpcProcessingEntry(encoded, out var ticks, out var requestId, out var payload);
+        Envelope.DecodeRpcProcessingEntry(encoded, out var ticks, out var requestId, out var payload, out _);
 
         ticks.Should().Be(claimTicks);
         requestId.ToArray().Should().Equal(SampleRequestId);
@@ -84,7 +84,7 @@ public class EnvelopeTests
         var encoded = Envelope.EncodeRpcProcessingEntry(42L, SampleRequestId, SamplePayload);
         var truncated = encoded.AsSpan(0, 5).ToArray();
 
-        var act = () => Envelope.DecodeRpcProcessingEntry(truncated, out _, out _, out _);
+        var act = () => Envelope.DecodeRpcProcessingEntry(truncated, out _, out _, out _, out _);
         act.Should().Throw<InvalidDataException>();
     }
 
@@ -109,7 +109,7 @@ public class EnvelopeTests
         const long messageId = 42L;
         var encoded = Envelope.EncodeChannelEntry(messageId, SamplePayload);
 
-        Envelope.DecodeChannelEntry(encoded, out var id, out var payload);
+        Envelope.DecodeChannelEntry(encoded, out var id, out var payload, out _);
 
         id.Should().Be(messageId);
         payload.ToArray().Should().Equal(SamplePayload);
@@ -119,7 +119,7 @@ public class EnvelopeTests
     public void ChannelEntry_EmptyPayload_RoundTrips()
     {
         var encoded = Envelope.EncodeChannelEntry(1L, ReadOnlySpan<byte>.Empty);
-        Envelope.DecodeChannelEntry(encoded, out var id, out var payload);
+        Envelope.DecodeChannelEntry(encoded, out var id, out var payload, out _);
         id.Should().Be(1L);
         payload.IsEmpty.Should().BeTrue();
     }
@@ -130,7 +130,7 @@ public class EnvelopeTests
         var encoded = Envelope.EncodeChannelEntry(1L, SamplePayload);
         var truncated = encoded.AsSpan(0, 4).ToArray();
 
-        var act = () => Envelope.DecodeChannelEntry(truncated, out _, out _);
+        var act = () => Envelope.DecodeChannelEntry(truncated, out _, out _, out _);
         act.Should().Throw<InvalidDataException>();
     }
 
@@ -173,7 +173,7 @@ public class EnvelopeTests
         const long messageId = 99L;
 
         var encoded = Envelope.EncodeGroupProcessingEntry(receiveTicks, messageId, SamplePayload);
-        Envelope.DecodeGroupProcessingEntry(encoded, out var rt, out var id, out var payload);
+        Envelope.DecodeGroupProcessingEntry(encoded, out var rt, out var id, out var payload, out _);
 
         rt.Should().Be(receiveTicks);
         id.Should().Be(messageId);
@@ -186,7 +186,7 @@ public class EnvelopeTests
         var encoded = Envelope.EncodeGroupProcessingEntry(1L, 2L, SamplePayload);
         var truncated = encoded.AsSpan(0, 7).ToArray();
 
-        var act = () => Envelope.DecodeGroupProcessingEntry(truncated, out _, out _, out _);
+        var act = () => Envelope.DecodeGroupProcessingEntry(truncated, out _, out _, out _, out _);
         act.Should().Throw<InvalidDataException>();
     }
 
@@ -207,11 +207,13 @@ public class EnvelopeTests
     [Fact]
     public void ChannelEntry_MessageId_IsStoredBigEndian()
     {
-        // If the encoding is big-endian, messageId = 1 should be stored as
-        // 00 00 00 00 00 00 00 01 in the first 8 bytes.
+        // Layout since feature 013: [u8 version][u16 attempts][i64 messageId][payload].
+        // If the message ID is big-endian, 1 is stored as 00 .. 01 in bytes 3..10.
         var encoded = Envelope.EncodeChannelEntry(1L, ReadOnlySpan<byte>.Empty);
-        encoded.Should().HaveCountGreaterThanOrEqualTo(8);
-        encoded[0..8].Should().Equal(new byte[] { 0, 0, 0, 0, 0, 0, 0, 1 });
+        encoded.Should().HaveCountGreaterThanOrEqualTo(11);
+        encoded[0].Should().Be(Envelope.FormatVersion);
+        encoded[1..3].Should().Equal(new byte[] { 0, 0 }, "attempts default to zero");
+        encoded[3..11].Should().Equal(new byte[] { 0, 0, 0, 0, 0, 0, 0, 1 });
     }
 
     [Fact]

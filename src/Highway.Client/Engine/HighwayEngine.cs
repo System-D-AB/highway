@@ -72,7 +72,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             var workToken = _workCts.Token;
 
             // 1. Connect — fail fast, descriptive error, no silent retry loop.
-            _connection = await HighwayConnection.ConnectAsync(_options.Server!, ct).ConfigureAwait(false);
+            _connection = await HighwayConnection.ConnectAsync(_options.Server!, _options, ct).ConfigureAwait(false);
             _pendingCalls = new PendingCallRegistry(_connection);
 
             var executor = new ServiceExecutor(_catalog, _scopeFactory);
@@ -148,7 +148,9 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
 
             _logger.LogInformation(
                 "Highway engine running: node '{Node}', server '{Server}', {Services} services, {Channels} channels, doorbells {Doorbells}",
-                _options.NodeName, _options.Server,
+                // Redacted: this string routinely carries a password now, and Information
+                // level reaches every configured log sink (feature 012).
+                _options.NodeName, ConnectionStringRedactor.Redact(_options.Server),
                 _catalog.AllServices.Count, _catalog.AllChannels.Count,
                 _options.DoorbellsEnabled ? "on" : "off");
         }

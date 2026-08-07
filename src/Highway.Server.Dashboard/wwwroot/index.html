@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Highway Dashboard</title>
+    <link rel="stylesheet" href="app.css">
+</head>
+<body>
+    <header>
+        <h1>Highway Dashboard</h1>
+        <p id="broker-info">Connecting...</p>
+        <div id="exposure-banner" class="banner hidden" role="alert">
+            ⚠️ This dashboard is bound beyond loopback without an API key. Payload content may be visible to other hosts on this network.
+        </div>
+    </header>
+    <main>
+        <section id="overview">
+            <h2>Recorder Health</h2>
+            <div id="stats" class="stat-grid">Loading...</div>
+            <h2>Recorded Names</h2>
+            <table id="name-table">
+                <thead><tr><th>Name</th><th>Events</th><th>Bytes</th><th>Capture</th><th>Dropped</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </section>
+        <section id="name-view" class="hidden">
+            <p><a href="#/" class="back-link">&larr; Overview</a></p>
+            <h2 id="name-title">Events</h2>
+            <div class="filter-bar">
+                <div class="filter-group">
+                    <label>Window:</label>
+                    <button data-from="-5m" class="window-btn active">5m</button>
+                    <button data-from="-15m" class="window-btn">15m</button>
+                    <button data-from="-1h" class="window-btn">1h</button>
+                    <button data-from="-6h" class="window-btn">6h</button>
+                </div>
+                <div class="filter-group">
+                    <label for="node-filter">Node:</label>
+                    <input id="node-filter" type="text" placeholder="all" size="12">
+                </div>
+                <div class="filter-group">
+                    <label for="limit-field">Limit:</label>
+                    <input id="limit-field" type="number" value="100" min="1" max="1000" size="5">
+                </div>
+                <div class="filter-group">
+                    <button id="refresh-btn">Refresh</button>
+                </div>
+                <div class="filter-group live-group">
+                    <label for="live-toggle">Live:</label>
+                    <button id="live-toggle" class="live-btn">Off</button>
+                </div>
+            </div>
+            <div id="drop-notice" class="drop-notice hidden"></div>
+            <div id="events-state" class="events-state hidden"></div>
+            <table id="event-table">
+                <thead><tr><th>Time</th><th>Type</th><th>Node</th><th>Request</th><th>Msg ID</th><th>Size</th><th>State</th><th>Error</th></tr></thead>
+                <tbody></tbody>
+            </table>
+            <div id="event-detail" class="detail-panel hidden">
+                <h3>Event Detail</h3>
+                <dl id="detail-content"></dl>
+            </div>
+        </section>
+    </main>
+    <noscript>
+        <p>The Highway Dashboard requires JavaScript. For a scriptless alternative, use <code>HW.REPLAY</code> over RESP via redis-cli.</p>
+    </noscript>
+    <script src="app.js"></script>
+</body>
+</html>

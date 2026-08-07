@@ -32,6 +32,55 @@ public sealed class HighwayOptions
     public string? Server { get; set; }
 
     /// <summary>
+    /// Username presented to the server (feature 012). Optional.
+    ///
+    /// <para>A Highway server secured with <c>WithPassword</c> has exactly one user,
+    /// Garnet's <c>default</c>, so this is normally left unset — the password alone is
+    /// enough. Set it only against a server configured with named users through the
+    /// <c>WithAuthentication(IAuthenticationSettings)</c> escape hatch.</para>
+    ///
+    /// <para><b>Precedence:</b> the connection string is parsed first, this overwrites
+    /// what it set, and <see cref="ConfigureConnection"/> runs last and can override
+    /// anything.</para>
+    /// </summary>
+    public string? Username { get; set; }
+
+    /// <summary>
+    /// Password presented to the server (feature 012). Optional; required against a
+    /// server configured with <c>WithPassword</c>.
+    ///
+    /// <para><b>Sent in clear text unless <see cref="Tls"/> is enabled.</b> RESP <c>AUTH</c>
+    /// carries it as an ordinary bulk string.</para>
+    ///
+    /// <para><b>Precedence:</b> as <see cref="Username"/> — connection string, then this,
+    /// then <see cref="ConfigureConnection"/>.</para>
+    /// </summary>
+    public string? Password { get; set; }
+
+    /// <summary>
+    /// Transport security (feature 012). Off by default.
+    /// </summary>
+    public HighwayTlsOptions? Tls { get; set; }
+
+    /// <summary>
+    /// Escape hatch over the underlying StackExchange.Redis configuration, applied
+    /// <b>last</b> — after the connection string and after every property above, so it can
+    /// override any of them.
+    ///
+    /// <para>This is how client certificates and private certificate authorities are
+    /// reached without Highway modelling every knob:</para>
+    ///
+    /// <code>
+    /// options.ConfigureConnection = c =>
+    /// {
+    ///     c.CertificateSelection += (_, _, _, _, _) => clientCertificate;
+    ///     c.CertificateValidation += (_, cert, chain, errors) => ValidateAgainstPrivateCa(cert, chain, errors);
+    /// };
+    /// </code>
+    /// </summary>
+    public Action<StackExchange.Redis.ConfigurationOptions>? ConfigureConnection { get; set; }
+
+    /// <summary>
     /// Default timeout for RPC calls.
     /// </summary>
     public TimeSpan CallTimeout { get; set; } = TimeSpan.FromSeconds(30);

@@ -9,6 +9,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Highway.Server.Tests" />
     <InternalsVisibleTo Include="Highway.Integration.Tests" />
+    <InternalsVisibleTo Include="Highway.Server.Dashboard" />
   </ItemGroup>
 
   <ItemGroup>

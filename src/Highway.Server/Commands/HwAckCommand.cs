@@ -64,9 +64,9 @@ internal sealed class HwAckCommand : HighwayCommandBase
             foreach (var entry in entries)
             {
                 var span = entry.ReadOnlySpan;
-                if (!found && span.Length >= 10)
+                if (!found && !Envelope.IsLegacyEntry(span))
                 {
-                    Envelope.DecodeRpcProcessingEntry(span, out _, out var reqId, out _);
+                    Envelope.DecodeRpcProcessingEntry(span, out _, out var reqId, out _, out _);
                     if (reqId.SequenceEqual(_requestIdBytes))
                     {
                         found = true;

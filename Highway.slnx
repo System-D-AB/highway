@@ -34,6 +34,7 @@
     <Project Path="src/Highway.Abstractions/Highway.Abstractions.csproj" />
     <Project Path="src/Highway.Client/Highway.Client.csproj" />
     <Project Path="src/Highway.Server/Highway.Server.csproj" />
+    <Project Path="src/Highway.Server.Dashboard/Highway.Server.Dashboard.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Highway.Abstractions.Tests/Highway.Abstractions.Tests.csproj" />

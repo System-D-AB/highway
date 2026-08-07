@@ -28,6 +28,10 @@ internal sealed class FlightRecorder : IDisposable
     private long _failures;
     private long _droppedBudget;
 
+    // --- Observer infrastructure (feature 011, T2) ---
+    private volatile IRecorderObserver[] _observers = [];
+    private long _observerFailures;
+
     public FlightRecorder(ObservabilityOptions options)
     {
         _options = options;
@@ -44,6 +48,57 @@ internal sealed class FlightRecorder : IDisposable
 
     /// <summary>Events reclaimed to stay inside the global byte budget. Cumulative.</summary>
     public long DroppedBudget => Interlocked.Read(ref _droppedBudget);
+
+    /// <summary>Observer failure count, surfaced in snapshots.</summary>
+    internal long ObserverFailures => Interlocked.Read(ref _observerFailures);
+
+    // --- T2: Observer contract ---
+
+    /// <summary>Non-blocking notification interface for live event streaming.</summary>
+    internal interface IRecorderObserver
+    {
+        /// <summary>
+        /// Called on the recording path. MUST NOT block, throw, or do work proportional to the event.
+        /// </summary>
+        void OnRecorded(in HighwayEvent evt);
+    }
+
+    internal void Subscribe(IRecorderObserver observer)
+    {
+        lock (_buffers) // reuse existing lock-free-for-reads structure; subscription is rare
+        {
+            _observers = [.. _observers, observer];
+        }
+    }
+
+    internal void Unsubscribe(IRecorderObserver observer)
+    {
+        lock (_buffers)
+        {
+            _observers = _observers.Where(o => o != observer).ToArray();
+        }
+    }
+
+    // --- T1: Name enumeration ---
+
+    /// <summary>Snapshot of one recorded name's state.</summary>
+    internal readonly record struct RecorderName(
+        string Name, int Count, long Bytes, PayloadCapture Capture, long DroppedCapacity);
+
+    /// <summary>
+    /// Enumerates names the recorder holds events for.
+    /// Returns a weakly-consistent snapshot — acceptable for a diagnostic view.
+    /// </summary>
+    internal IReadOnlyList<RecorderName> Names()
+    {
+        var result = new List<RecorderName>();
+        foreach (var (name, buffer) in _buffers)
+        {
+            if (buffer is not null)
+                result.Add(new RecorderName(name, buffer.Count, buffer.Bytes, buffer.Capture, buffer.DroppedCapacity));
+        }
+        return result;
+    }
 
     /// <summary>
     /// Records one operation. Called from a command's <c>Finalize</c> — after
@@ -75,7 +130,7 @@ internal sealed class FlightRecorder : IDisposable
 
             var capturedPayload = buffer.Capture == PayloadCapture.Full ? payload : null;
 
-            buffer.Append(new HighwayEvent
+            var evt = new HighwayEvent
             {
                 Timestamp = DateTimeOffset.UtcNow,
                 EventType = eventType,
@@ -87,7 +142,15 @@ internal sealed class FlightRecorder : IDisposable
                 PayloadSize = payload?.Length ?? 0,
                 ErrorCode = errorCode,
                 Count = count,
-            });
+            };
+
+            buffer.Append(evt);
+
+            // Notify observers (T2). With zero observers this is one volatile
+            // read and a length check — no allocation, no lock.
+            var observers = _observers;
+            if (observers.Length != 0)
+                NotifyObservers(observers, in evt);
         }
         catch (Exception)
         {
@@ -130,7 +193,8 @@ internal sealed class FlightRecorder : IDisposable
             Bytes: bytes,
             DroppedCapacity: droppedCapacity,
             DroppedBudget: DroppedBudget,
-            Failures: Failures);
+            Failures: Failures,
+            ObserverFailures: ObserverFailures);
     }
 
     /// <summary>
@@ -173,6 +237,20 @@ internal sealed class FlightRecorder : IDisposable
     }
 
     /// <summary>
+    /// Notifies observers, isolating each so one bad observer cannot prevent
+    /// the rest from being notified. Separate non-inlined method so the common
+    /// (no-observer) path stays small.
+    /// </summary>
+    private void NotifyObservers(IRecorderObserver[] observers, in HighwayEvent evt)
+    {
+        foreach (var observer in observers)
+        {
+            try { observer.OnRecorded(in evt); }
+            catch (Exception) { Interlocked.Increment(ref _observerFailures); }
+        }
+    }
+
+    /// <summary>
     /// Resolves (and caches) the buffer for a name. Returns null when the name
     /// is configured off, so a disabled name never allocates.
     /// </summary>
@@ -202,4 +280,5 @@ internal readonly record struct RecorderSnapshot(
     long Bytes,
     long DroppedCapacity,
     long DroppedBudget,
-    long Failures);
+    long Failures,
+    long ObserverFailures);

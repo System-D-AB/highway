@@ -49,4 +49,22 @@ public enum HighwayEventType
 
     /// <summary><c>HW.HEARTBEAT &lt;node&gt; BYE</c> — a node announced departure.</summary>
     NodeDeparted = 10,
+
+    /// <summary>
+    /// A request exhausted <c>MaxDeliveryAttempts</c> and was moved to the service's
+    /// dead-letter list instead of being requeued (feature 013).
+    /// <c>Count</c> carries the attempt count, <c>ErrorCode</c> the reason.
+    ///
+    /// <para>Recorded because dead-lettering makes a previously loud failure quiet: a
+    /// message that used to loop visibly now leaves the queue once. If nothing records
+    /// that, the fix has traded an obvious bug for a silent one.</para>
+    /// </summary>
+    RpcDeadLettered = 11,
+
+    /// <summary>
+    /// A pub/sub message exhausted <c>MaxDeliveryAttempts</c> for one group and was moved
+    /// to that group's dead-letter list instead of being redelivered (feature 013).
+    /// <c>Count</c> carries the attempt count, <c>ErrorCode</c> the reason.
+    /// </summary>
+    MessageDeadLettered = 12,
 }

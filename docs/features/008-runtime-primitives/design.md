@@ -1,5 +1,27 @@
 # Design: Runtime Primitives
 
+> ## WITHDRAWN — not implemented, not planned as specified
+>
+> This spec was written under the "distributed application runtime" framing that
+> `docs/product/runtime-vision.md` set out. **That document has been withdrawn** and
+> deleted; `docs/product/roadmap.md` § "Beyond v1" records why in full.
+>
+> The short version: the framing borrowed Dapr's name, invited comparison on breadth
+> against a product whose advantage is that it is easy, and several of the nine proposed
+> primitives wrapped commands an application can already issue on the connection it
+> already holds.
+>
+> **What replaced it:** feature 013 (Reliable Delivery) — dead letters, delayed delivery
+> and deduplication — which fixes gaps Highway itself creates rather than adding surface.
+>
+> Of this spec's four primitives, two remain reasonable *small* additions later and two do
+> not. See the roadmap. A distributed lock in particular is only worth shipping with a
+> **fencing token**: `SET NX EX` alone is not a correctness lock, because a GC pause or
+> clock skew lets two holders proceed at once.
+>
+> Left in place as a record of what was considered, per the project's rule against
+> rewriting history.
+
 ## Overview
 
 Four features, one design: typed .NET wrappers over stock Garnet operations, flowing through the existing `HighwayConnection`. No new `HW.*` commands. No new server-side code. The runtime primitives are entirely client-side logic against standard RESP commands.
@@ -272,6 +294,6 @@ All operations are sub-millisecond against a local Garnet server.
 
 ## Cross-References
 
-- Runtime vision: `docs/product/runtime-vision.md`
+- Runtime vision: withdrawn — see `docs/product/roadmap.md` § "Beyond v1"
 - Existing connection: `docs/features/005-client-server-communication/design.md` § "HighwayConnection"
-- Key namespace convention: `docs/product/runtime-vision.md` § "Key Schema Convention"
+- Key namespace convention: superseded — see `docs/HIGHWAY-PROTOCOL.md` § "Key Schema"

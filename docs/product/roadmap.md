@@ -156,29 +156,130 @@ any feature changing the protocol or public API must update and re-run them
 
 ---
 
-## Beyond v1: The Distributed Application Runtime
+### 011 — Dashboard: Flight Recorder View
 
-Highway is evolving from a messaging framework into a **distributed application runtime**. Because Highway.Server is a full Garnet instance, every node already has a persistent connection to a high-performance in-memory store. The runtime features expose this power through typed .NET APIs — zero additional infrastructure, zero additional connections.
+**Status:** Complete
 
-See `docs/product/runtime-vision.md` for the full design philosophy.
+An embedded web dashboard served from `Highway.Server.Dashboard` on a separate
+port. Reads the flight recorder in-process and presents a hand-written HTML/CSS/JS
+page from embedded resources — no external dependencies, no build step.
 
-### Phase 1: Runtime Primitives (v1.1)
+**Key deliverables:**
+- Recorder health overview: stat grid and name table
+- Event query per name with time window, node, and limit filters
+- Server-Sent Events for live tailing with backpressure and drop counting
+- Shared projection enforcing capture modes and `ReplayEnabled`
+- Concurrency-capped streaming (default 4) that cannot delay the recording path
+- API key authentication, loopback-bound by default, exposure warnings
 
-| Feature | API | Effort | Status |
-|---|---|---|---|
-| **Distributed Cache** | `IDistributedCache` (standard .NET) | Small | Planned |
-| **Distributed Locking** | `client.AcquireLockAsync(key, ttl)` | Small | Planned |
-| **Rate Limiting** | `client.CheckRateLimitAsync(key, limit, window)` | Small | Planned |
-| **Atomic Counters** | `client.IncrementAsync(key)` | Tiny | Planned |
+**Design note:** The recording thread's entire streaming cost is one non-blocking
+`TryWrite` per subscriber per event. All serialization and I/O happens on the
+reader side. A stalled browser drops events and counts them rather than blocking
+the broker.
 
-### Phase 2: Application Patterns (v1.2)
+---
 
-| Feature | API | Effort | Status |
-|---|---|---|---|
-| **Delayed Messages** | `client.PublishDelayedAsync(msg, delay)` | Medium | Planned |
-| **Leader Election** | `[Singleton]` attribute on service | Medium | Planned |
-| **Shared Dictionary** | `client.GetDictionary<K,V>(name)` | Medium | Planned |
-| **Request Deduplication** | `[Idempotent(Window)]` attribute | Medium | Planned |
+## Beyond v1: Delivery You Can Trust
+
+> **Measured against [`constraints.md`](constraints.md)**, which numbers every guarantee and
+> records whether the code keeps it.
+
+### 014 — The Queue
+
+**The missing third verb.** Highway can address work with a reply (`ExecuteAsync`, competing
+consumers) and events without one (`PublishAsync`, fan-out). It has no way to say *"do this
+work, exactly one worker, I am not waiting for an answer"* — so people reach for
+`PublishAsync` and then need it to behave like a queue, which is what pushed dead letters,
+retention and durability onto pub/sub in the first place.
+
+| | Contract | Attribute | Handler | Verb |
+|---|---|---|---|---|
+| RPC | `IReturn<TResponse>` | `[Service]` | `AsyncService<TReq,TRes>` | `ExecuteAsync` |
+| **Queue** | **`ISend`** | **`[Queue]`** | **`IProcess<T>`** | **`SendAsync`** |
+| Pub/Sub | `IPublish` | `[Channel]` | `ISubscribe<T>` | `PublishAsync` |
+
+One handler → Send. Many handlers → Publish. Need the answer → Execute.
+
+Cheap to build, because the machinery exists: `hw:svc:{name}:q` is already a
+competing-consumer queue with leases, acknowledgement, attempt counting and dead letters. A
+queue is RPC minus the reply. It also inherits feature 013 wholesale — delayed sends,
+`[Idempotent]`, and `HW.DLQ` all work on day one.
+
+**Build this before 016.** Several retention constraints move from pub/sub to queues, and
+building gigabyte budgets into pub/sub first would be the expensive order.
+
+### 015 — Node Decommissioning
+
+A node that is never coming back can say so, and an operator can say it on the node's
+behalf. Closes C1.5's unbounded growth.
+
+- `IHighwayClient.CleanAndByeForever()` — stop the loops first (or the next heartbeat resurrects the node), drain in-flight work, then purge
+- `HW.HEARTBEAT <node> BYE PURGE` — the operator path, for the far more common case where the node is already gone
+- Unacknowledged **RPC** work is requeued, never deleted; queued **messages** are deleted — the subscriber has declared it no longer exists
+- Returns what it destroyed, so an irreversible operation appears in a log
+
+### 016 — Retention, Storage and Durability
+
+Closes C1.3, C2.1 through C2.6. One coherent piece of work rather than six.
+
+- Byte-based caps with real accounting; 1 GB default, configurable
+- 100-day retention default
+- Group queues bounded like every other structure
+- **Backpressure instead of silent loss** — refuse the publish rather than drop the oldest
+- Durable by default
+- `AofSizeLimit` and checkpointing, so the log does not grow forever
+- Chunked backlog copy — a prerequisite, not a nicety: the current copy materialises the entire backlog under an exclusive lock
+
+
+The next theme is **not** breadth. It is making the delivery Highway already
+promises actually trustworthy, because there are gaps in it today.
+
+`docs/product/runtime-vision.md` — which framed the next phase as becoming "a
+distributed application runtime" and listed nine primitives — has been
+**withdrawn**. Three reasons, recorded so the idea is not re-proposed from
+scratch:
+
+1. "Distributed Application Runtime" is literally what Dapr's name stands for. Adopting it invited comparison on breadth — actors, workflows, pluggable state stores, bindings, eight language SDKs — against a product whose advantage is that a developer is productive in five minutes.
+2. Several of the nine were wrappers over commands an application can already issue on the connection it already has (counters), or invited misuse of a broker as a database (shared dictionary), or required inventing an expression language on the hot path (content-based routing).
+3. The document's central claim — "none of these require new server commands" — is false for at least delayed delivery and deduplication, both of which need multi-step atomicity that stock `GET`/`SET`/`ZADD` cannot provide across a failure.
+
+**What the review found instead**, and what feature 013 addresses: Highway has
+real reliability gaps in shipped code, and they matter more than any of the nine.
+
+| Gap | Status |
+|---|---|
+| **A permanently failing message is redelivered forever.** Lease recovery requeues abandoned RPC work with no attempt limit, no dead-letter destination, and no way to see or drain it. One poison message poisons a queue indefinitely | Feature 013 |
+| **At-least-once delivery with nothing to deduplicate against.** Highway's own lease recovery can deliver the same request twice by design, and hands the duplicate-handling problem entirely to the application | Feature 013 |
+| **No way to defer work.** Retry-with-backoff, scheduled sends, and delayed retries all currently require Hangfire, Quartz, or a database | Feature 013 |
+
+Cache and locking remain reasonable *small* additions later — a lock in
+particular is only worth shipping with a fencing token, which Highway can offer
+because it owns the server and a naive Redis wrapper cannot.
+
+### Next: 013 — Reliable Delivery
+
+| Part | API | Why |
+|---|---|---|
+| **Dead letters + retry limits** | `HW.DLQ`, `MaxDeliveryAttempts` | Fixes shipped behaviour: a poison message currently loops forever |
+| **Delayed delivery** | `PublishAsync(msg, delay: ...)` | One parameter on an API that already exists; also gives retry-with-backoff |
+| **Deduplication** | `[Idempotent]` | Closes the gap Highway's own at-least-once redelivery creates |
+
+### Later, and only if wanted
+
+| Feature | API | Note |
+|---|---|---|
+| **Distributed Cache** | `IDistributedCache` (standard .NET) | Strongest of the wrappers precisely because the interface is not ours — it plugs straight into ASP.NET output caching and session state |
+| **Distributed Locking** | `AcquireLockAsync(key, ttl)` → token | **Only with a fencing token.** `SET NX EX` alone is not a correctness lock: a GC pause or clock skew lets two holders proceed. Highway owns the server, so it can issue a monotonic fence a generic Redis wrapper cannot |
+| **Rate Limiting** | `System.Threading.RateLimiting.RateLimiter` | Worth doing only as the BCL abstraction, not a bespoke `CheckRateLimitAsync` |
+| **Leader Election** | `[Singleton]` on a service | Depends on the lock. Must be named honestly — "at most one", never "exactly one" |
+
+### Rejected
+
+| Proposal | Why not |
+|---|---|
+| Shared Dictionary | Invites treating a broker as a database: no transactions, no consistency story, no answer for concurrent writers. The cache covers the real need |
+| Content-Based Routing `[Filter("...")]` | A server-side expression language — new syntax to learn, a security surface, and a cost on the hot path. Filter in the subscriber |
+| Atomic Counters | It is `INCR`. Three lines on the multiplexer the application already holds |
 
 ### Phase 3: Advanced (v2.0)
 
@@ -186,7 +287,4 @@ See `docs/product/runtime-vision.md` for the full design philosophy.
 |---|---|
 | Sagas / Process Managers | Long-running workflows with compensation |
 | Transactional Outbox | Atomic DB write + message publish |
-| Full Dashboard | Rich web UI beyond the embedded control panel |
 | Clustering | Multi-server Highway.Server deployment |
-| Content-Based Routing | `[Filter("...")]` on subscribers |
-| Dead Letter Queues | Failed messages with configurable retry policies |

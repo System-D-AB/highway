@@ -13,7 +13,7 @@
 > | `HW.*` protocol, Highway.Server as a Garnet extension | **Shipped** — G6 |
 > | Timeouts, competing consumers, structured errors, DI scoping | **Shipped** — G7 |
 > | Heartbeat, service registry, `HW.DISCOVER` / `HW.STATS` | **Shipped** |
-> | Embedded Control Panel / web dashboard | **Not built.** The `WithDashboard(...)` call shown under "Hosting model" does not exist. `HW.STATS` is the data source a dashboard would consume |
+> | Embedded Control Panel / web dashboard | **Partially built** — flight recorder view delivered in feature 011. Server settings and catalog views are deferred |
 > | Flight recorder, `HW.REPLAY`, activity emission | **Shipped** — G8. The recorder is **volatile** (in-process, lost on restart); Highway emits `Activity` and takes no OpenTelemetry dependency, so the application wires its own pipeline |
 > | `dotnet new highway-server` template | **Not built** |
 > | Performance | **Uncharacterised.** No benchmark exists and no throughput target is claimed |
@@ -25,11 +25,39 @@
 
 ## Vision
 
-**A distributed application runtime for .NET.**
+**Distributed .NET without the infrastructure tax.**
 
-Highway gives developers two verbs — `ExecuteAsync` (RPC) and `PublishAsync` (Pub/Sub) — and handles everything else: service discovery, load balancing, durable delivery, timeouts, and serialization. The server is a Garnet extension you run as a single binary. The client is a NuGet package. No external broker. No ceremony.
+Highway gives developers three verbs — `ExecuteAsync` (RPC), `SendAsync` (Queue) and `PublishAsync` (Pub/Sub) — and handles everything else: service discovery, load balancing, durable delivery, timeouts, and serialization. The server is a Garnet extension you run as a single binary. The client is a NuGet package. No external broker. No ceremony.
 
-Because the server is a full Garnet instance, Highway also provides the distributed primitives every application needs — caching, locking, rate limiting, counters, scheduled delivery, and leader election — through the same connection, same server, same package. One infrastructure dependency for everything your distributed application requires.
+Choosing between them is one sentence: **one handler → Send, many handlers → Publish, need the answer → Execute.**
+
+| | Contract | Attribute | Handler | Verb |
+|---|---|---|---|---|
+| RPC | `IReturn<TResponse>` | `[Service("...")]` | `AsyncService<TReq,TRes>` | `ExecuteAsync` |
+| Queue | `ISend` | `[Queue("...")]` | `IProcess<T>` | `SendAsync` |
+| Pub/Sub | `IPublish` | `[Channel("...")]` | `ISubscribe<T>` | `PublishAsync` |
+
+The deployment consequence is the point of having both of the last two: run three instances of a **queue** handler and they *share* the work; run three instances of a **subscriber** and they each get *their own copy*.
+
+Because the server is a full Garnet instance, Highway can offer a small number of adjacent primitives — caching and locking chief among them — through the same connection and the same server, without a second piece of infrastructure.
+
+> **Highway is a library, not a runtime.** An earlier draft of this document called
+> it "a distributed application runtime for .NET" — which is, word for word, what
+> Dapr's name stands for. That framing was withdrawn. It invited comparison on
+> breadth (actors, workflows, pluggable state stores, eight language SDKs) against
+> a product whose actual advantage is that a developer is productive in five
+> minutes. Depth in delivery you can trust beats a longer feature list, and the
+> category claim was not earned.
+
+## System Constraints
+
+The guarantees Highway makes — and, just as importantly, which of them the code currently
+keeps — are enumerated in [`constraints.md`](constraints.md). Every constraint is numbered
+and carries an implementation status, so intent and reality can be compared line by line
+rather than inferred.
+
+Read it before relying on a delivery guarantee: **six of sixteen are not met today**, all
+of them concerning retention, storage limits and durability-by-default.
 
 ## Problem Statement
 
@@ -289,11 +317,15 @@ We provide a `dotnet new highway-server` template that scaffolds Option 1 or 2. 
 
 ### Embedded Control Panel (Web Dashboard)
 
-> **Not built.** This section is design intent, not a description of shipped
-> behaviour. No dashboard, no Kestrel listener, and no `WithDashboard(...)`
-> builder method exist. `HW.STATS` — which *is* shipped — is the data source such
-> a dashboard would consume; see
-> [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md).
+> **Partially built.** Feature 011 delivers the flight recorder view: recorder
+> health, event browsing per name, and SSE live tailing. The hosting, security,
+> and streaming infrastructure is shipped. Server settings, catalog views
+> (services, channels, nodes), and dead letter inspection are deferred to later
+> features.
+>
+> The `WithDashboard(...)` builder method exists and is functional. See
+> [`docs/features/011-dashboard-flight-recorder/design.md`](../features/011-dashboard-flight-recorder/design.md)
+> for the current implementation.
 
 Highway.Server includes an **embedded web UI** served on a configurable HTTP port. No separate web app. No SPA build step. It's baked into the server binary.
 

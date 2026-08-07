@@ -37,6 +37,12 @@ internal static class HighwayErrors
     /// whole lists, so a mid-loop failure can leave partial state that retrying
     /// would compound rather than repair.
     /// </summary>
+    /// <summary>
+    /// A queue holds entries written by a pre-013 Highway. Permanent: retrying cannot
+    /// help, and the remedy is to drain the queue or delete the data directory.
+    /// </summary>
+    public const string StorageFormat = "HW_STORAGE_FORMAT";
+
     public const string Internal = "HW_INTERNAL";
 
     /// <summary>Formats <c>ERR {code} {detail}</c>.</summary>
@@ -54,4 +60,7 @@ internal static class HighwayErrors
 
     /// <summary>Formats an <see cref="Internal"/> error.</summary>
     public static string InternalError(string detail) => Format(Internal, detail);
+
+    /// <summary>Formats the pre-013 storage-format refusal.</summary>
+    public static string StorageFormatError(string detail) => Format(StorageFormat, detail);
 }

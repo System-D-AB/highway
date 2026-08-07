@@ -1,6 +1,7 @@
 using System.Net;
 using Highway.Samples;
 using Highway.Server;
+using Highway.Server.Dashboard;
 using Microsoft.Extensions.Logging;
 
 // =============================================================================
@@ -40,12 +41,19 @@ using var loggerFactory = LoggerFactory.Create(b => b
 // Without this, spans are emitted and nothing collects them, which costs
 // essentially nothing — StartActivity returns null when no listener exists.
 
+var dashboardPort = SampleConfig.Int(args, "--dashboard-port", "HIGHWAY_DASHBOARD_PORT", 7500);
+
 var server = new HighwayServerBuilder()
     .WithPort(port)
     .WithBindAddress(bind)
     .WithDataDir(dataDir)          // durability on by default, so restarts are observable
+    // The dashboard binds loopback and serves recorded message payloads, so it is
+    // safe here and would need an API key anywhere else (feature 011).
+    .WithDashboard(dashboardPort)
     .WithLoggerFactory(loggerFactory)
     .Build();
+
+Console.WriteLine($"Dashboard: http://127.0.0.1:{dashboardPort}/");
 
 // Ctrl+C must drain rather than kill: e.Cancel = true stops the runtime from
 // terminating the process, and the token lets RunAsync shut down cleanly.

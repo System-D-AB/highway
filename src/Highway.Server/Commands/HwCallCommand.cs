@@ -81,6 +81,9 @@ internal sealed class HwCallCommand : HighwayCommandBase
             errorCode: FailureCode);
 
         if (Failed) return; // a rejected command must never ring a doorbell
-        _doorbell.Ring(HighwayKeys.ServiceDoorbell(_service), _requestIdBytes);
+
+        // Non-null past the guard: the only way _service stays unset is
+        // TryReadIdentifier failing, which calls Fail() and so returns above.
+        _doorbell.Ring(HighwayKeys.ServiceDoorbell(_service!), _requestIdBytes);
     }
 }

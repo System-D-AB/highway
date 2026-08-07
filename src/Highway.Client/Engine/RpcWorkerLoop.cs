@@ -30,6 +30,13 @@ internal sealed class RpcWorkerLoop
     private readonly LoopWake _wake;
     private readonly List<Task> _inflight = [];
 
+    /// <summary>
+    /// Deduplication window for this service's request contract, or <see langword="null"/>
+    /// when the contract carries no <c>[Idempotent]</c> attribute — in which case every
+    /// delivery takes exactly the path it always did.
+    /// </summary>
+    private readonly TimeSpan? _idempotencyWindow;
+
     public RpcWorkerLoop(
         ServiceDescriptor descriptor,
         IHighwayConnection connection,
@@ -47,7 +54,22 @@ internal sealed class RpcWorkerLoop
         _wake = wake;
         _logger = logger;
         _gate = new SemaphoreSlim(_concurrency, _concurrency);
+
+        var idempotent = descriptor.RequestType
+            .GetCustomAttributes(typeof(IdempotentAttribute), inherit: false)
+            .FirstOrDefault() as IdempotentAttribute;
+
+        _idempotencyWindow = idempotent is null
+            ? null
+            : idempotent.Window ?? DefaultIdempotencyWindow;
     }
+
+    /// <summary>
+    /// Window used when <c>[Idempotent]</c> names none. Matches the server's default
+    /// <c>ReplySlotTtl</c>: a response nobody can collect any more is a response there is
+    /// no point deduplicating against.
+    /// </summary>
+    internal static readonly TimeSpan DefaultIdempotencyWindow = TimeSpan.FromMinutes(5);
 
     public string ServiceName => _descriptor.Name;
     public LoopWake Wake => _wake;
@@ -200,6 +222,37 @@ internal sealed class RpcWorkerLoop
             return;
         }
 
+        // Deduplication (feature 013). Only for contracts that asked for it; everything
+        // else takes exactly the path it always did.
+        if (_idempotencyWindow is { } window)
+        {
+            var claim = await _connection
+                .ClaimIdempotencyAsync(_descriptor.Name, requestId, window, ct).ConfigureAwait(false);
+
+            switch (claim.Outcome)
+            {
+                case IdempotencyOutcome.Duplicate:
+                    // The handler already ran for this delivery. Reply with what it
+                    // produced, so the caller is unaffected by the duplication, and ack so
+                    // the redelivery stops.
+                    _logger.LogDebug(
+                        "Suppressed a duplicate delivery of '{RequestId}' on '{Service}'; replying with the original response",
+                        requestId, _descriptor.Name);
+                    await ReplyRawThenAckAsync(requestId, claim.Response!, ct).ConfigureAwait(false);
+                    return;
+
+                case IdempotencyOutcome.InProgress:
+                    // Another attempt holds the claim — running now, or crashed while
+                    // running. Neither run nor reply nor ack: the lease expires and the
+                    // request is redelivered after the window. Re-running on a stale
+                    // marker would break the only promise [Idempotent] makes.
+                    _logger.LogDebug(
+                        "Delivery of '{RequestId}' on '{Service}' is already in progress; leaving it for lease recovery",
+                        requestId, _descriptor.Name);
+                    return;
+            }
+        }
+
         var raw = await _executor.ExecuteServiceAsync(_descriptor.Name, request, ct).ConfigureAwait(false);
 
         result = raw as Output ?? new GenericOutput
@@ -208,14 +261,32 @@ internal sealed class RpcWorkerLoop
             Error = new ErrorDetail { Code = "INTERNAL_ERROR", Message = "The service returned a non-Output result." },
         };
 
-        await ReplyThenAckAsync(requestId, result, ct).ConfigureAwait(false);
+        var envelopeBytes = HighwayJson.EncodeEnvelope(_nodeName, result);
+
+        if (_idempotencyWindow is { } completeWindow)
+        {
+            // Replace the in-progress marker with the response before replying, so a
+            // redelivery that arrives during the reply finds an answer rather than a
+            // marker it must wait out.
+            await _connection
+                .CompleteIdempotencyAsync(_descriptor.Name, requestId, envelopeBytes, completeWindow, ct)
+                .ConfigureAwait(false);
+        }
+
+        await ReplyRawThenAckAsync(requestId, envelopeBytes, ct).ConfigureAwait(false);
     }
 
     /// <summary>Sends the reply envelope, THEN acks — a crash between the two still delivers the response.</summary>
-    private async Task ReplyThenAckAsync(string requestId, Output result, CancellationToken ct)
-    {
-        var responseEnvelope = HighwayJson.EncodeEnvelope(_nodeName, result);
+    private Task ReplyThenAckAsync(string requestId, Output result, CancellationToken ct)
+        => ReplyRawThenAckAsync(requestId, HighwayJson.EncodeEnvelope(_nodeName, result), ct);
 
+    /// <summary>
+    /// As <see cref="ReplyThenAckAsync"/>, but for an envelope that already exists — the
+    /// cached response of a suppressed duplicate, which must be returned byte-for-byte
+    /// rather than re-encoded.
+    /// </summary>
+    private async Task ReplyRawThenAckAsync(string requestId, byte[] responseEnvelope, CancellationToken ct)
+    {
         try
         {
             await _connection.ReplyAsync(requestId, responseEnvelope, ct).ConfigureAwait(false);

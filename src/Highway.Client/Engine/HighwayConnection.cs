@@ -1,3 +1,4 @@
+using System.Globalization;
 using Highway.Client.Wire;
 using StackExchange.Redis;
 
@@ -32,13 +33,19 @@ internal interface IHighwayConnection
     Task<(string RequestId, byte[] Payload)?> DequeueAsync(string service, string nodeId, CancellationToken ct = default);
     Task ReplyAsync(string requestId, byte[] envelope, CancellationToken ct = default);
     Task AckAsync(string service, string nodeId, string requestId, CancellationToken ct = default);
-    Task<long> PublishCommandAsync(string channel, byte[] envelope, CancellationToken ct = default);
+    Task<long> PublishCommandAsync(
+        string channel, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
     Task SubscribeGroupAsync(string channel, string group, CancellationToken ct = default);
     Task<IReadOnlyList<(long MessageId, byte[] Payload)>> ReceiveAsync(string channel, string group, int count, CancellationToken ct = default);
     Task RackAsync(string channel, string group, long messageId, CancellationToken ct = default);
     Task<byte[]?> GetReplySlotAsync(string requestId, CancellationToken ct = default);
     Task DeleteReplySlotAsync(string requestId, CancellationToken ct = default);
     Task SubscribeDoorbellAsync(string channel, Action<string> onMessage, CancellationToken ct = default);
+
+    // Deduplication (feature 013)
+    Task<IdempotencyClaim> ClaimIdempotencyAsync(string name, string id, TimeSpan window, CancellationToken ct = default);
+    Task CompleteIdempotencyAsync(string name, string id, byte[] response, TimeSpan window, CancellationToken ct = default);
+    Task ReleaseIdempotencyAsync(string name, string id, CancellationToken ct = default);
 
     // Registry (feature 006)
     Task RegisterAsync(string nodeId, byte[] catalogJson, CancellationToken ct = default);
@@ -87,7 +94,23 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     /// Connects to the configured server, failing fast with a descriptive
     /// exception — no silent retry loop at startup.
     /// </summary>
-    public static async Task<HighwayConnection> ConnectAsync(string configuration, CancellationToken ct = default)
+    public static Task<HighwayConnection> ConnectAsync(string configuration, CancellationToken ct = default)
+        => ConnectAsync(configuration, credentials: null, ct);
+
+    /// <summary>
+    /// Connects with optional credentials and transport security (feature 012).
+    ///
+    /// <para><b>Precedence, defined rather than incidental:</b> the connection string is
+    /// parsed first, <paramref name="credentials"/> overwrite what it set, and the
+    /// caller's <c>ConfigureConnection</c> delegate runs last so it can override anything.
+    /// "Which one wins" is the question a developer hits at 2am, so it is answered here
+    /// and on each option.</para>
+    ///
+    /// <para>Every path out of this method redacts the configuration string. It routinely
+    /// carries a password now, and an exception message is not a safe place for one.</para>
+    /// </summary>
+    public static async Task<HighwayConnection> ConnectAsync(
+        string configuration, HighwayOptions? credentials, CancellationToken ct = default)
     {
         ConfigurationOptions options;
         try
@@ -97,21 +120,65 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
         catch (Exception ex)
         {
             throw new ArgumentException(
-                $"'{configuration}' is not a valid Highway server configuration: {ex.Message}",
+                $"'{ConnectionStringRedactor.Redact(configuration)}' is not a valid Highway server configuration: {ex.Message}",
                 nameof(configuration), ex);
         }
 
         options.AbortOnConnectFail = true;
+
+        if (credentials is not null)
+        {
+            if (!string.IsNullOrEmpty(credentials.Username)) options.User = credentials.Username;
+            if (!string.IsNullOrEmpty(credentials.Password)) options.Password = credentials.Password;
+
+            if (credentials.Tls is { Enabled: true } tls)
+            {
+                options.Ssl = true;
+                if (!string.IsNullOrEmpty(tls.TargetHost)) options.SslHost = tls.TargetHost;
+                if (tls.Protocols is { } protocols) options.SslProtocols = protocols;
+            }
+
+            credentials.ConfigureConnection?.Invoke(options);
+        }
 
         try
         {
             var redis = await ConnectionMultiplexer.ConnectAsync(options).ConfigureAwait(false);
             return new HighwayConnection(redis);
         }
+        catch (RedisConnectionException ex) when (IsAuthenticationFailure(ex))
+        {
+            // Distinguished from an unreachable server because the remedies are opposite:
+            // one is "check the network", the other is "check the password". Reporting a
+            // wrong password as an unreachable host sends people to the wrong place.
+            throw new HighwayAuthenticationException(
+                $"The Highway server at '{ConnectionStringRedactor.Redact(configuration)}' rejected the supplied " +
+                "credentials. Check the password, and that the server was started with WithPassword.", ex);
+        }
         catch (RedisConnectionException ex)
         {
-            throw new HighwayServerUnreachableException(configuration, ex);
+            throw new HighwayServerUnreachableException(ConnectionStringRedactor.Redact(configuration), ex);
         }
+    }
+
+    /// <summary>
+    /// Whether a connect failure was really an authentication failure. StackExchange.Redis
+    /// wraps the server's <c>NOAUTH</c> / <c>WRONGPASS</c> reply in a connection exception,
+    /// so the distinction is only visible in the message chain.
+    /// </summary>
+    private static bool IsAuthenticationFailure(Exception? ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            var message = e.Message;
+            if (message.Contains("NOAUTH", StringComparison.Ordinal)
+                || message.Contains("WRONGPASS", StringComparison.Ordinal)
+                || message.Contains("NOPERM", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     // -------------------------------------------------------------------------
@@ -161,11 +228,21 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     // Pub/Sub commands
     // -------------------------------------------------------------------------
 
-    /// <summary>HW.PUBLISH &lt;channel&gt; &lt;payload&gt; → group count.</summary>
-    public Task<long> PublishCommandAsync(string channel, byte[] envelope, CancellationToken ct = default)
+    /// <summary>
+    /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; [AT &lt;ticks&gt;] → group count.
+    ///
+    /// <para>The delivery time is sent as an <b>absolute</b> .NET UTC tick count rather
+    /// than a relative delay: the server stores what it is told, so a slow round trip
+    /// cannot silently extend the delay and AOF replay cannot re-delay from replay time.</para>
+    /// </summary>
+    public Task<long> PublishCommandAsync(
+        string channel, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default)
         => SendAsync(async () =>
         {
-            var result = await _db.ExecuteAsync("HW.PUBLISH", channel, envelope).ConfigureAwait(false);
+            var result = deliverAt is { } at
+                ? await _db.ExecuteAsync("HW.PUBLISH", channel, envelope, "AT",
+                        at.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false)
+                : await _db.ExecuteAsync("HW.PUBLISH", channel, envelope).ConfigureAwait(false);
             return (long)result!;
         }, ct);
 
@@ -212,6 +289,84 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     // -------------------------------------------------------------------------
 
     /// <summary>Reads the reply slot; null when absent.</summary>
+    // -------------------------------------------------------------------------
+    // Deduplication (feature 013)
+    // -------------------------------------------------------------------------
+
+    /// <summary>Value written while a handler is running, before its response exists.</summary>
+    private static readonly byte[] InProgressMarker = " hw:in-progress"u8.ToArray();
+
+    private static string IdempotencyKey(string name, string id) => $"hw:idem:{name}:{id}";
+
+    /// <summary>
+    /// Attempts to claim the right to run a handler for one delivery.
+    ///
+    /// <para><c>SET NX EX</c> is atomic, so two concurrent redeliveries cannot both claim.
+    /// The loser reads what the winner left: a response if the handler finished, or the
+    /// in-progress marker if it is still running — or crashed.</para>
+    /// </summary>
+    public async Task<IdempotencyClaim> ClaimIdempotencyAsync(
+        string name, string id, TimeSpan window, CancellationToken ct = default)
+    {
+        try
+        {
+            var key = IdempotencyKey(name, id);
+
+            if (await _db.StringSetAsync(key, InProgressMarker, window, When.NotExists).ConfigureAwait(false))
+                return IdempotencyClaim.Claimed();
+
+            var prior = await _db.StringGetAsync(key).ConfigureAwait(false);
+            if (!prior.HasValue)
+            {
+                // Expired between the SET NX and the GET. Racing an expiry is not worth a
+                // second round trip: treat it as ours and run.
+                return IdempotencyClaim.Claimed();
+            }
+
+            var bytes = (byte[])prior!;
+            return bytes.AsSpan().SequenceEqual(InProgressMarker)
+                ? IdempotencyClaim.InProgress()
+                : IdempotencyClaim.Duplicate(bytes);
+        }
+        catch (RedisException ex)
+        {
+            throw Classify(ex);
+        }
+    }
+
+    /// <summary>Replaces the in-progress marker with the handler's response.</summary>
+    public async Task CompleteIdempotencyAsync(
+        string name, string id, byte[] response, TimeSpan window, CancellationToken ct = default)
+    {
+        try
+        {
+            await _db.StringSetAsync(IdempotencyKey(name, id), response, window).ConfigureAwait(false);
+        }
+        catch (RedisException ex)
+        {
+            throw Classify(ex);
+        }
+    }
+
+    /// <summary>
+    /// Drops the marker so the delivery can be retried immediately.
+    ///
+    /// <para>Used when the handler could not be run at all — a transport failure before
+    /// any work happened. Leaving the marker would block the redelivery for the whole
+    /// window over something that never ran.</para>
+    /// </summary>
+    public async Task ReleaseIdempotencyAsync(string name, string id, CancellationToken ct = default)
+    {
+        try
+        {
+            await _db.KeyDeleteAsync(IdempotencyKey(name, id)).ConfigureAwait(false);
+        }
+        catch (RedisException)
+        {
+            // Best effort. The marker expires on its own.
+        }
+    }
+
     public async Task<byte[]?> GetReplySlotAsync(string requestId, CancellationToken ct = default)
     {
         try
@@ -388,11 +543,45 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     public static bool IsTransient(string message)
         => string.Equals(message, TransientAbortMessage, StringComparison.Ordinal);
 
-    /// <summary>Maps a server/connection error to the typed permanent/transient split.</summary>
+    /// <summary>
+    /// Maps a server/connection error to the typed permanent/transient split.
+    ///
+    /// <para>Authentication and authorization failures are <b>permanent</b>: retrying a
+    /// wrong password wastes the backoff budget and trips attempt counters on systems that
+    /// keep them. They are given their own types because the remedy differs from every
+    /// other permanent failure — one is a configuration problem, not a code or network
+    /// problem.</para>
+    /// </summary>
     public static Exception Classify(RedisException ex)
-        => ex is RedisServerException { Message: TransientAbortMessage }
-            ? new HighwayTransientException(ex.Message)
-            : new HighwayTransportException(ex.Message);
+    {
+        if (ex is RedisServerException { Message: TransientAbortMessage })
+            return new HighwayTransientException(ex.Message);
+
+        var message = ex.Message;
+
+        if (message.StartsWith("NOAUTH", StringComparison.Ordinal))
+        {
+            return new HighwayAuthenticationException(
+                "The Highway server requires authentication and none was supplied. " +
+                "Set HighwayOptions.Password.", ex);
+        }
+
+        if (message.StartsWith("WRONGPASS", StringComparison.Ordinal))
+        {
+            return new HighwayAuthenticationException(
+                "The Highway server rejected the supplied credentials.", ex);
+        }
+
+        if (message.StartsWith("NOPERM", StringComparison.Ordinal))
+        {
+            // Garnet's reply does not name the command — it is literally
+            // "NOPERM this user has no permissions to run the command" — so the caller
+            // attaches it. Parsing it out would produce null every time.
+            return new HighwayAuthorizationException(command: null, ex);
+        }
+
+        return new HighwayTransportException(message);
+    }
 
     public async ValueTask DisposeAsync()
     {
