@@ -12,6 +12,8 @@ internal sealed class ImmutableCatalog : ICatalog
     private readonly FrozenDictionary<string, ChannelDescriptor> _channels;
     private readonly FrozenDictionary<Type, string> _requestTypeToServiceName;
     private readonly FrozenDictionary<Type, string> _messageTypeToChannelName;
+    private readonly FrozenDictionary<Type, string> _messageTypeToQueueName;
+    private readonly FrozenDictionary<string, QueueDescriptor> _queues;
 
     /// <param name="services">Services this node hosts.</param>
     /// <param name="channels">Channels this node has local subscribers for.</param>
@@ -24,14 +26,22 @@ internal sealed class ImmutableCatalog : ICatalog
     /// Message type → channel name for every <c>[Channel]</c> contract in scope,
     /// subscribed here or not, so a node can publish to a channel it does not consume.
     /// </param>
+    /// <param name="queues">Queues this node processes (feature 014).</param>
+    /// <param name="queueContracts">
+    /// Message type → queue name for every <c>[Queue]</c> contract in scope, processed here
+    /// or not, so a node can send to a queue it does not process.
+    /// </param>
     public ImmutableCatalog(
         IReadOnlyList<ServiceDescriptor> services,
         IReadOnlyList<ChannelDescriptor> channels,
         IReadOnlyDictionary<Type, string>? requestContracts = null,
-        IReadOnlyDictionary<Type, string>? messageContracts = null)
+        IReadOnlyDictionary<Type, string>? messageContracts = null,
+        IReadOnlyList<QueueDescriptor>? queues = null,
+        IReadOnlyDictionary<Type, string>? queueContracts = null)
     {
         AllServices = services;
         AllChannels = channels;
+        AllQueues = queues ?? [];
 
         _services = services.ToFrozenDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
         _channels = channels.ToFrozenDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
@@ -58,6 +68,18 @@ internal sealed class ImmutableCatalog : ICatalog
         foreach (var channel in channels)
             messages[channel.MessageType] = channel.Name;
 
+        var queueMessages = new Dictionary<Type, string>();
+        if (queueContracts is not null)
+        {
+            foreach (var (type, name) in queueContracts)
+                queueMessages[type] = name;
+        }
+        foreach (var queue in AllQueues)
+            queueMessages[queue.MessageType] = queue.Name;
+
+        _messageTypeToQueueName = queueMessages.ToFrozenDictionary();
+        _queues = AllQueues.ToFrozenDictionary(q => q.Name, StringComparer.OrdinalIgnoreCase);
+
         _requestTypeToServiceName = requests.ToFrozenDictionary();
         _messageTypeToChannelName = messages.ToFrozenDictionary();
     }
@@ -79,6 +101,17 @@ internal sealed class ImmutableCatalog : ICatalog
 
     public string? GetServiceNameForRequestType(Type requestType)
         => _requestTypeToServiceName.GetValueOrDefault(requestType);
+
+    /// <inheritdoc/>
+    public IReadOnlyList<QueueDescriptor> AllQueues { get; }
+
+    /// <inheritdoc/>
+    public string? GetQueueNameForMessageType(Type messageType)
+        => _messageTypeToQueueName.TryGetValue(messageType, out var name) ? name : null;
+
+    /// <inheritdoc/>
+    public QueueDescriptor? GetQueue(string name)
+        => _queues.TryGetValue(name, out var q) ? q : null;
 
     public string? GetChannelNameForMessageType(Type messageType)
         => _messageTypeToChannelName.GetValueOrDefault(messageType);

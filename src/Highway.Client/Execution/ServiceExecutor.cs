@@ -20,6 +20,28 @@ public sealed class ServiceExecutor
     }
 
     /// <summary>
+    /// Runs a queue processor (feature 014).
+    ///
+    /// <para>No response object: the sender is not waiting. A handler that throws
+    /// propagates, so the message is never acknowledged and lease recovery redelivers it —
+    /// which is the whole point of at-least-once. Swallowing the exception here would
+    /// silently discard work.</para>
+    /// </summary>
+    public async Task ExecuteProcessorAsync(string queueName, object message, CancellationToken ct = default)
+    {
+        var descriptor = _catalog.GetQueue(queueName)
+            ?? throw new InvalidOperationException($"No processor registered for queue '{queueName}'.");
+
+        if (descriptor.InvokeDelegate is null)
+            throw new InvalidOperationException($"Queue '{queueName}' has no compiled delegate.");
+
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var processor = scope.ServiceProvider.GetRequiredService(descriptor.ProcessorType);
+
+        await descriptor.InvokeDelegate(processor, message, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Executes a service by name. Creates a scope, resolves the service, and invokes it.
     /// </summary>
     /// <returns>The response object, or a GenericOutput with error status.</returns>

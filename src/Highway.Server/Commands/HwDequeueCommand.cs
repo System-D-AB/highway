@@ -126,66 +126,25 @@ internal sealed class HwDequeueCommand : HighwayCommandBase
                 foreach (var node in allNodes)
                 {
                     if (pruned.Contains(node)) continue; // already emptied above
-                    var procKey = CreateArgSlice(HighwayKeys.ServiceProcessing(_service, node));
-                    var sweepStatus = api.ListLeftPop(procKey, int.MaxValue, out var entries);
-                    if (sweepStatus != GarnetStatus.OK || entries is null) continue;
 
-                    var keep = new List<byte[]>();
-                    foreach (var entry in entries)
-                    {
-                        var span = entry.ReadOnlySpan;
+                    // Shared with HW.QCLAIM — one copy of the attempt counting and
+                    // dead-letter decision, because feature 013 found the same defect in
+                    // three independently written requeue paths.
+                    var dead = SweepExpiredEntries(
+                        api,
+                        procKey:     CreateArgSlice(HighwayKeys.ServiceProcessing(_service, node)),
+                        queueKey:    queueKey,
+                        dlqKey:      CreateArgSlice(HighwayKeys.ServiceDeadLetter(_service)),
+                        procKeyName: HighwayKeys.ServiceProcessing(_service, node),
+                        leaseExpiry: leaseExpiry,
+                        opts:        _opts,
+                        decode:      DecodeRpcProcessing,
+                        encodeQueueEntry: static (id, payload, attempts) =>
+                            Envelope.EncodeRpcEntry(id, payload, attempts),
+                        idToString:  static id => Encoding.UTF8.GetString(id));
 
-                        // A pre-013 entry must be refused, never skipped and never
-                        // misparsed: reading it as a current entry would reinterpret its
-                        // leading bytes and hand a corrupt payload to an application.
-                        if (Envelope.IsLegacyEntry(span))
-                            throw new StorageFormatException(HighwayKeys.ServiceProcessing(_service, node));
-
-                        Envelope.DecodeRpcProcessingEntry(
-                            span, out var claimTicks, out var reqId, out var msgPayload, out var attempts);
-
-                        if (claimTicks >= leaseExpiry)
-                        {
-                            keep.Add(span.ToArray());
-                            continue;
-                        }
-
-                        // Expired. This is the redelivery path that used to be unbounded:
-                        // the entry went back on the queue with nothing counting how often
-                        // that had already happened, so a permanently failing request was
-                        // retried for the life of the deployment — and, the queue being
-                        // FIFO, retried ahead of everything behind it.
-                        var next = Envelope.NextAttempt(attempts);
-
-                        if (_opts.MaxDeliveryAttempts > 0 && next > _opts.MaxDeliveryAttempts)
-                        {
-                            var original = Envelope.EncodeRpcEntry(reqId, msgPayload, next);
-                            var dead = DeadLetter.Encode(
-                                DateTime.UtcNow.Ticks, next, DeadLetter.MaxAttempts, original);
-
-                            var dlqKey = CreateArgSlice(HighwayKeys.ServiceDeadLetter(_service));
-                            api.ListRightPush(dlqKey, CreateArgSlice(dead), out _);
-                            TrimDeadLetters(api, dlqKey, _opts.MaxDeadLetterEntries);
-
-                            // Removal from the processing list and the push above are the
-                            // same transaction, so the entry is never in both lists and
-                            // never in neither.
-                            _deadLettered.Add((Encoding.UTF8.GetString(reqId), next));
-                            continue;
-                        }
-
-                        // No backoff path for RPC by default. A caller waits against
-                        // CallTimeout (30s) while Lease defaults to 5 minutes, so by the
-                        // time a retry is possible the caller has already given up —
-                        // delaying it further changes nothing except when the dead-letter
-                        // happens. See HighwayServerOptions.RpcBackoffEnabled.
-                        var rpcEntry = Envelope.EncodeRpcEntry(reqId, msgPayload, next);
-                        api.ListRightPush(queueKey, CreateArgSlice(rpcEntry), out _);
-                    }
-
-                    // Restore non-expired entries
-                    foreach (var e in keep)
-                        api.ListRightPush(procKey, CreateArgSlice(e), out _);
+                    foreach (var d in dead)
+                        _deadLettered.Add((d.Id, d.Attempts));
                 }
             }
 
@@ -292,22 +251,17 @@ internal sealed class HwDequeueCommand : HighwayCommandBase
         return pruned;
     }
 
-    /// <summary>Writes a null array (*-1\r\n) to <paramref name="output"/>.</summary>
-    private static void WriteNullArray(ref MemoryResult<byte> output)
-    {
-        const int len = 5;
-        output.MemoryOwner?.Dispose();
-        output.MemoryOwner = MemoryPool<byte>.Shared.Rent(len);
-        output.Length = len;
-        var span = output.MemoryOwner.Memory.Span;
-        span[0] = (byte)'*';
-        span[1] = (byte)'-';
-        span[2] = (byte)'1';
-        span[3] = (byte)'\r';
-        span[4] = (byte)'\n';
-    }
 
     /// <summary>Records the claim. A nil dequeue records nothing — an empty poll is not an event.</summary>
+    /// <summary>Adapts the RPC processing framing to the shared sweep's decoder shape.</summary>
+    private static void DecodeRpcProcessing(
+        ReadOnlySpan<byte> data, out long claimTicks, out byte[] id, out byte[] payload, out ushort attempts)
+    {
+        Envelope.DecodeRpcProcessingEntry(data, out claimTicks, out var idSpan, out var payloadSpan, out attempts);
+        id = idSpan.ToArray();
+        payload = payloadSpan.ToArray();
+    }
+
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
     {
         // Dead letters are recorded even when this dequeue returned nil: the sweep that

@@ -63,12 +63,20 @@ public static class ServiceCollectionExtensions
             }
         }
 
+        foreach (var queue in scanResult.Queues)
+        {
+            queue.InvokeDelegate = delegateCompiler.CompileProcessorDelegate(
+                queue.ProcessorType, queue.MessageType);
+        }
+
         // 4. Build immutable catalog
         var catalog = new ImmutableCatalog(
             scanResult.Services,
             scanResult.Channels,
             scanResult.RequestContracts,
-            scanResult.MessageContracts);
+            scanResult.MessageContracts,
+            scanResult.Queues,
+            scanResult.QueueContracts);
 
         // 5. Register discovered types in DI
         CatalogDiRegistrar.Register(services, scanResult);

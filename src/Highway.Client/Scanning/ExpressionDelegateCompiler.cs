@@ -41,6 +41,24 @@ internal sealed class ExpressionDelegateCompiler : IDelegateCompiler
         };
     }
 
+    /// <summary>Compiles <c>IProcess&lt;T&gt;.ProcessAsync</c> (feature 014).</summary>
+    public Func<object, object, CancellationToken, Task> CompileProcessorDelegate(
+        Type processorType, Type messageType)
+    {
+        var procParam = Expression.Parameter(typeof(object), "proc");
+        var msgParam = Expression.Parameter(typeof(object), "msg");
+        var ctParam = Expression.Parameter(typeof(CancellationToken), "ct");
+
+        var castProc = Expression.Convert(procParam, processorType);
+        var castMsg = Expression.Convert(msgParam, messageType);
+
+        var method = processorType.GetMethod("ProcessAsync", [messageType, typeof(CancellationToken)])!;
+        var call = Expression.Call(castProc, method, castMsg, ctParam);
+
+        return Expression.Lambda<Func<object, object, CancellationToken, Task>>(
+            call, procParam, msgParam, ctParam).Compile();
+    }
+
     public Func<object, object, CancellationToken, Task> CompileSubscriberDelegate(
         Type subscriberType, Type messageType)
     {

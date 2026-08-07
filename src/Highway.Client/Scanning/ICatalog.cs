@@ -28,4 +28,16 @@ public interface ICatalog
     /// Gets the channel name for a given message type. Used to avoid per-call reflection.
     /// </summary>
     string? GetChannelNameForMessageType(Type messageType);
+
+    /// <summary>Queues this node processes (feature 014).</summary>
+    IReadOnlyList<QueueDescriptor> AllQueues { get; }
+
+    /// <summary>
+    /// Queue name for a message type, from the <c>[Queue]</c> contract — whether or not
+    /// this node processes it, so a send-only node can still address the queue.
+    /// </summary>
+    string? GetQueueNameForMessageType(Type messageType);
+
+    /// <summary>The processor descriptor for a queue this node handles, or null.</summary>
+    QueueDescriptor? GetQueue(string name);
 }

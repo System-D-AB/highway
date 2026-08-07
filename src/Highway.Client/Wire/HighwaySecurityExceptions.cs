@@ -32,3 +32,12 @@ public sealed class HighwayAuthorizationException(string? command, Exception? in
     /// <summary>The refused command, when the call site supplied it.</summary>
     public string? Command { get; } = command;
 }
+
+/// <summary>
+/// The message type has no <c>[Queue]</c> registration in this node's catalog (feature 014).
+/// Thrown locally before anything touches the network — a send has no response object to
+/// carry a status code.
+/// </summary>
+public sealed class QueueNotRegisteredException(Type messageType)
+    : Exception($"The message type '{messageType.FullName}' is not registered as a queue in this node's catalog. " +
+                $"Add [Queue(\"name\")] to the message type and ensure the contract assembly is discovered.");

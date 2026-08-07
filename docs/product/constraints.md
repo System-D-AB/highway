@@ -13,7 +13,7 @@ saying so is the point of the document.
 same feature. If a constraint turns out to be wrong, change the constraint and record why —
 do not quietly let the code diverge.
 
-Last reviewed: 2026-08-08.
+Last reviewed: 2026-08-08 (feature 014).
 
 ---
 
@@ -35,18 +35,18 @@ gigabyte budgets onto a fan-out mechanism. They belong on the queue.
 
 ---
 
-## C1 — Queue (`SendAsync`) — **Not built, feature 014**
+## C1 — Queue (`SendAsync`) — feature 014
 
 ### C1.1 — A sent message is processed at least once
 
-**Status: Not built.**
+**Status: Met** — feature 014.
 
 Exactly one `IProcess<T>` handles each message. Multiple instances of the same application
 **compete** — they share the work, they do not each get a copy.
 
 ### C1.2 — A sent message survives until it is processed
 
-**Status: Not built.**
+**Status: Met** — feature 014, subject to C4.
 
 This is the queue's reason to exist. A message with no worker running waits. A message whose
 worker crashes mid-handling is redelivered after its lease. Nothing removes it except
@@ -56,7 +56,7 @@ Bounded only by C4.1 and C4.2.
 
 ### C1.3 — Sending never requires a running consumer
 
-**Status: Not built.**
+**Status: Met** — feature 014.
 
 `SendAsync` succeeds whether or not any worker exists. The message waits. This is the
 capability whose absence made people misuse `PublishAsync`.
@@ -239,9 +239,9 @@ is independent of every other decision here.
 
 | | Constraint | Status |
 |---|---|---|
-| C1.1 | Sent message processed at least once | ⬜ Not built — 014 |
-| C1.2 | Survives until processed | ⬜ Not built — 014 |
-| C1.3 | Sending needs no running consumer | ⬜ Not built — 014 |
+| C1.1 | Sent message processed at least once | ✅ Met |
+| C1.2 | Survives until processed | ✅ Met |
+| C1.3 | Sending needs no running consumer | ✅ Met |
 | C1.4 | Unprocessable messages stop being retried | ✅ Machinery met (013) |
 | C1.5 | Sends can be deferred | ✅ Machinery met (013) |
 | C2.1 | At-least-once per registered group | ✅ Met |
@@ -260,7 +260,7 @@ is independent of every other decision here.
 | C4.6 | Bounded over time | ❌ Not met — 016 |
 
 **All six unmet constraints are in C4** — retention, storage and durability — which is one
-coherent feature rather than six. The three not-built are feature 014.
+coherent feature rather than six. Feature 014 delivered C1.
 
 ---
 

@@ -155,6 +155,52 @@ internal sealed class HighwayClient : IHighwayClient
         return Cast<TResponse>(response);
     }
 
+    public Task<string> SendAsync(ISend message, CancellationToken ct = default)
+        => SendCoreAsync(message, deliverAt: null, ct);
+
+    /// <inheritdoc/>
+    public Task<string> SendAsync(ISend message, TimeSpan delay, CancellationToken ct = default)
+        => SendCoreAsync(
+            message,
+            // A non-positive delay sends immediately rather than failing: it falls out of
+            // ordinary arithmetic on a caller's schedule, and refusing it would make every
+            // caller write the guard Highway can write once.
+            delay > TimeSpan.Zero ? DateTimeOffset.UtcNow + delay : null,
+            ct);
+
+    private async Task<string> SendCoreAsync(ISend message, DateTimeOffset? deliverAt, CancellationToken ct)
+    {
+        if (_engine.State != EngineState.Running || _engineInternals.Connection is not { } connection)
+        {
+            throw new HighwayTransportException(
+                "The Highway engine is not running. Start the engine before sending.");
+        }
+
+        var queueName = _catalog.GetQueueNameForMessageType(message.GetType())
+            ?? throw new QueueNotRegisteredException(message.GetType());
+
+        byte[] envelope;
+        try
+        {
+            envelope = HighwayJson.EncodeEnvelope(
+                _options.NodeName, message,
+                _options.ActivitiesEnabled ? HighwayActivity.CurrentTraceParent() : null);
+        }
+        catch (JsonException ex)
+        {
+            throw new HighwayTransportException($"The message could not be serialized: {ex.Message}");
+        }
+
+        if (envelope.Length > MaxPayloadBytes)
+            throw new PayloadTooLargeException(envelope.Length, MaxPayloadBytes);
+
+        var messageId = Guid.NewGuid().ToString("N");
+        await connection.QSendAsync(queueName, messageId, envelope, deliverAt, ct).ConfigureAwait(false);
+
+        _logger.LogDebug("Sent to queue '{Queue}' as {MessageId}", queueName, messageId);
+        return messageId;
+    }
+
     public Task PublishAsync(IPublish message, CancellationToken ct = default)
         => PublishCoreAsync(message, deliverAt: null, ct);
 

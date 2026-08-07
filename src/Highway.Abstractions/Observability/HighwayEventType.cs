@@ -67,4 +67,19 @@ public enum HighwayEventType
     /// <c>Count</c> carries the attempt count, <c>ErrorCode</c> the reason.
     /// </summary>
     MessageDeadLettered = 12,
+
+    /// <summary><c>HW.QSEND</c> - work was enqueued (feature 014).</summary>
+    QueueSent = 13,
+
+    /// <summary><c>HW.QCLAIM</c> - a worker claimed queued work. A nil claim records nothing.</summary>
+    QueueClaimed = 14,
+
+    /// <summary><c>HW.QACK</c> - claimed work was acknowledged.</summary>
+    QueueAcknowledged = 15,
+
+    /// <summary>
+    /// A queued message exhausted <c>MaxDeliveryAttempts</c> and was moved to the queue's
+    /// dead-letter list. <c>Count</c> carries the attempt count.
+    /// </summary>
+    QueueDeadLettered = 16,
 }

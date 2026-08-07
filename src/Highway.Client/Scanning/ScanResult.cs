@@ -29,4 +29,19 @@ public sealed class ScanResult
     /// <summary>Message type → channel name, for every <c>[Channel]</c> contract found.</summary>
     public IReadOnlyDictionary<Type, string> MessageContracts { get; init; }
         = new Dictionary<Type, string>();
+
+    /// <summary>Queues this node processes (feature 014).</summary>
+    public IReadOnlyList<QueueDescriptor> Queues { get; init; } = [];
+
+    /// <summary>
+    /// Message type → queue name, for every <c>[Queue]</c> contract found — whether or not
+    /// this node processes it.
+    ///
+    /// <para>Separate from <see cref="Queues"/> for the same reason
+    /// <see cref="RequestContracts"/> is separate from <see cref="Services"/>: a node that
+    /// only <i>sends</i> must still be able to address the queue. Deriving addressing from
+    /// local processors would reproduce the caller-only defect feature 010 found.</para>
+    /// </summary>
+    public IReadOnlyDictionary<Type, string> QueueContracts { get; init; }
+        = new Dictionary<Type, string>();
 }

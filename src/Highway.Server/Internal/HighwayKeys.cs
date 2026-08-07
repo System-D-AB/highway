@@ -18,6 +18,42 @@ internal static class HighwayKeys
     /// <summary>Pending RPC request queue for a service.  hw:svc:{service}:q</summary>
     public static string ServiceQueue(string service) => $"hw:svc:{service}:q";
 
+    // -------------------------------------------------------------------------
+    // Queues (feature 014)
+    //
+    // A queue is RPC minus the reply, but it lives under its own prefix so a queue
+    // named "invoices" and a service named "invoices" are different things. Sharing
+    // hw:svc: would have meant a silent shared work list and a HW.STATS reply that
+    // could not say which kind it was reporting.
+    // -------------------------------------------------------------------------
+
+    /// <summary>Pending messages for one queue, FIFO.</summary>
+    public static string Queue(string queue) => $"hw:q:{queue}:q";
+
+    /// <summary>Messages claimed by one node, not yet acknowledged.</summary>
+    public static string QueueProcessing(string queue, string nodeId) => $"hw:q:{queue}:proc:{nodeId}";
+
+    /// <summary>Nodes that have claimed work for this queue.</summary>
+    public static string QueueNodes(string queue) => $"hw:q:{queue}:nodes";
+
+    /// <summary>
+    /// Newline-delimited mirror of <see cref="QueueNodes"/>.
+    ///
+    /// <para>Mandatory, not stylistic: reading the object-store set during a command's
+    /// <c>Prepare</c> registers a watch that the later exclusive lock fails (004.1).
+    /// The same trap applies to the same access pattern here.</para>
+    /// </summary>
+    public static string QueueNodeList(string queue) => $"hw:q:{queue}:nodelist";
+
+    /// <summary>Messages that exhausted <see cref="HighwayServerOptions.MaxDeliveryAttempts"/>.</summary>
+    public static string QueueDeadLetter(string queue) => $"hw:q:{queue}:dlq";
+
+    /// <summary>Messages held for retry backoff, or sent with a future delivery time.</summary>
+    public static string QueueDelayed(string queue) => $"hw:q:{queue}:delayed";
+
+    /// <summary>Doorbell rung when a message is enqueued.</summary>
+    public static string QueueDoorbell(string queue) => $"hw:door:q:{queue}";
+
     /// <summary>
     /// Dead letters for one service: requests that exhausted
     /// <see cref="HighwayServerOptions.MaxDeliveryAttempts"/> (feature 013).

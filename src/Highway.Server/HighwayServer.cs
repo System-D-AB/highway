@@ -163,6 +163,13 @@ public sealed class HighwayServer : IHighwayServer
         // Dead letters (feature 013). Arity -3: action and target kind are required,
         // the target itself is one or two names, and COUNT is optional.
         new("HW.DLQ",        -3, () => new HwDlqCommand(opts)),
+
+        // Queues (feature 014). A queue is RPC minus the reply, under its own key space so
+        // a queue and a service may share a name. HW.QSEND has arity -4: the optional
+        // trailing AT <ticks> defers delivery.
+        new("HW.QSEND",      -4, () => new HwQSendCommand(opts, doorbell, recorder)),
+        new("HW.QCLAIM",      3, () => new HwQClaimCommand(opts, recorder)),
+        new("HW.QACK",        4, () => new HwQAckCommand(opts, recorder)),
     ];
 
     /// <summary>
