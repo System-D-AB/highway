@@ -99,7 +99,7 @@ behaviour where an in-progress marker blocks rather than re-running.
 a caller is waiting; a queue has no caller. Acknowledging would discard it silently and
 retrying would loop on a payload that can never parse.
 
-### - [ ] T10 — Durability warning
+### - [x] T10 — Durability warning
 
 Warn once, at startup, when a queue is used on a memory-only server, naming the queue and
 saying its contents are lost on restart.
@@ -132,7 +132,7 @@ registers the commands — that gate has already fired three times.
 - `SentMessage_SurvivesABrokerRestart`
 - `QueueAndServiceMayShareAName`
 
-### - [ ] T13 — Samples
+### - [x] T13 — Samples
 
 Send, process, competing consumers across two instances, and a poison message reaching the
 dead-letter queue. Re-run all sample processes; append to `samples/RUNLOG.md`.
@@ -148,7 +148,7 @@ defect found is fixed in the library with a regression test.
 
 *Requirements:* R7.3, R7.4
 
-### - [ ] T15 — Full verification
+### - [x] T15 — Full verification
 
 *Requirements:* R8.1, R8.2, R8.3
 **Done when:** every test passes, `dotnet build` is warning-free, and
