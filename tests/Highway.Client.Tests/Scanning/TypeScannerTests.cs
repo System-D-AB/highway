@@ -135,4 +135,49 @@ public class TypeScannerTests
 
         act.Should().NotThrow();
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Contract discovery (feature 010 finding)
+    // ──────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Scan_RequestContractWithNoImplementation_IsStillDiscovered()
+    {
+        // The scanner sees the contract type alone — no AsyncService anywhere.
+        // This is a caller-only process.
+        var result = new DefaultTypeScanner().ScanTypes([typeof(TestRequest)]);
+
+        result.Services.Should().BeEmpty("nothing implements it here");
+        result.RequestContracts.Should().ContainKey(typeof(TestRequest))
+            .WhoseValue.Should().Be("test.hello", "the [Service] attribute names the service, not the implementation");
+    }
+
+    [Fact]
+    public void Scan_MessageContractWithNoSubscriber_IsStillDiscovered()
+    {
+        var result = new DefaultTypeScanner().ScanTypes([typeof(TestEvent)]);
+
+        result.Channels.Should().BeEmpty("nothing subscribes to it here");
+        result.MessageContracts.Should().ContainKey(typeof(TestEvent))
+            .WhoseValue.Should().Be("test.events");
+    }
+
+    [Fact]
+    public void Scan_RequestWithoutServiceAttribute_IsNotAContract()
+    {
+        // Deliberately not a Highway service. Skipped, not rejected — the local
+        // 404 path depends on this staying absent.
+        var result = new DefaultTypeScanner().ScanTypes([typeof(UnregisteredEvent)]);
+
+        result.MessageContracts.Should().NotContainKey(typeof(UnregisteredEvent));
+    }
+
+    [Fact]
+    public void Scan_HostedService_YieldsBothTheImplementationAndTheContract()
+    {
+        var result = new DefaultTypeScanner().ScanTypes([typeof(TestRequest), typeof(TestService)]);
+
+        result.Services.Should().ContainSingle().Which.Name.Should().Be("test.hello");
+        result.RequestContracts.Should().ContainKey(typeof(TestRequest));
+    }
 }

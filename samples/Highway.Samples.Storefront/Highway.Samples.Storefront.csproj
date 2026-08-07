@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Highway.Samples.Storefront</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Highway.Client\Highway.Client.csproj" />
+    <ProjectReference Include="..\Highway.Samples.Contracts\Highway.Samples.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+    <!--
+      Only needed for the `discover` and `stats` commands. Highway.Client has no
+      public API for HW.DISCOVER / HW.STATS — see samples/RUNLOG.md, finding 2 —
+      so this app opens its own RESP connection for those two. Everything else
+      goes through IHighwayClient.
+    -->
+    <PackageReference Include="StackExchange.Redis" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\SampleConfig.cs" Link="SampleConfig.cs" />
+  </ItemGroup>
+
+</Project>

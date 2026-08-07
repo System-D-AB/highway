@@ -11,6 +11,10 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0-preview.4.25258.110" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0-preview.4.25258.110" />
 
+    <!-- Sample app dependencies (generic host + console logging) -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
+
     <!-- Test dependencies -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
     <PackageVersion Include="xunit" Version="2.9.3" />

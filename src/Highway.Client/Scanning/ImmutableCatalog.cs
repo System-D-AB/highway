@@ -13,15 +13,53 @@ internal sealed class ImmutableCatalog : ICatalog
     private readonly FrozenDictionary<Type, string> _requestTypeToServiceName;
     private readonly FrozenDictionary<Type, string> _messageTypeToChannelName;
 
-    public ImmutableCatalog(IReadOnlyList<ServiceDescriptor> services, IReadOnlyList<ChannelDescriptor> channels)
+    /// <param name="services">Services this node hosts.</param>
+    /// <param name="channels">Channels this node has local subscribers for.</param>
+    /// <param name="requestContracts">
+    /// Request type → service name for every <c>[Service]</c> contract in scope,
+    /// hosted here or not. Callers address services through this map, so a node
+    /// that hosts nothing can still call.
+    /// </param>
+    /// <param name="messageContracts">
+    /// Message type → channel name for every <c>[Channel]</c> contract in scope,
+    /// subscribed here or not, so a node can publish to a channel it does not consume.
+    /// </param>
+    public ImmutableCatalog(
+        IReadOnlyList<ServiceDescriptor> services,
+        IReadOnlyList<ChannelDescriptor> channels,
+        IReadOnlyDictionary<Type, string>? requestContracts = null,
+        IReadOnlyDictionary<Type, string>? messageContracts = null)
     {
         AllServices = services;
         AllChannels = channels;
 
         _services = services.ToFrozenDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
         _channels = channels.ToFrozenDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
-        _requestTypeToServiceName = services.ToFrozenDictionary(s => s.RequestType, s => s.Name);
-        _messageTypeToChannelName = channels.ToFrozenDictionary(c => c.MessageType, c => c.Name);
+
+        // Addressing is derived from the contracts, not from what happens to be
+        // hosted locally. Hosted implementations are folded in afterwards so a
+        // locally hosted service is always addressable even if its contract was
+        // somehow missed.
+        var requests = new Dictionary<Type, string>();
+        if (requestContracts is not null)
+        {
+            foreach (var (type, name) in requestContracts)
+                requests[type] = name;
+        }
+        foreach (var service in services)
+            requests[service.RequestType] = service.Name;
+
+        var messages = new Dictionary<Type, string>();
+        if (messageContracts is not null)
+        {
+            foreach (var (type, name) in messageContracts)
+                messages[type] = name;
+        }
+        foreach (var channel in channels)
+            messages[channel.MessageType] = channel.Name;
+
+        _requestTypeToServiceName = requests.ToFrozenDictionary();
+        _messageTypeToChannelName = messages.ToFrozenDictionary();
     }
 
     public IReadOnlyList<ServiceDescriptor> AllServices { get; }

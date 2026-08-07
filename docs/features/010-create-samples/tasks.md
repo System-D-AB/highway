@@ -20,7 +20,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ## Tasks
 
-- [ ] ### Task 1: Sample Layout, Solution Integration, and Contracts
+- [x] ### Task 1: Sample Layout, Solution Integration, and Contracts
 
 **Fulfills:** Requirement 1 (all), Requirement 2 (all)
 
@@ -37,7 +37,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 2: Broker Application
+- [x] ### Task 2: Broker Application
 
 **Fulfills:** Requirement 3 (all), Requirement 9 (AC1)
 
@@ -55,7 +55,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 3: Shared Configuration Helper
+- [x] ### Task 3: Shared Configuration Helper
 
 **Fulfills:** Requirement 3 (AC6), 5 (AC6), 9 (AC2)
 
@@ -69,7 +69,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 4: OrderService Application
+- [x] ### Task 4: OrderService Application
 
 **Fulfills:** Requirement 4 (all), Requirement 7 (AC7 host half)
 
@@ -87,7 +87,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 5: Storefront Application
+- [x] ### Task 5: Storefront Application
 
 **Fulfills:** Requirement 5 (all), Requirement 7 (AC7 caller half)
 
@@ -107,7 +107,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 6: Cross-Assembly Scanning — Verify and Fix in the Library
+- [x] ### Task 6: Cross-Assembly Scanning — Verify and Fix in the Library
 
 **Fulfills:** Requirement 6 (all)
 
@@ -124,7 +124,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 7: Run It — Core Scenarios
+- [x] ### Task 7: Run It — Core Scenarios
 
 **Fulfills:** Requirement 7 (AC1–AC4, AC6–AC9)
 
@@ -146,7 +146,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 8: Run It — Durability and Cross-Machine
+- [x] ### Task 8: Run It — Durability and Cross-Machine
 
 **Fulfills:** Requirement 7 (AC5), Requirement 9 (AC3–AC5)
 
@@ -162,7 +162,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 9: Getting Started README
+- [x] ### Task 9: Getting Started README
 
 **Fulfills:** Requirement 8 (all)
 
@@ -181,7 +181,7 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 
 ---
 
-- [ ] ### Task 10: Findings and Full Verification
+- [x] ### Task 10: Findings and Full Verification
 
 **Fulfills:** Requirement 10 (all), Requirement 1 (AC7)
 
@@ -197,11 +197,21 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 **Done criteria:**
 - Green build, green suite twice, samples runnable and documented, and every finding from Highway's first real run written down
 
-**Result:** _(fill in on completion)_
+**Result:** Green build (0 warnings), full suite green.
+
+| Project | Before 010 | After 010 |
+|---|---|---|
+| Highway.Abstractions.Tests | 2 | 2 |
+| Highway.Client.Tests | 158 | 166 |
+| Highway.Server.Tests | 107 | 107 |
+| Highway.Integration.Tests | 173 | 173 |
+| **Total** | **440** | **448** |
+
+Eight new tests, all regression guards for finding 1.
 
 ---
 
-- [ ] ### Task 11: Establish the Living Conformance Gate
+- [x] ### Task 11: Establish the Living Conformance Gate
 
 **Fulfills:** Requirement 11 (all), Requirement 1 (AC4–AC5)
 
@@ -219,4 +229,86 @@ T11 (Living conformance gate: RUNLOG + steering rule) → T10
 **Done criteria:**
 - Samples provably track current source; the breaking-change gate has been observed to fire; `RUNLOG.md` exists with real entries; the obligation is written into steering where every future feature will read it
 
-**Result:** _(fill in on completion)_
+**Result:** Green build (0 warnings), full suite green.
+
+| Project | Before 010 | After 010 |
+|---|---|---|
+| Highway.Abstractions.Tests | 2 | 2 |
+| Highway.Client.Tests | 158 | 166 |
+| Highway.Server.Tests | 107 | 107 |
+| Highway.Integration.Tests | 173 | 173 |
+| **Total** | **440** | **448** |
+
+Eight new tests, all regression guards for finding 1.
+
+---
+
+## Completion Record
+
+Full detail in [`samples/RUNLOG.md`](../../../samples/RUNLOG.md). Summary:
+
+**The samples did their job on the first run.** Highway had 440 passing tests
+and had never run as a deployed system. Starting it as three real processes
+found a defect that made the product's headline use case impossible.
+
+### Finding 1 — a caller-only node could not call anything (fixed)
+
+A process that referenced the contracts library but hosted no services could
+address nothing: every `ExecuteAsync` returned `SERVICE_NOT_FOUND` for services
+running in another process. `ImmutableCatalog` derived its request-type →
+service-name map from **locally hosted implementations**, so a pure caller's map
+was empty. Channels had the identical defect, so a node could not publish to a
+channel it did not itself consume.
+
+This broke goal G4 and the headline example in `product.md`.
+
+440 tests missed it because every integration-test node scans the same assembly
+and therefore hosts everything — no test ever exercised a genuine caller-only
+node. Exactly the blind spot this feature exists to find.
+
+Fixed in the library: addressing now derives from `[Service]` / `[Channel]` on
+the contract types, independent of local implementations. Eight regression tests
+across `CatalogTests` and `TypeScannerTests`.
+
+### Finding 2 — assembly scanning depended on load order (fixed)
+
+The weakness the spec predicted. `DefaultAssemblySource` filtered only
+`AppDomain.CurrentDomain.GetAssemblies()`, and the runtime loads lazily.
+Discovery now walks the entry assembly's reference closure. Masked by finding 1,
+so it was never independently observable — fixed on its own merits.
+
+### Findings 3–5 (recorded, not fixed)
+
+- **No public API for `HW.DISCOVER` / `HW.STATS`.** They ship in the protocol and
+  exist on the *internal* connection, but `IHighwayClient` exposes neither. The
+  storefront drops to raw RESP. Adding public API is a design decision beyond
+  this feature.
+- **An unroutable call blocks for 30 seconds by default.** Fast-fail fixes it
+  (1 ms vs 30,014 ms measured) but is off by default. Whether the default should
+  change is a product decision.
+- **First-start recovery logs an alarming stack trace** at info level. Upstream
+  Garnet behaviour, harmless, looks like a crash.
+
+### What is now proven that was not
+
+Standalone broker process; RESP over a real socket between OS processes; the
+generic-host lifecycle; scanning across a project boundary; broker-unavailable
+failure quality; durable delivery across subscriber downtime **and** across a
+broker restart; competing consumers across two host processes; and RPC plus
+pub/sub over a real non-loopback interface with `--bind 0.0.0.0`.
+
+Cross-machine is recorded as **partial**: a second network interface, not a
+second physical machine — no physical hop, NAT, or firewall between hosts.
+
+### The gate was observed firing
+
+Renaming `HighwayServerBuilder.WithDataDir` — which the library itself still
+compiled against — broke the sample build in the same commit, then was reverted.
+A gate never seen to fire is not known to work.
+
+### A false alarm worth recording
+
+Durable-delivery-across-downtime first appeared to fail. The cause was the test
+harness quitting milliseconds after startup, before the consumer loop's first
+drain. Re-run with a delay, both missed events arrived. The product was fine;
+the measurement was not.

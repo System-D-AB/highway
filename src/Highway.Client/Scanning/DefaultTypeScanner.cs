@@ -21,19 +21,73 @@ internal sealed class DefaultTypeScanner : ITypeScanner
             .Where(t => t.IsClass && !t.IsAbstract)
             .ToList();
 
-        var services = DiscoverServices(allTypes);
-        var channels = DiscoverChannels(allTypes);
-
-        return new ScanResult { Services = services, Channels = channels };
+        return Build(allTypes);
     }
 
     /// <summary>Internal method for testing — scans a specific list of types.</summary>
     internal ScanResult ScanTypes(IReadOnlyList<Type> types)
+        => Build(types.Where(t => t.IsClass && !t.IsAbstract).ToList());
+
+    private static ScanResult Build(List<Type> allTypes) => new()
     {
-        var allTypes = types.Where(t => t.IsClass && !t.IsAbstract).ToList();
-        var services = DiscoverServices(allTypes);
-        var channels = DiscoverChannels(allTypes);
-        return new ScanResult { Services = services, Channels = channels };
+        Services = DiscoverServices(allTypes),
+        Channels = DiscoverChannels(allTypes),
+        RequestContracts = DiscoverRequestContracts(allTypes),
+        MessageContracts = DiscoverMessageContracts(allTypes),
+    };
+
+    /// <summary>
+    /// Every request type carrying <c>[Service]</c>, whether or not this node
+    /// implements the service.
+    ///
+    /// <para>This is what lets a caller-only node call anything at all. Deriving
+    /// addressing from local implementations instead meant a process that
+    /// referenced a contracts library but hosted nothing found none of its own
+    /// contracts, and every call returned <c>SERVICE_NOT_FOUND</c> for services
+    /// running fine elsewhere.</para>
+    ///
+    /// <para>A type implementing <c>IReturn&lt;&gt;</c> <em>without</em> the
+    /// attribute is skipped rather than rejected — it is a deliberate way to
+    /// express "not a Highway service", and the local-catalog 404 path depends
+    /// on it.</para>
+    /// </summary>
+    private static IReadOnlyDictionary<Type, string> DiscoverRequestContracts(List<Type> allTypes)
+    {
+        var contracts = new Dictionary<Type, string>();
+
+        foreach (var type in allTypes)
+        {
+            if (type.GetCustomAttribute<ServiceAttribute>() is not { } attribute)
+                continue;
+
+            var implementsIReturn = type.GetInterfaces()
+                .Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IReturn<>));
+
+            if (implementsIReturn)
+                contracts[type] = attribute.Name;
+        }
+
+        return contracts;
+    }
+
+    /// <summary>
+    /// Every message type carrying <c>[Channel]</c>, whether or not this node
+    /// subscribes to it — so a node can publish to a channel it does not consume.
+    /// </summary>
+    private static IReadOnlyDictionary<Type, string> DiscoverMessageContracts(List<Type> allTypes)
+    {
+        var contracts = new Dictionary<Type, string>();
+
+        foreach (var type in allTypes)
+        {
+            if (type.GetCustomAttribute<ChannelAttribute>() is not { } attribute)
+                continue;
+
+            if (typeof(IPublish).IsAssignableFrom(type))
+                contracts[type] = attribute.Name;
+        }
+
+        return contracts;
     }
 
     private static IReadOnlyList<ServiceDescriptor> DiscoverServices(List<Type> allTypes)
