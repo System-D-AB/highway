@@ -310,7 +310,6 @@ public class RegistryTests : IDisposable
         stats["kind"].Should().Be("channel");
         stats["groups"].Should().Be("1");
         stats["pending"].Should().Be("2");
-        stats["backlog"].Should().Be("0");
     }
 
     [Fact]
@@ -321,7 +320,6 @@ public class RegistryTests : IDisposable
         stats["kind"].Should().Be("channel", "an unregistered name falls through to the channel view");
         stats["groups"].Should().Be("0");
         stats["pending"].Should().Be("0");
-        stats["backlog"].Should().Be("0");
     }
 
     [Fact]

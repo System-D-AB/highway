@@ -107,25 +107,6 @@ public class PubSubFlowTests : IDisposable
         secondReceive.Should().BeEmpty();
     }
 
-    [Fact]
-    public void LateSubscriber_ReceivesBacklog()
-    {
-        const string channel = "late.channel";
-        const string group = "late-group";
-
-        // Publish with no groups registered → goes to backlog
-        _db.Execute("HW.PUBLISH", channel, "early-message");
-
-        // Now subscribe (late)
-        _db.Execute("HW.SUBSCRIBE", channel, group);
-
-        // Receive should get the backlog message
-        var result = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-        result.Should().HaveCount(1);
-
-        var pair = (RedisResult[])result[0]!;
-        ((string)pair[1]!).Should().Be("early-message");
-    }
 
     [Fact]
     public void MultiGroupFanOut_IndependentDelivery()
@@ -183,74 +164,6 @@ public class PubSubFlowTests : IDisposable
     // Feature 004.1 — Requirement 1: Idempotent re-subscribe
     // -------------------------------------------------------------------------
 
-    [Fact]
-    public void Resubscribe_SameGroup_DoesNotDuplicateBacklog()
-    {
-        const string channel = "resub.channel";
-        const string group = "resub-group";
 
-        // Publish with no groups registered → backlog
-        _db.Execute("HW.PUBLISH", channel, "msg-1");
-        _db.Execute("HW.PUBLISH", channel, "msg-2");
 
-        // First subscribe copies the backlog into the group queue
-        _db.Execute("HW.SUBSCRIBE", channel, group);
-        var first = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-        first.Should().HaveCount(2);
-
-        // Feature 005's engine sends HW.SUBSCRIBE on every start with group = NodeName.
-        // A second subscribe for the same group must be a no-op for the backlog.
-        var resub = _db.Execute("HW.SUBSCRIBE", channel, group);
-        resub.ToString().Should().Be("OK");
-
-        var second = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-        second.Should().BeEmpty(
-            "re-subscribing an already-registered group must not re-copy the backlog");
-    }
-
-    [Fact]
-    public void Unsubscribe_ThenResubscribe_ReceivesBacklogAgain()
-    {
-        const string channel = "resub-after-unsub.channel";
-        const string group = "resub-group-2";
-
-        _db.Execute("HW.PUBLISH", channel, "old-message");   // → backlog (zero groups)
-        _db.Execute("HW.SUBSCRIBE", channel, group);
-        var first = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-        first.Should().HaveCount(1);
-
-        // Unsubscribe deletes the group's queue; the backlog retains its entries
-        _db.Execute("HW.UNSUBSCRIBE", channel, group);
-        _db.Execute("HW.PUBLISH", channel, "new-message");   // zero groups again → backlog
-
-        // Re-subscribe is treated as a NEW group: it receives the retained backlog
-        _db.Execute("HW.SUBSCRIBE", channel, group);
-        var second = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-
-        var payloads = second
-            .Select(r => (string)((RedisResult[])r!)[1]!)
-            .ToList();
-        payloads.Should().BeEquivalentTo(["old-message", "new-message"],
-            "a group that unsubscribed and re-subscribed is new and receives the backlog again");
-    }
-
-    [Fact]
-    public void TwoGroups_EachReceiveBacklogOnce()
-    {
-        const string channel = "two-groups-backlog.channel";
-
-        _db.Execute("HW.PUBLISH", channel, "backlog-msg");   // → backlog
-
-        _db.Execute("HW.SUBSCRIBE", channel, "group-1");
-        _db.Execute("HW.SUBSCRIBE", channel, "group-2");
-
-        var r1 = (RedisResult[])_db.Execute("HW.RECEIVE", channel, "group-1", "COUNT", "10")!;
-        var r2 = (RedisResult[])_db.Execute("HW.RECEIVE", channel, "group-2", "COUNT", "10")!;
-
-        r1.Should().HaveCount(1, "each group receives the backlog exactly once");
-        r2.Should().HaveCount(1, "each group receives the backlog exactly once");
-
-        ((string)((RedisResult[])r1[0]!)[1]!).Should().Be("backlog-msg");
-        ((string)((RedisResult[])r2[0]!)[1]!).Should().Be("backlog-msg");
-    }
 }

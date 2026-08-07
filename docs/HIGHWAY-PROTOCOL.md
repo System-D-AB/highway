@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 2.2** — reflects everything shipped through features 012 and 014.
+**Protocol version 3.0** — reflects everything shipped through feature 014 and its follow-up.
 
 ## About
 
@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 2.2**
+**Current version: 3.0**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 3.0 | 014 follow-up | **The channel backlog is removed.** A publish with no registered group is delivered to nobody; `HW.SUBSCRIBE` copies nothing and a new group starts empty. `BacklogRetention`, `MaxBacklogEntries`, the `hw:ch:{channel}:backlog` key, its entry framing and the `backlog` field on `HW.STATS` are all gone. **Major**: it removes a documented guarantee. The capability moved rather than vanishing — "hold this until someone can handle it" is `HW.QSEND` and a queue, which is durable by design and has no surprising dependence on when the first subscriber started. Existing backlog data becomes unreachable; delete the data directory. |
 | 2.2 | 012 | **Security.** No command changes. `AUTH` joins the stock dependencies a client must issue against a secured server; the error contract gains a third class (`NOAUTH`, `WRONGPASS`, `NOPERM` — permanent, carrying neither existing marker); a section documents authentication, TLS and the `@dangerous` trap. Additive. |
 | 2.1 | 014 | **The queue.** Adds `HW.QSEND`, `HW.QCLAIM` and `HW.QACK` under a `hw:q:` key space, a `Q` target on `HW.DLQ`, a `Q:name` form on `HW.STATS`, and a `queues` list in the node catalog. Additive — no existing command, reply or key changed. A queue is RPC minus the reply and shares its lease sweep, so dead-lettering, deferred delivery and `[Idempotent]` all apply unchanged. |
 | 2.0 | 013 | Reliable delivery, parts 1 and 2. **Delayed delivery:** `HW.PUBLISH` gains an optional `AT <ticks>` argument (arity 3 → -3) and the `hw:ch:{channel}:delayed` sorted set; promotion is driven by `HW.RECEIVE`, not a timer. **Dead letters:** Adds a **delivery attempt count** to four entry framings and a `0xFF` version byte that makes pre-013 entries detectable; adds `HW.DLQ`, the dead-letter keys, the `HW_STORAGE_FORMAT` error, a `deadLettered` field on two `HW.STATS` forms, and two recorder event types. **Major** because the stored entry format changed: a broker started against a pre-013 data directory refuses to serve the affected queues rather than misparsing them. Nothing on the wire changed — no client needs modifying. |
@@ -66,7 +67,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.DEQUEUE` | 3 | 1 | Claim the next request for a node; sweeps expired leases and dead nodes |
 | `HW.ACK` | 4 | 1 | Acknowledge a claimed request |
 | `HW.PUBLISH` | -3 | 2 | Durable fan-out to every subscriber group, immediately or at a future time |
-| `HW.SUBSCRIBE` | 3 | 1 | Register a subscriber group and copy any backlog |
+| `HW.SUBSCRIBE` | 3 | 1 | Register a subscriber group |
 | `HW.UNSUBSCRIBE` | 3 | 1 | Remove a subscriber group and delete its state |
 | `HW.RECEIVE` | -3 | 1 | Consume a batch of messages for a group; promotes due delayed messages and sweeps expired leases |
 | `HW.RACK` | 4 | 1 | Acknowledge a consumed message |
@@ -340,8 +341,8 @@ Appends the message to every registered group's queue, atomically.
 | | |
 |---|---|
 | **Arguments** | `channel` — identifier. `payload` — opaque, up to `MaxPayloadBytes`. `AT <ticks>` — optional absolute delivery time, .NET UTC ticks. |
-| **Reply** | RESP integer: the number of groups the message reached. `0` means it went to the backlog, or that it is delayed and has reached none yet. |
-| **Keys written** | `hw:ch:{channel}:seq`, then every `hw:ch:{channel}:grp:{group}:q`, or `hw:ch:{channel}:backlog`, or — when `AT` is in the future — `hw:ch:{channel}:delayed` |
+| **Reply** | RESP integer: the number of groups the message reached. `0` means no group is registered, or that the message is deferred and has reached none yet. |
+| **Keys written** | `hw:ch:{channel}:seq`, then every `hw:ch:{channel}:grp:{group}:q`, or — when `AT` is in the future — `hw:ch:{channel}:delayed` |
 | **Doorbell** | `hw:door:ch:{channel}:grp:{group}` per group, payload = `messageId`. **None for a delayed publish**, which is in nobody's queue yet. |
 | **Idempotency** | **Not idempotent.** Repeating publishes a second message with a new ID. |
 
@@ -349,7 +350,9 @@ Fan-out is atomic: all groups receive the message or none do. There is no partia
 
 Each message gets a channel-unique `messageId` from an incrementing counter. It is returned by `HW.RECEIVE` and used to acknowledge with `HW.RACK`.
 
-**Zero groups → the backlog.** Publishing to a channel with no registered groups returns `0` and appends the message to a per-channel backlog, held for late subscribers. Backlog entries expire after `BacklogRetention` (default 1 day) and are capped at `MaxBacklogEntries` (default 10,000), oldest dropped first. Once at least one group exists, publishes go to group queues and the backlog is not used.
+**Zero groups → nobody.** Publishing to a channel with no registered groups returns `0` and the message is **not stored**. Publish means "tell everyone who is listening"; if nobody is, there is nothing to tell and nothing to keep.
+
+Highway previously held such messages in a per-channel backlog that a future subscriber inherited. That produced a surprising rule — a group registering later received an arbitrary prefix of history, determined by when the *first* subscriber happened to start — and it existed only because nothing else could hold a message until someone could handle it. `HW.QSEND` and a queue now can, and are durable by design. See [Queue Commands](#queue-commands).
 
 **On transient abort the message was not delivered at all.** See [Error Contract](#error-contract).
 
@@ -909,7 +912,6 @@ Every key Highway creates lives under the `hw:` namespace and cannot collide wit
 | `hw:ch:{channel}:groups` | Object | Set | Registered subscriber groups |
 | `hw:ch:{channel}:grplist` | Main | String | Newline-delimited mirror of the groups set |
 | `hw:ch:{channel}:seq` | Main | Integer | Message-ID counter |
-| `hw:ch:{channel}:backlog` | Object | List | Messages published with zero groups |
 | `hw:ch:{channel}:delayed` | Object | Sorted Set | Messages awaiting a future delivery time. Score = delivery time in .NET UTC ticks, member = the channel entry |
 | `hw:ch:{channel}:grp:{group}:q` | Object | List | Undelivered messages for one group |
 | `hw:ch:{channel}:grp:{group}:proc` | Object | List | Received, not yet acknowledged |
@@ -947,7 +949,6 @@ All multi-byte integers are **big-endian** (network byte order). All lengths are
 | Channel entry | `[u8 0xFF][u16 attempts][i64 messageId][payload]` |
 | Group processing entry | `[u8 0xFF][i64 receiveTicksUtc][u16 attempts][i64 messageId][payload]` |
 | Dead-letter entry | `[i64 deadLetteredTicksUtc][u16 attempts][u16 reasonLen][reason][original entry]` |
-| Backlog entry | `[i64 publishTicksUtc][i64 messageId][payload]` |
 | Registration record | `[i64 seenTicksUtc][catalog json bytes]` |
 
 ### The delivery attempt count
@@ -1059,8 +1060,6 @@ Options that change observable protocol behaviour. All are server-side.
 | `ReplySlotTtl` | 5 minutes | TTL on `hw:rep:{requestId}`. Should comfortably exceed the client's call timeout. |
 | `NodeExpiry` | 30 seconds | How long a registration stays valid without a beat. What matters is the **ratio** to the client's heartbeat interval; the defaults give 6×. Below about 3×, ordinary GC pauses cause false staleness. |
 | `PruningEnabled` | `true` | When `false`, stale nodes are still excluded from discovery but their state is never reclaimed, and their unacknowledged work is recovered only by the slower lease sweep. |
-| `BacklogRetention` | 1 day | How long backlog entries are offered to late subscribers. |
-| `MaxBacklogEntries` | 10,000 | Backlog cap; oldest dropped first. |
 | `ReceiveDefaultCount` | 10 | `HW.RECEIVE` `COUNT` when omitted. |
 | `ReceiveMaxCount` | 500 | Maximum accepted `COUNT`. Above → `HW_INVALID_COUNT`. Also caps `HW.DLQ` `COUNT`. |
 | `MaxDeliveryAttempts` | 5 | Deliveries before an entry is dead-lettered instead of requeued. `0` means unlimited, restoring the pre-013 behaviour in which a permanently failing message is redelivered forever. |

@@ -40,10 +40,6 @@ public class HighwayKeysTests
         => HighwayKeys.ChannelSeq("events").Should().Be("hw:ch:events:seq");
 
     [Fact]
-    public void ChannelBacklog_ProducesCorrectKey()
-        => HighwayKeys.ChannelBacklog("events").Should().Be("hw:ch:events:backlog");
-
-    [Fact]
     public void GroupQueue_ProducesCorrectKey()
         => HighwayKeys.GroupQueue("events", "grp-a").Should().Be("hw:ch:events:grp:grp-a:q");
 

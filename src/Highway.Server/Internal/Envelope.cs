@@ -13,7 +13,6 @@ namespace Highway.Server.Internal;
 /// RPC processing entry:     [u8 0xFF][i64 claimTicksUtc][u16 attempts][u16 requestIdLen][requestId][payload]
 /// Channel entry:            [u8 0xFF][u16 attempts][i64 messageId][payload]
 /// Group processing entry:   [u8 0xFF][i64 receiveTicksUtc][u16 attempts][i64 messageId][payload]
-/// Backlog entry:            [i64 publishTicksUtc][i64 messageId][payload]      (unversioned — see below)
 /// </code>
 ///
 /// <para><b>The attempt count</b> (feature 013) is what bounds redelivery. It is
@@ -35,11 +34,9 @@ namespace Highway.Server.Internal;
 ///   <item><description>legacy processing entry — high byte of a .NET tick count, currently 0x08</description></item>
 /// </list>
 ///
-/// <para><b>Backlog entries are deliberately unversioned and unchanged.</b> A backlog
-/// entry has never been delivered, so it has no attempt count to carry; it gains one
-/// (at zero) when promoted into a group queue. Leaving the format alone also means old
-/// backlog entries survive an upgrade and promote correctly, which is a smaller blast
-/// radius for no loss.</para>
+/// <para><b>Every entry format is now versioned.</b> The backlog was the last unversioned
+/// one, and it was removed with the backlog itself — a publish with no registered
+/// subscriber is delivered to nobody.</para>
 ///
 /// Encode methods return a freshly allocated <c>byte[]</c>.
 /// Decode methods work over a <see cref="ReadOnlySpan{T}"/> without allocation.
@@ -229,41 +226,6 @@ internal static class Envelope
         attempts  = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(1));
         messageId = BinaryPrimitives.ReadInt64BigEndian(data.Slice(3));
         payload   = data.Slice(ChannelHeader);
-    }
-
-    // -------------------------------------------------------------------------
-    // Backlog entry:  [i64 publishTicksUtc][i64 messageId][payload]
-    //
-    // Unversioned and unchanged — see the type remarks.
-    // -------------------------------------------------------------------------
-
-    /// <summary>Encodes a backlog entry.</summary>
-    public static byte[] EncodeBacklogEntry(
-        long publishTicks,
-        long messageId,
-        ReadOnlySpan<byte> payload)
-    {
-        var buf = new byte[8 + 8 + payload.Length];
-        BinaryPrimitives.WriteInt64BigEndian(buf, publishTicks);
-        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(8), messageId);
-        payload.CopyTo(buf.AsSpan(16));
-        return buf;
-    }
-
-    /// <summary>Decodes a backlog entry in place (zero allocation).</summary>
-    public static void DecodeBacklogEntry(
-        ReadOnlySpan<byte> data,
-        out long publishTicks,
-        out long messageId,
-        out ReadOnlySpan<byte> payload)
-    {
-        if (data.Length < 16)
-            throw new InvalidDataException(
-                $"Backlog entry too short ({data.Length} bytes); minimum is 16.");
-
-        publishTicks = BinaryPrimitives.ReadInt64BigEndian(data);
-        messageId    = BinaryPrimitives.ReadInt64BigEndian(data.Slice(8));
-        payload      = data.Slice(16);
     }
 
     // -------------------------------------------------------------------------

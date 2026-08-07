@@ -12,8 +12,9 @@ namespace Highway.Server.Commands;
 /// <summary>
 /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; → :groupCount
 ///
-/// Publishes a message to all subscriber groups atomically. If no groups are
-/// registered, the message is stored in the backlog for late subscribers.
+/// Publishes a message to all subscriber groups atomically. **A publish with no
+/// registered group is delivered to nobody** — Highway is not a store for messages
+/// nobody has subscribed to; that is what <c>SendAsync</c> and a queue are for.
 /// Each group's doorbell is rung in Finalize.
 /// </summary>
 internal sealed class HwPublishCommand : HighwayCommandBase
@@ -103,7 +104,6 @@ internal sealed class HwPublishCommand : HighwayCommandBase
         // Lock sequence counter, group list (main store), backlog, and all group queues
         AddKey(CreateArgSlice(HighwayKeys.ChannelSeq(_channel)), LockType.Exclusive, StoreType.Main);
         AddKey(grpListKey, LockType.Exclusive, StoreType.Main);
-        AddKey(CreateArgSlice(HighwayKeys.ChannelBacklog(_channel)), LockType.Exclusive, StoreType.Object);
 
         // Name-only derivation, so no Prepare-phase read and therefore no watch
         // conflict (004.1).
@@ -147,23 +147,15 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             }
             else if (_groups.Length == 0)
             {
-                // No active groups — write to backlog
-                var backlogKey = CreateArgSlice(HighwayKeys.ChannelBacklog(_channel));
-
-                // Purge retention-expired head entries
-                PurgeExpiredBacklogHead(api, backlogKey);
-
-                // Enforce entry cap — drop oldest if at limit
-                api.ListLength(backlogKey, out var backlogLen);
-                while (backlogLen >= _opts.MaxBacklogEntries)
-                {
-                    api.ListLeftPop(backlogKey, out _);
-                    backlogLen--;
-                }
-
-                var backlogEntry = Envelope.EncodeBacklogEntry(DateTime.UtcNow.Ticks, _messageId, _payloadBytes);
-                api.ListRightPush(backlogKey, CreateArgSlice(backlogEntry), out _);
-
+                // Nobody is subscribed, so the message is delivered to nobody. That is what
+                // "publish" means (feature 014 follow-up).
+                //
+                // Highway used to hold these in a per-channel backlog that a future
+                // subscriber inherited, which produced a surprising rule: a group
+                // registering later received an arbitrary prefix of history, determined by
+                // when the *first* subscriber happened to start. It existed because nothing
+                // else could hold a message until someone could handle it. SendAsync now
+                // can, and that is what a queue is for.
                 WriteInt64(ref output, 0L);
             }
             else
@@ -209,33 +201,6 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             _doorbell.Ring(HighwayKeys.GroupDoorbell(_channel!, group), msgIdBytes);
     }
 
-    private void PurgeExpiredBacklogHead<TGarnetApi>(TGarnetApi api, PinnedSpanByte backlogKey)
-        where TGarnetApi : IGarnetApi
-    {
-        if (_opts.BacklogRetention == TimeSpan.MaxValue) return;
-        var retentionCutoff = DateTime.UtcNow.Ticks - _opts.BacklogRetention.Ticks;
-
-        while (true)
-        {
-            api.ListLength(backlogKey, out var len);
-            if (len == 0) break;
-
-            var status = api.ListLeftPop(backlogKey, out var head);
-            if (status != GarnetStatus.OK || head.Length == 0) break;
-
-            var span = head.ReadOnlySpan;
-            if (span.Length >= 16)
-            {
-                Envelope.DecodeBacklogEntry(span, out var publishTicks, out _, out _);
-                if (publishTicks < retentionCutoff)
-                    continue; // expired — discard
-            }
-
-            // Not expired — push back to head and stop
-            api.ListLeftPush(backlogKey, CreateArgSlice(span.ToArray()), out _);
-            break;
-        }
-    }
 
     /// <summary>Writes a RESP integer (:N\r\n) to the output.</summary>
     private static void WriteInt64(ref MemoryResult<byte> output, long value)

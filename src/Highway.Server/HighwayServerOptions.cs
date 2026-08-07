@@ -191,18 +191,7 @@ public sealed class HighwayServerOptions
     /// </summary>
     public Security.TlsOptions Tls { get; set; } = new();
 
-    /// <summary>
-    /// How long a published message is kept in the backlog for late subscribers.
-    /// Default: 1 day.
-    /// </summary>
-    public TimeSpan BacklogRetention { get; set; } = TimeSpan.FromDays(1);
 
-    /// <summary>
-    /// Maximum number of entries in the per-channel backlog. When the cap is
-    /// reached the oldest entry is dropped and a warning is logged.
-    /// Default: 10,000.
-    /// </summary>
-    public int MaxBacklogEntries { get; set; } = 10_000;
 
     /// <summary>
     /// Default number of messages returned by <c>HW.RECEIVE</c> when no COUNT

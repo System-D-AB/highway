@@ -135,32 +135,9 @@ public class EnvelopeTests
     }
 
     // =========================================================================
-    // Backlog entry
     // =========================================================================
 
-    [Fact]
-    public void BacklogEntry_RoundTrip_PreservesAll()
-    {
-        var publishTicks = DateTime.UtcNow.Ticks;
-        const long messageId = 7L;
 
-        var encoded = Envelope.EncodeBacklogEntry(publishTicks, messageId, SamplePayload);
-        Envelope.DecodeBacklogEntry(encoded, out var pt, out var id, out var payload);
-
-        pt.Should().Be(publishTicks);
-        id.Should().Be(messageId);
-        payload.ToArray().Should().Equal(SamplePayload);
-    }
-
-    [Fact]
-    public void BacklogEntry_Truncated_ThrowsInvalidDataException()
-    {
-        var encoded = Envelope.EncodeBacklogEntry(1L, 2L, SamplePayload);
-        var truncated = encoded.AsSpan(0, 10).ToArray();
-
-        var act = () => Envelope.DecodeBacklogEntry(truncated, out _, out _, out _);
-        act.Should().Throw<InvalidDataException>();
-    }
 
     // =========================================================================
     // Group processing entry
@@ -216,11 +193,4 @@ public class EnvelopeTests
         encoded[3..11].Should().Equal(new byte[] { 0, 0, 0, 0, 0, 0, 0, 1 });
     }
 
-    [Fact]
-    public void BacklogEntry_PublishTicks_IsStoredBigEndian()
-    {
-        // publishTicks = 1 should appear as 00...01 in the leading 8 bytes.
-        var encoded = Envelope.EncodeBacklogEntry(1L, 2L, ReadOnlySpan<byte>.Empty);
-        encoded[0..8].Should().Equal(new byte[] { 0, 0, 0, 0, 0, 0, 0, 1 });
-    }
 }

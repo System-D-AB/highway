@@ -100,16 +100,6 @@ public sealed class HighwayServerBuilder
         return this;
     }
 
-    /// <summary>
-    /// Sets the backlog retention window and per-channel entry cap.
-    /// Default: 1 day, 10,000 entries.
-    /// </summary>
-    public HighwayServerBuilder WithBacklogRetention(TimeSpan retention, int maxEntries)
-    {
-        _opts.BacklogRetention  = retention;
-        _opts.MaxBacklogEntries = maxEntries;
-        return this;
-    }
 
     /// <summary>
     /// Sets the default and maximum count for HW.RECEIVE.

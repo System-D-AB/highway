@@ -56,27 +56,29 @@ public class PubSubIntegrationTests : IDisposable
         SubscriberRecorder.CountEntries("B:fanout-1").Should().Be(2);
     }
 
+    /// <summary>
+    /// <b>Behaviour change (feature 014 follow-up).</b> This test previously asserted that a
+    /// message published before any subscriber existed was delivered when one appeared —
+    /// the channel backlog. That backlog has been removed: a publish with no registered
+    /// group is delivered to nobody, which is what "publish" means.
+    ///
+    /// <para>The capability has not been lost, it has moved. "Hold this until someone can
+    /// handle it" is <c>SendAsync</c> and a queue, which is durable by design and has no
+    /// surprising dependence on when the first subscriber happened to start.</para>
+    /// </summary>
     [Fact]
-    public async Task Publish_BeforeAnyEngineStarts_DeliveredWhenSubscriberComesOnline()
+    public async Task Publish_BeforeAnySubscriberExists_ReachesNobody()
     {
-        // Product success criterion 2 through the client consumption path.
-        // The backlog is seeded over raw RESP with a valid envelope because a
-        // client-API publish requires a running engine — and any running engine
-        // already registers groups for this channel (assembly-wide scanning).
-        using (var raw = ConnectionMultiplexer.Connect(_server.ConnectionString))
-        {
-            var envelope = HighwayJson.EncodeEnvelope("seed-node", new ItEvent { Data = "held-until-online" });
-            var count = (int)raw.GetDatabase().Execute("HW.PUBLISH", "it.events", envelope)!;
-            count.Should().Be(0, "no groups are registered yet, so the message goes to the backlog");
-        }
+        var db = (await ConnectionMultiplexer.ConnectAsync(_server.ConnectionString)).GetDatabase();
 
-        // The subscriber now comes online; its engine subscribes and drains the backlog.
-        await StartNodeAsync("late-subscriber");
+        var groups = (long)(await db.ExecuteAsync("HW.PUBLISH", "orphan.ch", "nobody"u8.ToArray()));
+        groups.Should().Be(0, "no group is registered");
 
-        var delivered = await SubscriberRecorder.WaitForAsync(() =>
-            SubscriberRecorder.CountEntries("A:held-until-online") >= 1);
+        await db.ExecuteAsync("HW.SUBSCRIBE", "orphan.ch", "arrives-later");
 
-        delivered.Should().BeTrue("a message published with no online subscriber must be delivered once one starts");
+        var received = await db.ExecuteAsync("HW.RECEIVE", "orphan.ch", "arrives-later");
+        (received.IsNull || ((RedisResult[])received!).Length == 0)
+            .Should().BeTrue("a new group starts empty — use SendAsync when the work must wait");
     }
 
     /// <summary>
