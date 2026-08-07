@@ -1,6 +1,9 @@
+using System.Text;
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
+using Highway.Abstractions.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -14,17 +17,21 @@ namespace Highway.Server.Commands;
 internal sealed class HwAckCommand : HighwayCommandBase
 {
     private readonly HighwayServerOptions _opts;
+    private readonly FlightRecorder _recorder;
 
     private string _service = null!;
     private string _nodeId = null!;
     private byte[] _requestIdBytes = [];
 
-    public HwAckCommand(HighwayServerOptions opts)
+    public HwAckCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
         _opts = opts;
+        _recorder = recorder;
     }
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    protected override void ResetState() => _requestIdBytes = [];
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         int idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "service", _opts.MaxIdentifierBytes, out _service))
@@ -76,4 +83,11 @@ internal sealed class HwAckCommand : HighwayCommandBase
             WriteError(ref output, HighwayErrors.InternalError(ex.Message));
         }
     }
+
+    public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
+        => _recorder.Record(
+            HighwayEventType.RpcAcknowledged, _service ?? "?",
+            nodeId: _nodeId,
+            requestId: _requestIdBytes.Length > 0 ? Encoding.UTF8.GetString(_requestIdBytes) : null,
+            errorCode: FailureCode);
 }

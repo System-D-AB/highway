@@ -3,6 +3,8 @@ using System.Text;
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
+using Highway.Abstractions.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -17,17 +19,26 @@ namespace Highway.Server.Commands;
 internal sealed class HwReceiveCommand : HighwayCommandBase
 {
     private readonly HighwayServerOptions _opts;
+    private readonly FlightRecorder _recorder;
 
     private string _channel = null!;
     private string _group = null!;
     private int _count;
+    private int _receivedCount;
 
-    public HwReceiveCommand(HighwayServerOptions opts)
+    public HwReceiveCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
         _opts = opts;
+        _recorder = recorder;
     }
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    protected override void ResetState()
+    {
+        _receivedCount = 0;
+        _count = 0;
+    }
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         int idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "channel", _opts.MaxIdentifierBytes, out _channel))
@@ -167,6 +178,7 @@ internal sealed class HwReceiveCommand : HighwayCommandBase
                 results.Add([msgIdSlice, paySlice]);
             }
 
+            _receivedCount = results.Count;
             WriteMessageArray(ref output, results);
         }
         catch (Exception ex)
@@ -229,4 +241,15 @@ internal sealed class HwReceiveCommand : HighwayCommandBase
            && (span[2] == 'U' || span[2] == 'u')
            && (span[3] == 'N' || span[3] == 'n')
            && (span[4] == 'T' || span[4] == 't');
+
+    /// <summary>One event per batch, not per message: a batch of 500 is one operation.</summary>
+    public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
+    {
+        if (!Failed && _receivedCount == 0) return;
+        _recorder.Record(
+            HighwayEventType.MessagesReceived, _channel ?? "?",
+            nodeId: _group,
+            errorCode: FailureCode,
+            count: _receivedCount);
+    }
 }

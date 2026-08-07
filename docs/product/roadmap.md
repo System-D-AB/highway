@@ -113,7 +113,7 @@ Nodes register their catalog once and then prove liveness cheaply. The server ma
 
 ### 002 — Observability & Flight Recorder
 
-**Status:** Spec complete, implementation deferred
+**Status:** Complete
 
 Built-in observability with zero external infrastructure. Every operation is recorded in an in-memory flight recorder (1 GB ring buffer) with millisecond timestamps and full payloads. Simultaneously exports via OpenTelemetry for integration with external stacks.
 
@@ -156,9 +156,31 @@ any feature changing the protocol or public API must update and re-run them
 
 ---
 
-## Beyond v1 (Future)
+## Beyond v1: The Distributed Application Runtime
 
-These are explicitly out of scope for the initial release but documented for future planning:
+Highway is evolving from a messaging framework into a **distributed application runtime**. Because Highway.Server is a full Garnet instance, every node already has a persistent connection to a high-performance in-memory store. The runtime features expose this power through typed .NET APIs — zero additional infrastructure, zero additional connections.
+
+See `docs/product/runtime-vision.md` for the full design philosophy.
+
+### Phase 1: Runtime Primitives (v1.1)
+
+| Feature | API | Effort | Status |
+|---|---|---|---|
+| **Distributed Cache** | `IDistributedCache` (standard .NET) | Small | Planned |
+| **Distributed Locking** | `client.AcquireLockAsync(key, ttl)` | Small | Planned |
+| **Rate Limiting** | `client.CheckRateLimitAsync(key, limit, window)` | Small | Planned |
+| **Atomic Counters** | `client.IncrementAsync(key)` | Tiny | Planned |
+
+### Phase 2: Application Patterns (v1.2)
+
+| Feature | API | Effort | Status |
+|---|---|---|---|
+| **Delayed Messages** | `client.PublishDelayedAsync(msg, delay)` | Medium | Planned |
+| **Leader Election** | `[Singleton]` attribute on service | Medium | Planned |
+| **Shared Dictionary** | `client.GetDictionary<K,V>(name)` | Medium | Planned |
+| **Request Deduplication** | `[Idempotent(Window)]` attribute | Medium | Planned |
+
+### Phase 3: Advanced (v2.0)
 
 | Feature | Description |
 |---|---|
@@ -166,6 +188,5 @@ These are explicitly out of scope for the initial release but documented for fut
 | Transactional Outbox | Atomic DB write + message publish |
 | Full Dashboard | Rich web UI beyond the embedded control panel |
 | Clustering | Multi-server Highway.Server deployment |
-| Dead Letter Queues | Failed messages with retry policies |
-| Message Scheduling | Delayed delivery (publish at future time) |
-| Request Batching | Batch multiple RPC calls in one round-trip |
+| Content-Based Routing | `[Filter("...")]` on subscribers |
+| Dead Letter Queues | Failed messages with configurable retry policies |

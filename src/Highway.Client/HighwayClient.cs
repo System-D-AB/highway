@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Highway.Abstractions;
 using Highway.Client.Engine;
+using Highway.Client.Observability;
 using Highway.Client.Scanning;
 using Highway.Client.Wire;
 using Microsoft.Extensions.Logging;
@@ -91,10 +92,20 @@ internal sealed class HighwayClient : IHighwayClient
             }
         }
 
+        var requestIdForSpan = Guid.NewGuid().ToString("N");
+
+        // Span first, so the traceparent it establishes rides the envelope and
+        // the server-side span joins this trace. Null when nothing is listening.
+        using var activity = _options.ActivitiesEnabled
+            ? HighwayActivity.StartCall(serviceName, requestIdForSpan, _options.NodeName)
+            : null;
+
         byte[] envelope;
         try
         {
-            envelope = HighwayJson.EncodeEnvelope(_options.NodeName, request);
+            envelope = HighwayJson.EncodeEnvelope(
+                _options.NodeName, request,
+                _options.ActivitiesEnabled ? HighwayActivity.CurrentTraceParent() : null);
         }
         catch (JsonException ex)
         {
@@ -114,7 +125,7 @@ internal sealed class HighwayClient : IHighwayClient
                 $"The request envelope is {envelope.Length} bytes, exceeding the maximum of {MaxPayloadBytes} bytes."));
         }
 
-        var requestId = Guid.NewGuid().ToString("N");
+        var requestId = requestIdForSpan;
         var responseTask = pending.Register(requestId, responseType, _options.CallTimeout, ct);
 
         try
@@ -139,7 +150,9 @@ internal sealed class HighwayClient : IHighwayClient
         // OperationCanceledException propagates: the registry's linked token also
         // cancels the pending entry, so nothing leaks.
 
-        return Cast<TResponse>(await responseTask.ConfigureAwait(false));
+        var response = await responseTask.ConfigureAwait(false);
+        HighwayActivity.SetOutcome(activity, response.StatusCode, response.Error?.Code);
+        return Cast<TResponse>(response);
     }
 
     public async Task PublishAsync(IPublish message, CancellationToken ct = default)
@@ -154,10 +167,16 @@ internal sealed class HighwayClient : IHighwayClient
         if (channelName is null)
             throw new ChannelNotRegisteredException(message.GetType());
 
+        using var activity = _options.ActivitiesEnabled
+            ? HighwayActivity.StartPublish(channelName, _options.NodeName)
+            : null;
+
         byte[] envelope;
         try
         {
-            envelope = HighwayJson.EncodeEnvelope(_options.NodeName, message);
+            envelope = HighwayJson.EncodeEnvelope(
+                _options.NodeName, message,
+                _options.ActivitiesEnabled ? HighwayActivity.CurrentTraceParent() : null);
         }
         catch (JsonException ex)
         {

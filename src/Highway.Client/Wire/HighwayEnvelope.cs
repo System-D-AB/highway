@@ -20,6 +20,14 @@ internal sealed class HighwayEnvelope
 
     /// <summary>The DTO's own JSON, embedded as a nested object.</summary>
     public required JsonElement Body { get; init; }
+
+    /// <summary>
+    /// Optional W3C traceparent (feature 002), so a server-side span joins the
+    /// caller's trace. Absent when nothing is being traced. Adding it did not
+    /// change the envelope version: readers ignore properties they do not
+    /// recognise, verified in both directions.
+    /// </summary>
+    public string? TraceParent { get; init; }
 }
 
 /// <summary>
@@ -35,7 +43,7 @@ internal static class HighwayJson
     };
 
     /// <summary>Serializes a DTO into a wire envelope.</summary>
-    public static byte[] EncodeEnvelope(string srcNodeId, object? body)
+    public static byte[] EncodeEnvelope(string srcNodeId, object? body, string? traceParent = null)
     {
         var envelope = new System.Text.Json.Nodes.JsonObject
         {
@@ -44,6 +52,12 @@ internal static class HighwayJson
             ["ts"] = DateTime.UtcNow.ToString("O"),
             ["body"] = JsonSerializer.SerializeToNode(body, SerializerOptions),
         };
+
+        // Only present when something is actually being traced, so an untraced
+        // system pays nothing for the field.
+        if (traceParent is not null)
+            envelope["tp"] = traceParent;
+
         return JsonSerializer.SerializeToUtf8Bytes(envelope, SerializerOptions);
     }
 
@@ -72,6 +86,9 @@ internal static class HighwayJson
             Src = root.TryGetProperty("src", out var src) && src.ValueKind == JsonValueKind.String ? src.GetString() ?? "" : "",
             Ts = root.TryGetProperty("ts", out var ts) && ts.ValueKind == JsonValueKind.String ? ts.GetString() ?? "" : "",
             Body = body.Clone(), // Clone: the JsonDocument is disposed when this method returns
+            TraceParent = root.TryGetProperty("tp", out var tp) && tp.ValueKind == JsonValueKind.String
+                ? tp.GetString()
+                : null,
         };
     }
 

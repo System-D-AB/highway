@@ -1,253 +1,344 @@
 # Tasks: Observability & Flight Recorder
 
+> **Ordering note:** Two spikes come first, because both settle questions that would otherwise be discovered mid-implementation — where trace context lives, and what recording actually costs between commit and reply. Tasks 3–7 build the recorder bottom-up so each layer is tested before the next depends on it. Task 8 is the point of no return: wiring every command. Tasks 12–14 discharge the protocol and samples obligations, which are enforced.
+
 ## Task Dependency Graph
 
 ```
-T1 (Event schema in Abstractions)
-T2 (Observability config types) → depends on T1
-T3 (EventEmitter interface) → depends on T1
-T4 (Flight Recorder writer) → depends on T1, T2, T3
-T5 (Flight Recorder reader / HW.REPLAY) → depends on T4
-T6 (Flight Recorder evictor) → depends on T4
-T7 (Flight Recorder metrics / HW.STATS RECORDER) → depends on T4
-T8 (OpenTelemetry span emitter) → depends on T1, T3
-T9 (Server integration — hook into HW.* commands) → depends on T4, T8
-T10 (Client-side span emission) → depends on T8
-T11 (Configuration API — server) → depends on T2, T4, T8
-T12 (Configuration API — client) → depends on T2, T10
-T13 (Integration tests) → depends on all above
+T1  (Spike: trace-context propagation)              [independent]
+T2  (Spike: write-path cost)                        [independent]
+T3  (Event schema + capture mode in Abstractions)   [independent]
+T4  (NameBuffer)                          → T3
+T5  (FlightRecorder + metrics)            → T4
+T6  (Sweeper + lifecycle)                 → T5
+T7  (Server options + validation)         → T5
+T8  (Wire recording into every command)   → T5, T7, T2
+T9  (HW.REPLAY)                           → T5, T7
+T10 (HW.STATS RECORDER form)              → T5
+T11 (Activity emission, client + server)  → T1, T7
+T12 (Protocol file update)                → T9, T10, T11
+T13 (Samples: replay command + OTEL wiring) → T9, T11, T12
+T14 (Full verification + RUNLOG)          → all
 ```
 
 ## Tasks
 
-- [ ] ### Task 1: Define Event Schema in Highway.Abstractions
+- [x] ### Task 1: Spike — Trace-Context Propagation
 
-**Fulfills:** Requirement 7
+**Fulfills:** de-risks Requirement 8 (AC5)
+
+> Settled before anything is built on it, because the likely answer changes the envelope — and the envelope is protocol.
 
 **Steps:**
-1. Create `src/Highway.Abstractions/Observability/HighwayEvent.cs` with the full event type
-2. Create `src/Highway.Abstractions/Observability/HighwayEventType.cs` enum
-3. Create `src/Highway.Abstractions/Observability/EventDirection.cs` enum
-4. Ensure types are serializable with System.Text.Json (public properties, init setters)
-5. Add `SchemaVersion` field (default 1)
+1. Determine how a W3C `traceparent` travels from caller to server. The envelope (`v`, `src`, `ts`, `body`) is the natural carrier; confirm whether adding an optional field is compatible with the existing reader, which rejects unknown versions but may tolerate unknown fields
+2. Verify empirically against a running engine: an old reader must not reject a new envelope, or the compatibility rule must be defined
+3. Decide whether the envelope version increments, and what a reader that does not understand the field must do
+4. Confirm `Activity.Current` flows correctly across the client's `Task.Run` boundaries in `RpcWorkerLoop` — the execution context should carry it, but async boundaries are exactly where trace context is lost in practice
+5. Record the outcome in `design.md` § "Activity Emission", replacing the open question with the decision
 
 **Done criteria:**
-- Types compile with zero dependencies
-- Can round-trip serialize/deserialize with System.Text.Json
-- Unit tests validate serialization
+- The propagation mechanism is decided and its compatibility rule written down; no later task has to guess
 
 ---
 
-- [ ] ### Task 2: Define Observability Configuration Types
+- [x] ### Task 2: Spike — What Recording Costs Between Commit and Reply
 
-**Fulfills:** Requirement 6
+**Fulfills:** de-risks Requirement 2 (AC3), design § "Risks" row 1
 
 **Steps:**
-1. Create `src/Highway.Abstractions/Observability/PayloadCapture.cs` enum (Full, HeadersOnly, Off)
-2. Create `src/Highway.Abstractions/Observability/FlightRecorderOptions.cs`
-3. Create `src/Highway.Abstractions/Observability/OpenTelemetryOptions.cs`
-4. Create `src/Highway.Abstractions/Observability/ObservabilityOptions.cs` (combines both)
-5. Create `src/Highway.Abstractions/Observability/ServiceObservabilityOverride.cs`
+1. Build a throwaway `NameBuffer` and measure an append: allocation, lock contention, and elapsed time under concurrent writers on the same name
+2. Confirm the write path can hold to "one in-memory append, no serialization, no payload copy" — or find out now that it cannot
+3. Measure the same append when the name is disabled, confirming the claimed zero cost
+4. Record the measurement in `design.md`. State it as a measurement with its method, **not** as a target — Highway claims no performance figures, and this feature does not start
 
 **Done criteria:**
-- All options have sensible defaults documented in XML comments
-- Configuration types are in Abstractions (no external dependencies)
-- Validation logic for invalid values (negative retention, memory > 0)
+- The write-path shape is validated by measurement before eleven command handlers depend on it; throwaway code removed
 
 ---
 
-- [ ] ### Task 3: Define EventEmitter Interface
+- [x] ### Task 3: Event Schema and Capture Mode
 
-**Fulfills:** Requirement 1 (abstraction layer)
+**Fulfills:** Requirement 6 (all), Requirement 4 (AC1)
 
 **Steps:**
-1. Create `src/Highway.Abstractions/Observability/IEventEmitter.cs`
-2. Interface: `Task EmitAsync(HighwayEvent event, CancellationToken ct)`
-3. Create `src/Highway.Abstractions/Observability/NullEventEmitter.cs` (no-op implementation for local-only mode)
+1. Create `src/Highway.Abstractions/Observability/HighwayEvent.cs` per design § "Event Shape"
+2. **Identifiers must match the protocol**: `RequestId` is a `string?`, `MessageId` is a `long?`. The previous spec typed both as `Guid`; a request ID is an opaque identifier and a message ID is a channel sequence number
+3. Include `ErrorCode` alongside `StatusCode` — a command rejected in validation produces no `Output`, so without it the recorder cannot represent the failures it exists to show
+4. Create `HighwayEventType` covering the events in design § "Which Commands Produce Which Events", with XML docs naming the producing command for each
+5. Create `PayloadCapture` (`Full`, `HeadersOnly`, `Off`) with the `Full` default's consequence documented
+6. Unit tests: `System.Text.Json` round trip, including null payload and null identifiers
 
 **Done criteria:**
-- Interface defined in Abstractions
-- Null implementation available for testing and local-only mode
+- Public schema in Abstractions with zero new dependencies; identifiers match the wire protocol
 
 ---
 
-- [ ] ### Task 4: Implement Flight Recorder Writer
+- [x] ### Task 4: NameBuffer
 
-**Fulfills:** Requirement 1, 3
+**Fulfills:** Requirement 3 (AC1–AC4), Requirement 4 (AC2–AC4)
 
 **Steps:**
-1. Create `src/Highway.Server/Observability/FlightRecorderWriter.cs`
-2. Implements `IEventEmitter` — writes events to Garnet using bucketed keys
-3. Respects `PayloadCapture` mode — strips payload when mode is HeadersOnly/Off
-4. Tracks memory usage in `hw:fdr:meta` hash
-5. Uses pooled serialization buffers (ArrayPool)
-6. Fires asynchronously — never blocks command handlers
+1. Create `src/Highway.Server/Observability/NameBuffer.cs`: fixed-capacity circular buffer of `HighwayEvent`, its own lock, incremental byte accounting
+2. Append drops the oldest when full and increments a capacity-drop counter — writes are never rejected and never block
+3. Reads apply retention, so a stale event is never returned merely because the sweeper has not run. Retention is correctness at read; the sweep only reclaims memory
+4. Apply capture mode at append: `Full` holds the existing payload reference, `HeadersOnly` records size and drops the reference, `Off` never reaches a buffer at all
+5. Unit tests in `tests/Highway.Server.Tests/NameBufferTests.cs`: chronological ordering, wraparound, capacity eviction, retention boundary, byte accounting, drop counters, concurrent appends
 
 **Done criteria:**
-- Events written to correct bucket keys
-- Payload stripping works per capture mode
-- Memory tracking is accurate
-- Unit tests with mocked Garnet connection
+- One name's history behaves correctly in isolation, under concurrency, with tests for every eviction path
 
 ---
 
-- [ ] ### Task 5: Implement Flight Recorder Reader (HW.REPLAY)
+- [x] ### Task 5: FlightRecorder and Metrics
 
-**Fulfills:** Requirement 4
+**Fulfills:** Requirement 1 (AC1–AC5), Requirement 2 (AC7), Requirement 3 (AC5–AC6), Requirement 7 (AC1, AC3, AC5)
 
 **Steps:**
-1. Create `src/Highway.Server/Observability/FlightRecorderReader.cs`
-2. Implement `HW.REPLAY` command parsing (name, FROM, TO, LIMIT, NODE)
-3. Support relative timestamps (FROM -5min, FROM -1h)
-4. Query by time-bucket range, filter, sort, limit
-5. Return events as RESP array
+1. Create `FlightRecorder.cs`: `ConcurrentDictionary<string, NameBuffer>`, resolving per-name capacity, retention and capture on first use
+2. A name configured `Off` (or zero capacity/retention) gets **no buffer**, so recording it costs a dictionary miss and nothing else
+3. `Record(...)` **never throws**. Wrap in try/catch, count the failure, swallow it — an operation must not fail because recording did (Requirement 2 AC7)
+4. Create `RecorderMetrics.cs`: names, events, approximate bytes, `droppedCapacity`, `droppedBudget`, `failures` — all cumulative since start
+5. When disabled, the recorder allocates nothing and metrics report the disabled state rather than erroring
+6. Unit tests: per-name isolation under flood (one name's writes must not evict another's), disabled-name cost, a deliberately throwing append caught and counted
 
 **Done criteria:**
-- HW.REPLAY returns correct events for time range
-- NODE filter works
-- LIMIT works
-- Relative timestamps parse correctly
-- Completes within 50ms for < 1000 results (benchmark test)
+- Recording is isolated per name and provably cannot fail an operation
 
 ---
 
-- [ ] ### Task 6: Implement Flight Recorder Evictor
+- [x] ### Task 6: Sweeper and Lifecycle
 
-**Fulfills:** Requirement 1 (memory cap), Requirement 2 (retention)
+**Fulfills:** Requirement 3 (AC4, AC6–AC7), Requirement 1 (AC5)
 
 **Steps:**
-1. Create `src/Highway.Server/Observability/FlightRecorderEvictor.cs`
-2. Background service (IHostedService) that runs every 10 seconds
-3. Evicts buckets older than retention period
-4. Evicts oldest buckets when memory exceeds 90% of MaxMemory (down to 80%)
-5. Removes corresponding index entries when evicting
+1. Create `RecorderSweeper.cs`: a timer owned by `FlightRecorder`, reclaiming retention-expired events and enforcing the global byte budget by trimming the largest buffers first
+2. **`HighwayServer` has no host and no `IHostedService`** — the previous spec assumed one. Own the timer explicitly and dispose it with the server; verify no timer survives `HighwayServer.Dispose()`
+3. Budget-driven reclamation increments `droppedBudget`, so an operator can distinguish "buffer full" from "server-wide budget hit"
+4. Sweeping never blocks a command: it takes per-buffer locks briefly and independently, never a global lock
+5. Unit tests with injected time where practical: retention reclamation, budget trimming order, idle sweep costs nothing, a throwing sweep iteration does not stop the timer
 
 **Done criteria:**
-- Memory stays below configured max under sustained write load
-- Retention-based eviction removes old data correctly
-- Does not interfere with write path performance
-- Unit tests with simulated time
+- Memory stays inside the budget under sustained load; no timer leaks past disposal
 
 ---
 
-- [ ] ### Task 7: Implement Flight Recorder Metrics (HW.STATS RECORDER)
+- [x] ### Task 7: Server Options and Validation
 
-**Fulfills:** Requirement 8
+**Fulfills:** Requirement 9 (AC1–AC2, AC4–AC6), Requirement 4 (AC5–AC7)
 
 **Steps:**
-1. Create `src/Highway.Server/Observability/FlightRecorderMetrics.cs`
-2. Track: current memory, total events, write rate (rolling 10s window), eviction rate
-3. Implement `HW.STATS RECORDER` command that returns these metrics
-4. Expose as OTEL metrics (gauges/counters) when OTEL is enabled
+1. Extend `HighwayServerOptions` per design § "Configuration": recorder enabled, default capacity/retention/capture, `MaxBytes`, per-name overrides, `ReplayEnabled`, `ActivitiesEnabled`
+2. Add `WithObservability(...)` to `HighwayServerBuilder`, consistent with the existing `With*` methods
+3. Validate at `Build()` with messages naming the offending value, matching the established pattern
+4. XML-document every default, and for `Full` capture document the consequence: payload content sits in memory readable by anyone who can issue `HW.REPLAY`, and Highway has no authentication
+5. Unit tests: defaults, every validation rule, per-name override resolution beating the global default
 
 **Done criteria:**
-- HW.STATS RECORDER returns accurate metrics
-- Write rate calculation is correct over rolling window
-- Integration test validates metrics after known write load
+- Zero configuration yields a useful recorder; every invalid value fails fast with a descriptive message
 
 ---
 
-- [ ] ### Task 8: Implement OpenTelemetry Span Emitter
+- [x] ### Task 8: Wire Recording Into Every Command
 
-**Fulfills:** Requirement 5
+**Fulfills:** Requirement 1 (AC3), Requirement 2 (all), Requirement 12 (AC3–AC5)
 
 **Steps:**
-1. Add OpenTelemetry packages to Highway.Server and Highway.Client
-2. Create `src/Highway.Server/Observability/OtelSpanEmitter.cs` implementing `IEventEmitter`
-3. Create Activity/Span per event following OTEL messaging semantic conventions
-4. Set attributes: messaging.system=highway, messaging.destination.name, messaging.message.id, etc.
-5. Support trace context propagation (caller → server → handler)
-6. Configurable payload inclusion in spans
+1. Pass the recorder to commands the way `DoorbellBridge` already is, through the registration table in `HighwayServer.CommandTable`
+2. Add one `Record(...)` call in each command's `Finalize`, per the table in design § "Which Commands Produce Which Events"
+3. **Record failures too.** The existing `if (Failed) return;` guard in `Finalize` exists to suppress doorbells; recording must happen on the failure path as well, carrying the 004.1 error code. Do not reuse that guard for recording
+4. **Do not record**: liveness heartbeats (every 5s per node is noise that would evict real history), or the read-only commands `HW.DISCOVER`, `HW.STATS`, `HW.REPLAY`
+5. `HW.RECEIVE` records one event per batch, not per message
+6. Hold the payload reference the command already owns; introduce no copy
+7. Verify **no AOF growth**: recording writes nothing to the keyspace. Confirm by comparing data-directory size across a recorded workload, and confirm the 004 durability tests still pass (Requirement 12 AC4–AC5)
+8. Run the full suite after wiring each group of commands, not once at the end
 
 **Done criteria:**
-- Spans created with correct attributes
-- Trace context propagates across RPC calls
-- Pub/sub creates linked producer/consumer spans
-- No-op when no OTLP endpoint configured (zero overhead)
+- Every recordable operation produces an event; failures are recorded with their error codes; no existing command's behaviour, reply or AOF footprint changes
 
 ---
 
-- [ ] ### Task 9: Server Integration — Hook into HW.* Commands
+- [x] ### Task 9: HW.REPLAY
 
-**Fulfills:** Requirement 1
+**Fulfills:** Requirement 5 (all)
 
 **Steps:**
-1. Modify each HW.* command handler to call `IEventEmitter.EmitAsync()` after business logic completes
-2. Ensure emit happens AFTER response is sent to client (non-blocking)
-3. Wire up composite emitter that fans out to both FlightRecorderWriter and OtelSpanEmitter
-4. Handle emit failures gracefully (log, never crash)
+1. Create `HwReplayCommand : HighwayCommandBase`, arity `-2`, inheriting identifier validation
+2. Parse `FROM` / `TO` (absolute ISO-8601 and relative `-5min` / `-1h` / `-30s`), `LIMIT`, `NODE`; reject invalid values with the 004.1 codes — `HW_INVALID_COUNT` for `LIMIT`, `HW_INVALID_ARG` otherwise
+3. Unknown name or empty range returns an **empty array**, never an error, matching `HW.DISCOVER`
+4. Reply as a flat field/value array per event, the same self-describing shape `HW.STATS` uses, so fields can be appended later. `payloadSize` is present even when `payload` is null
+5. Lock no keys — the recorder is not in the keyspace, so this is genuinely read-only with respect to Garnet
+6. Honour `ReplayEnabled = false` with a clear, documented refusal
+7. Register in `CommandTable`. **The conformance test will fail until Task 12 documents it** — that is the gate working, not a problem
+8. Unit tests for argument parsing; integration tests for round trip, filters, and empty results
 
 **Done criteria:**
-- Every HW.* operation produces events in both flight recorder and OTEL
-- Business operation latency is not affected by recording (benchmark test)
-- Emit failures don't crash the server
+- An operator can ask what happened to a service and get an ordered answer; every rejection path uses the established error contract
 
 ---
 
-- [ ] ### Task 10: Client-Side Span Emission
+- [x] ### Task 10: HW.STATS RECORDER Form
 
-**Fulfills:** Requirement 5 (client-side spans)
+**Fulfills:** Requirement 7 (AC1–AC2, AC4–AC5)
 
 **Steps:**
-1. Create `src/Highway.Client/Observability/ClientSpanEmitter.cs`
-2. Wrap `ExecuteAsync` and `PublishAsync` with Activity/Span
-3. Propagate trace context to server via request metadata
-4. Measure call duration from client perspective
+1. Extend `HwStatsCommand` with a fourth form matching the reserved name `RECORDER`, case-insensitively, taking priority over a service or channel of that name
+2. Reply with the **same flat field/value shape and `kind` discriminator** as the existing three forms — this is a fourth form of one command, not a new shape
+3. Report enabled state, names, events, bytes, `droppedCapacity`, `droppedBudget`, `failures`
+4. Answer correctly when the recorder is disabled rather than erroring
+5. Document the name-resolution priority alongside the existing service-versus-channel rule
+6. Integration tests: counters after a known workload, drop counters after a deliberate overflow, disabled-state reply
 
 **Done criteria:**
-- Client-side spans appear in OTEL traces
-- Trace context is propagated to server (linked spans)
-- Can be disabled via configuration
+- Recorder health is visible from `redis-cli` with no tooling, in the shape operators already know
 
 ---
 
-- [ ] ### Task 11: Server Configuration API
+- [x] ### Task 11: Activity Emission
 
-**Fulfills:** Requirement 6
+**Fulfills:** Requirement 8 (all), Requirement 9 (AC3)
 
 **Steps:**
-1. Create `HighwayServerBuilder.WithObservability(Action<ObservabilityOptions>)` extension
-2. Wire FlightRecorderOptions → FlightRecorderWriter/Evictor
-3. Wire OpenTelemetryOptions → OtelSpanEmitter + OTLP exporter
-4. Validate configuration at startup (throw on invalid values)
+1. Create an `ActivitySource` in each of `Highway.Client` and `Highway.Server`, with documented source names
+2. **Add no OpenTelemetry package to either project.** `ActivitySource` is in-box; the application wires OTEL and subscribes to the sources
+3. Client: wrap `ExecuteAsync` and `PublishAsync`. Server: emit around command execution with name, node, identifier and outcome
+4. Propagate trace context per the Task 1 decision
+5. Guard every emission with `ActivitySource.HasListeners()`; materialise nothing for a span nobody collects
+6. Follow OTEL messaging semantic conventions, and record the attribute mapping for Task 12
+7. **Never put payload content on an activity.** Spans leave the process for third-party systems; message bodies must not ride along by default
+8. Honour `ActivitiesEnabled` on both sides
+9. Tests use an in-process `ActivityListener` — no OpenTelemetry dependency in the test project either
 
 **Done criteria:**
-- Configuration flows from builder to all observability components
-- Invalid config throws descriptive exceptions
-- Defaults work with zero configuration
+- Traces appear in any OTEL pipeline the application configures, with Highway depending on no telemetry package
 
 ---
 
-- [ ] ### Task 12: Client Configuration API
+- [x] ### Task 12: Update the Protocol File
 
-**Fulfills:** Requirement 6
+**Fulfills:** Requirement 10 (AC1–AC2)
 
 **Steps:**
-1. Add `ObservabilityOptions` to `HighwayOptions`
-2. Wire `EmitClientSpans` flag to ClientSpanEmitter
-3. Defaults: client spans enabled
+1. Add `HW.REPLAY` to the Command Index with its arity — the conformance test fails until this lands, which is the mechanism working
+2. Document `HW.REPLAY` fully in a new section: all arguments, both timestamp forms, the reply shape, every error code, and that it is read-only
+3. Document the `RECORDER` form alongside the existing `HW.STATS` forms, including name-resolution priority
+4. Document the event field/value shape and every field, noting that `payload` is null unless captured under `Full`
+5. Document the `ActivitySource` names and the OTEL attribute mapping — a non-.NET client cannot infer either
+6. If Task 1 changed the envelope, document the new field and its compatibility rule in § "Transport & Framing"
+7. Bump the protocol version and add a changelog row naming this feature
+8. State that the flight recorder is **volatile**, so nobody mistakes it for a durable audit log
 
 **Done criteria:**
-- Client observability configurable via `HighwayOptions.Observability`
-- Disabled spans produce zero overhead
+- `ProtocolConformanceTests` passes; a client implementer can use `HW.REPLAY` from the protocol file alone
 
 ---
 
-- [ ] ### Task 13: Integration Tests
+- [x] ### Task 13: Samples
 
-**Fulfills:** All requirements
+**Fulfills:** Requirement 10 (AC3–AC6)
 
 **Steps:**
-1. Test: Perform RPC call → verify event appears in HW.REPLAY output
-2. Test: Perform publish → verify event in flight recorder with correct subscriber count
-3. Test: Fill buffer beyond MaxMemory → verify oldest events evicted
-4. Test: Set retention → verify events expire after retention period
-5. Test: PayloadCapture.Off → verify no payload in recorded events
-6. Test: PayloadCapture.HeadersOnly → verify metadata present, payload null
-7. Test: HW.STATS RECORDER returns correct metrics
-8. Test: OTEL spans emitted (using in-memory exporter for testing)
+1. Add a `replay [name]` command to the storefront, printing recent events for a service — demonstrating the recorder rather than describing it
+2. Extend the storefront's `stats` command, or add `stats recorder`, to show recorder health
+3. Add the application-side OpenTelemetry wiring to the broker sample. A commented block is acceptable if adding the packages would burden the sample, but the wiring must be concrete enough to copy — "bring your own OTEL" is only friendly if the wiring is shown
+4. **Re-run the samples** as three real processes and walk every scenario in `samples/README.md`, plus the new ones
+5. Add a `samples/RUNLOG.md` entry: date, what was run, what was found, what was done
+6. Any defect the run exposes is fixed **in the library** with a regression test, never worked around in the sample
+7. Update `samples/README.md` with the new commands and their real output
 
 **Done criteria:**
-- All integration tests pass with embedded Highway.Server
-- Tests run with no external infrastructure
-- Tests validate both flight recorder and OTEL layers
+- The flight recorder is demonstrable in under a minute by someone who has never seen it; the RUNLOG has a new entry
+
+---
+
+- [x] ### Task 14: Full Verification
+
+**Fulfills:** Requirement 11 (AC3–AC10), Requirement 12 (all)
+
+**Steps:**
+1. `dotnet build Highway.slnx` — zero warnings, zero errors
+2. `dotnet test Highway.slnx` — all 448 pre-existing tests pass plus the new ones
+3. Run the integration suite a second time to catch parallelism flakiness, per established practice
+4. Confirm the non-obvious guarantees have tests that would actually fail if broken: per-name isolation under flood, recording failure not propagating, `Off`/`HeadersOnly` retaining no content, failed operations recorded with error codes, no AOF growth
+5. Confirm `ProtocolConformanceTests` passes and the protocol file describes what shipped
+6. Re-read the protocol file's new sections against the implementation one final time — the document's whole value is being right, and 007's final read-through caught an error the conformance test could not
+7. Update `docs/product/roadmap.md`: 002 complete, and note that v1 is feature-complete
+8. Update `docs/product/product.md`'s status table — G8 moves from "Not built" to shipped, with the volatility caveat stated
+9. Record the final test count and any finding below
+
+**Done criteria:**
+- Green build, green suite twice, protocol file true, samples re-run, and every product-doc status claim matching reality
+
+**Result:** Green build (0 warnings), full suite green.
+
+| Project | Before 002 | After 002 |
+|---|---|---|
+| Highway.Abstractions.Tests | 2 | 2 |
+| Highway.Client.Tests | 166 | 166 |
+| Highway.Server.Tests | 107 | 148 |
+| Highway.Integration.Tests | 173 | 202 |
+| **Total** | **448** | **518** |
+
+Seventy new tests. No new package references on any project.
+
+---
+
+## Completion Record
+
+Full findings in [`samples/RUNLOG.md`](../../../samples/RUNLOG.md) (2026-08-07, feature 002).
+
+### The three contradictions the rewrite resolved held up
+
+Storing events **in process memory rather than the Garnet keyspace** removed the
+AOF-replay problem, the store contention, and the write amplification in one
+move — and made per-name retention possible at all. Verified by
+`Recording_AddsNoKeysToTheStore`.
+
+Recording in **`Finalize`** works exactly as reasoned: after commit, before the
+reply, and skipped during AOF replay. The spec's honesty that "after the reply is
+sent" is impossible saved the implementation from chasing a hook that does not
+exist.
+
+**Per-name buffers** deliver the isolation they were chosen for:
+`OneNameFlooding_DoesNotEvictAnother` floods one name with 5,000 events and the
+quiet name keeps its single important one.
+
+### The recorder found a bug in Highway on its first real use
+
+The sample showed **two** `RpcClaimed` events for one order. Chasing it uncovered
+something far worse: Garnet caches one procedure instance per session, and
+`HighwayCommandBase` never cleared its captured validation error — so **a single
+rejection made every later invocation of that command on that connection return
+the previous call's error**. Since the 005 client shares one multiplexer per node,
+one oversize payload would have broken that command for the whole node.
+
+Fixed by sealing `Prepare` so it clears state and delegates to `PrepareCore`,
+with a `ResetState()` hook for command-specific fields. Sealing makes the class
+of bug structurally impossible rather than fixed once.
+`SessionStateIsolationTests` covers it.
+
+### A 004.1 finding was wrong, and is now corrected
+
+Feature 004.1 attributed a session desync to an upstream Garnet parser quirk and
+asserted the broken behaviour in `NewlineDesyncProbe`. Fixing the state leak made
+that test fail — the desync was Highway's own bug all along, and newlines were
+incidental. The probe now documents the correction rather than the
+misattribution.
+
+### Deliberate departures from the original spec, all held
+
+- **No OpenTelemetry dependency.** Both packages emit `ActivitySource` only; the
+  application wires OTEL. The tests verify spans with an in-process
+  `ActivityListener` — no OTEL in the test project either, which is what makes
+  the "bring your own pipeline" claim real rather than nominal.
+- **No serialization on the write path.** Events are objects, serialized only
+  when `HW.REPLAY` reads them. Measured at 80 ns / 48 bytes per append.
+- **The `tp` envelope field needed no version bump.** Verified compatible in both
+  directions before anything depended on it.
+- **Liveness heartbeats are not recorded.** Registration and departure are.
+
+### Known limits, stated rather than implied
+
+The recorder is **volatile** — documented in the protocol file, not left to be
+discovered. `HW.REPLAY` serves payload content on an unauthenticated port under
+the default `Full` capture; `HeadersOnly` and `ReplayEnabled = false` are the two
+switches, and the exposure is stated plainly in three places rather than buried.

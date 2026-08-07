@@ -32,9 +32,53 @@ namespace Highway.Server.Commands;
 internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
 {
     private string? _error;
+    private string? _errorCode;
 
     /// <summary>True when validation already failed; callers must stop.</summary>
     protected bool Failed => _error is not null;
+
+    /// <summary>
+    /// The error code captured by <see cref="Fail"/>, or null when validation
+    /// passed. Surfaced so <c>Finalize</c> can record <em>why</em> a command was
+    /// rejected — a flight recorder that only shows successes is worth little
+    /// (feature 002).
+    /// </summary>
+    protected string? FailureCode => _errorCode;
+
+    /// <summary>
+    /// Resets per-invocation state, then runs the command's own Prepare.
+    ///
+    /// <para><b>Sealed on purpose.</b> Garnet caches one procedure instance per
+    /// session (<c>CustomCommandManagerSession.sessionTransactionProcMap</c>) and
+    /// reuses it for every invocation of that command on that connection, so
+    /// instance fields survive between calls. Before this was sealed, a single
+    /// validation failure left <c>_error</c> set and every subsequent invocation
+    /// on the same connection replayed that stale error — a valid command
+    /// answering with the previous command's rejection.</para>
+    ///
+    /// <para>Resetting here rather than asking each command to remember makes the
+    /// bug structurally impossible rather than fixed once.</para>
+    /// </summary>
+    public sealed override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    {
+        _error = null;
+        _errorCode = null;
+        ResetState();
+
+        return PrepareCore(api, ref procInput);
+    }
+
+    /// <summary>The command's own preparation. Never called with stale base state.</summary>
+    protected abstract bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+        where TGarnetReadApi : IGarnetReadApi;
+
+    /// <summary>
+    /// Clears any command-specific field that is not unconditionally assigned in
+    /// <see cref="PrepareCore"/>. Anything conditionally assigned — a captured
+    /// result, a parsed form, a cached lookup — must be reset here, or it leaks
+    /// into the next invocation on the same connection.
+    /// </summary>
+    protected virtual void ResetState() { }
 
     /// <summary>
     /// Captures a validation error. The first failure wins; later calls are
@@ -44,7 +88,11 @@ internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
     /// </summary>
     protected bool Fail(string code, string detail)
     {
-        _error ??= HighwayErrors.Format(code, detail);
+        if (_error is null)
+        {
+            _error = HighwayErrors.Format(code, detail);
+            _errorCode = code;
+        }
         return false;
     }
 

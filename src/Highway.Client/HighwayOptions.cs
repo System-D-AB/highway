@@ -113,6 +113,16 @@ public sealed class HighwayOptions
     public TimeSpan DiscoveryCacheTtl { get; set; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
+    /// Whether the client emits <see cref="System.Diagnostics.Activity"/> spans
+    /// for calls and publishes (feature 002).
+    ///
+    /// <para>Highway takes no OpenTelemetry dependency — it emits activities and
+    /// the application subscribes. With no listener attached, emission costs
+    /// essentially nothing, which is why this defaults on.</para>
+    /// </summary>
+    public bool ActivitiesEnabled { get; set; } = true;
+
+    /// <summary>
     /// Additional assemblies to scan beyond those auto-discovered via AppDomain.
     /// Use this when assemblies containing services haven't been loaded yet.
     /// </summary>

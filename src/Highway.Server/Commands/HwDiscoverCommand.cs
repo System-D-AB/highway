@@ -33,7 +33,9 @@ internal sealed class HwDiscoverCommand : HighwayCommandBase
 
     public HwDiscoverCommand(HighwayServerOptions opts) => _opts = opts;
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    protected override void ResetState() => _candidates = [];
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         var idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "service", _opts.MaxIdentifierBytes, out _service))

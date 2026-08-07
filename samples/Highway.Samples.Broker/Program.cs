@@ -21,6 +21,25 @@ using var loggerFactory = LoggerFactory.Create(b => b
     .AddSimpleConsole(o => { o.SingleLine = true; o.TimestampFormat = "HH:mm:ss "; })
     .SetMinimumLevel(LogLevel.Information));
 
+// ── Optional: collect Highway's traces with OpenTelemetry ────────────────────
+//
+// Highway emits System.Diagnostics.Activity and takes NO OpenTelemetry
+// dependency, so the application chooses its own pipeline. To export traces,
+// add the OpenTelemetry packages and subscribe to Highway's two sources:
+//
+//   dotnet add package OpenTelemetry.Extensions.Hosting
+//   dotnet add package OpenTelemetry.Exporter.OpenTelemetryProtocol
+//
+//   using var tracing = Sdk.CreateTracerProviderBuilder()
+//       .AddSource("Highway.Server")     // server-side command spans
+//       .AddSource("Highway.Client")     // caller-side call/publish spans
+//       .ConfigureResource(r => r.AddService("highway-broker"))
+//       .AddOtlpExporter(o => o.Endpoint = new Uri("http://localhost:4317"))
+//       .Build();
+//
+// Without this, spans are emitted and nothing collects them, which costs
+// essentially nothing — StartActivity returns null when no listener exists.
+
 var server = new HighwayServerBuilder()
     .WithPort(port)
     .WithBindAddress(bind)

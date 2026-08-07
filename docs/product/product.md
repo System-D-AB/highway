@@ -14,7 +14,7 @@
 > | Timeouts, competing consumers, structured errors, DI scoping | **Shipped** — G7 |
 > | Heartbeat, service registry, `HW.DISCOVER` / `HW.STATS` | **Shipped** |
 > | Embedded Control Panel / web dashboard | **Not built.** The `WithDashboard(...)` call shown under "Hosting model" does not exist. `HW.STATS` is the data source a dashboard would consume |
-> | Flight recorder, `HW.REPLAY`, OpenTelemetry export | **Not built** — G8 is feature 002, specced but deferred |
+> | Flight recorder, `HW.REPLAY`, activity emission | **Shipped** — G8. The recorder is **volatile** (in-process, lost on restart); Highway emits `Activity` and takes no OpenTelemetry dependency, so the application wires its own pipeline |
 > | `dotnet new highway-server` template | **Not built** |
 > | Performance | **Uncharacterised.** No benchmark exists and no throughput target is claimed |
 > | Running as separate processes end to end | **Unproven.** Every test to date runs in one process with an embedded server — feature 010 exists to close this |
@@ -25,9 +25,11 @@
 
 ## Vision
 
-**Distributed .NET without the infrastructure tax.**
+**A distributed application runtime for .NET.**
 
-Highway is a .NET framework that gives developers two verbs — `ExecuteAsync` (RPC) and `PublishAsync` (Pub/Sub) — and handles everything else: service discovery, load balancing, durable delivery, timeouts, and serialization. The server is a Garnet extension you run as a single binary. The client is a NuGet package. No external broker. No ceremony.
+Highway gives developers two verbs — `ExecuteAsync` (RPC) and `PublishAsync` (Pub/Sub) — and handles everything else: service discovery, load balancing, durable delivery, timeouts, and serialization. The server is a Garnet extension you run as a single binary. The client is a NuGet package. No external broker. No ceremony.
+
+Because the server is a full Garnet instance, Highway also provides the distributed primitives every application needs — caching, locking, rate limiting, counters, scheduled delivery, and leader election — through the same connection, same server, same package. One infrastructure dependency for everything your distributed application requires.
 
 ## Problem Statement
 

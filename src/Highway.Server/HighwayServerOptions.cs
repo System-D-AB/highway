@@ -104,6 +104,12 @@ public sealed class HighwayServerOptions
     public int MaxCatalogBytes { get; set; } = 256 * 1024;
 
     /// <summary>
+    /// Observability: the flight recorder and activity emission (feature 002).
+    /// Defaults produce a useful recorder with no configuration.
+    /// </summary>
+    public Observability.ObservabilityOptions Observability { get; set; } = new();
+
+    /// <summary>
     /// How long a published message is kept in the backlog for late subscribers.
     /// Default: 1 day.
     /// </summary>
