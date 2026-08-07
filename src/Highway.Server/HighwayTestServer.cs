@@ -1,0 +1,110 @@
+namespace Highway.Server;
+
+/// <summary>
+/// An embedded Highway server for use in integration tests.
+///
+/// <list type="bullet">
+///   <item>Starts automatically on construction.</item>
+///   <item>Uses an OS-assigned ephemeral port (no port conflicts between concurrent instances).</item>
+///   <item>Memory-only by default — no disk writes, no AOF. Supply a data
+///         directory through the configuration delegate for durability tests.</item>
+///   <item>Full HW.* command set registered via the same path as production code.</item>
+///   <item>Safe for concurrent instances in the same process.</item>
+/// </list>
+///
+/// Usage:
+/// <code>
+/// using var server = new HighwayTestServer();
+/// services.AddHighway(o => o.Server = server.ConnectionString);
+///
+/// // With configuration (feature 004.1):
+/// using var tuned = new HighwayTestServer(o => o.Lease = TimeSpan.FromMilliseconds(200));
+/// </code>
+/// </summary>
+public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
+{
+    private readonly HighwayServerOptions _opts;
+    private HighwayServer _server;
+
+    /// <summary>
+    /// Connection string in the form <c>localhost:PORT</c>, valid immediately
+    /// after construction and stable across <see cref="Restart"/>.
+    /// </summary>
+    public string ConnectionString { get; }
+
+    /// <summary>The TCP port the server listens on (stable across <see cref="Restart"/>).</summary>
+    public int Port { get; }
+
+    /// <summary>
+    /// Initialises and starts a memory-only Highway server on an ephemeral port.
+    /// </summary>
+    public HighwayTestServer() : this(configure: null) { }
+
+    /// <summary>
+    /// Initialises and starts a memory-only Highway server on an ephemeral port
+    /// with an optional payload-size override (useful for validation tests).
+    /// </summary>
+    /// <param name="maxPayloadBytes">Override the maximum payload size, or null for the default.</param>
+    public HighwayTestServer(int? maxPayloadBytes = null)
+        : this(maxPayloadBytes.HasValue
+            ? o => o.MaxPayloadBytes = maxPayloadBytes.Value
+            : null)
+    {
+    }
+
+    /// <summary>
+    /// Initialises and starts a Highway server on an ephemeral port with full
+    /// configuration access. The delegate receives the options object with
+    /// <see cref="HighwayServerOptions.Port"/> already set to the probed
+    /// ephemeral port; the delegate cannot change the port (the value is
+    /// re-asserted afterwards) so <see cref="ConnectionString"/> stays valid.
+    /// Every field of <see cref="HighwayServerOptions"/> except Port is reachable.
+    /// </summary>
+    /// <param name="configure">Optional configuration delegate.</param>
+    public HighwayTestServer(Action<HighwayServerOptions>? configure)
+    {
+        Port = Internal.EphemeralPort.Probe();
+
+        _opts = new HighwayServerOptions
+        {
+            Port    = Port,
+            DataDir = null,   // memory-only unless the delegate sets a data dir
+        };
+
+        configure?.Invoke(_opts);
+        _opts.Port = Port;    // the delegate cannot change the probed port
+
+        _server = CreateServer(_opts);
+
+        // Start on construction so ConnectionString is immediately valid
+        _server.Start();
+
+        ConnectionString = $"localhost:{Port}";
+    }
+
+    /// <summary>
+    /// Disposes the inner server and starts a new one on the <b>same port and
+    /// data directory</b>, leaving <see cref="ConnectionString"/> valid. With a
+    /// data directory configured this exercises AOF recovery; memory-only, the
+    /// new server starts empty.
+    /// </summary>
+    public void Restart()
+    {
+        _server.Dispose();
+        _server = CreateServer(_opts);
+        _server.Start();
+    }
+
+    private static HighwayServer CreateServer(HighwayServerOptions opts)
+    {
+        var garnetOpts = HighwayServerBuilder.BuildGarnetOptions(opts);
+        var garnet     = new HighwayGarnetServer(garnetOpts);
+        return new HighwayServer(garnet, opts);
+    }
+
+    /// <inheritdoc/>
+    public void Dispose() => _server.Dispose();
+
+    /// <inheritdoc/>
+    public ValueTask DisposeAsync() => _server.DisposeAsync();
+}

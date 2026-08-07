@@ -1,0 +1,80 @@
+using System.Text;
+using Garnet.common;
+using Garnet.server;
+using Highway.Server.Internal;
+using Tsavorite.core;
+
+namespace Highway.Server.Commands;
+
+/// <summary>
+/// HW.UNSUBSCRIBE &lt;channel&gt; &lt;group&gt; → +OK
+///
+/// Removes a subscriber group, deleting its pending queue and processing list.
+/// Idempotent.
+/// </summary>
+internal sealed class HwUnsubscribeCommand : HighwayCommandBase
+{
+    private readonly HighwayServerOptions _opts;
+
+    private string _channel = null!;
+    private string _group = null!;
+
+    public HwUnsubscribeCommand(HighwayServerOptions opts)
+    {
+        _opts = opts;
+    }
+
+    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    {
+        int idx = 0;
+        if (!TryReadIdentifier(ref procInput, ref idx, "channel", _opts.MaxIdentifierBytes, out _channel))
+            return true;
+        if (!TryReadIdentifier(ref procInput, ref idx, "group", _opts.MaxIdentifierBytes, out _group))
+            return true;
+
+        AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);
+        AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(_channel)), LockType.Exclusive, StoreType.Main);
+        AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_channel, _group)), LockType.Exclusive, StoreType.Object);
+        AddKey(CreateArgSlice(HighwayKeys.GroupProcessing(_channel, _group)), LockType.Exclusive, StoreType.Object);
+        return true;
+    }
+
+    public override void Main<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
+    {
+        if (TryWriteError(ref output)) return;
+
+        try
+        {
+            var groupsKey    = CreateArgSlice(HighwayKeys.ChannelGroups(_channel));
+            var groupQueueKey = CreateArgSlice(HighwayKeys.GroupQueue(_channel, _group));
+            var groupProcKey  = CreateArgSlice(HighwayKeys.GroupProcessing(_channel, _group));
+            var groupSlice    = CreateArgSlice(Encoding.UTF8.GetBytes(_group));
+
+            api.SetRemove(groupsKey, groupSlice, out _);
+            api.DELETE(groupQueueKey);
+            api.DELETE(groupProcKey);
+
+            // Maintain main-store group list
+            var grpListKey = CreateArgSlice(HighwayKeys.ChannelGroupList(_channel));
+            PinnedSpanByte currentList;
+            api.GET(grpListKey, out currentList);
+            if (currentList.Length > 0)
+            {
+                var groups = Encoding.UTF8.GetString(currentList.ReadOnlySpan)
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                    .Where(g => g != _group)
+                    .ToArray();
+                if (groups.Length > 0)
+                    api.SET(grpListKey, CreateArgSlice(string.Join('\n', groups)));
+                else
+                    api.DELETE(grpListKey);
+            }
+
+            WriteSimpleString(ref output, "OK");
+        }
+        catch (Exception ex)
+        {
+            WriteError(ref output, HighwayErrors.InternalError(ex.Message));
+        }
+    }
+}

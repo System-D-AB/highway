@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Highway.Server</RootNamespace>
+    <!-- Required for DoorbellBridge which pins byte arrays via fixed() statements -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Highway.Server.Tests" />
+    <InternalsVisibleTo Include="Highway.Integration.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Highway.Abstractions\Highway.Abstractions.csproj" />
+    <ProjectReference Include="..\..\libs\garnet\libs\host\Garnet.host.csproj" />
+    <!-- Garnet.host uses PrivateAssets="All" for its server/cluster dependencies so they
+         don't flow transitively.  We reference them directly so our code can use
+         Garnet.server types (GarnetServerOptions, SubscribeBroker, etc.) and
+         Tsavorite.core types (PinnedSpanByte) at compile time. -->
+    <ProjectReference Include="..\..\libs\garnet\libs\server\Garnet.server.csproj" />
+    <ProjectReference Include="..\..\libs\garnet\libs\storage\Tsavorite\cs\src\core\Tsavorite.core.csproj" />
+  </ItemGroup>
+
+</Project>

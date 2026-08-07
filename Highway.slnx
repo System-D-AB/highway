@@ -1,0 +1,38 @@
+<Solution>
+  <Folder Name="/.kiro/" />
+  <Folder Name="/.kiro/steering/">
+    <File Path=".kiro/steering/coding-standards.md" />
+    <File Path=".kiro/steering/project-overview.md" />
+    <File Path=".kiro/steering/spec-workflow.md" />
+    <File Path=".kiro/steering/technical-reference.md" />
+  </Folder>
+  <Folder Name="/docs/" />
+  <Folder Name="/docs/features/" />
+  <Folder Name="/docs/features/001-project-skeleton/">
+    <File Path="docs/features/001-project-skeleton/design.md" />
+    <File Path="docs/features/001-project-skeleton/requirements.md" />
+    <File Path="docs/features/001-project-skeleton/tasks.md" />
+  </Folder>
+  <Folder Name="/docs/old-reference/" />
+  <Folder Name="/docs/product/">
+    <File Path="docs/product/product.md" />
+    <File Path="docs/product/research.md" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="CLAUDE.md" />
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Packages.props" />
+    <File Path="QWEN.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Highway.Abstractions/Highway.Abstractions.csproj" />
+    <Project Path="src/Highway.Client/Highway.Client.csproj" />
+    <Project Path="src/Highway.Server/Highway.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Highway.Abstractions.Tests/Highway.Abstractions.Tests.csproj" />
+    <Project Path="tests/Highway.Client.Tests/Highway.Client.Tests.csproj" />
+    <Project Path="tests/Highway.Server.Tests/Highway.Server.Tests.csproj" />
+    <Project Path="tests/Highway.Integration.Tests/Highway.Integration.Tests.csproj" />
+  </Folder>
+</Solution>

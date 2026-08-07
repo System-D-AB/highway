@@ -1,0 +1,211 @@
+using System.Net;
+using Garnet.server;
+using Highway.Server.Internal;
+using Microsoft.Extensions.Logging;
+
+namespace Highway.Server;
+
+/// <summary>
+/// Fluent builder for configuring and constructing a <see cref="IHighwayServer"/>
+/// (a Highway Garnet server with all HW.* commands registered).
+/// </summary>
+public sealed class HighwayServerBuilder
+{
+    private readonly HighwayServerOptions _opts = new();
+    private ILoggerFactory? _loggerFactory;
+    private string? _bindAddressText;
+
+    /// <summary>Sets the TCP port to listen on. Default: 6500.</summary>
+    public HighwayServerBuilder WithPort(int port)
+    {
+        _opts.Port = port;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the network interface to listen on. Default: loopback (secure by
+    /// default — exposing the broker is an explicit operator decision).
+    /// Use <see cref="IPAddress.Any"/> to listen on all interfaces.
+    /// </summary>
+    public HighwayServerBuilder WithBindAddress(IPAddress address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        _opts.BindAddress = address;
+        _bindAddressText  = null;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the network interface to listen on from a dotted-quad (or hostname)
+    /// string. Parsed at <see cref="Build"/>; an invalid value is rejected there
+    /// with a descriptive exception naming the offending value.
+    /// </summary>
+    public HighwayServerBuilder WithBindAddress(string address)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(address);
+        _bindAddressText = address;
+        return this;
+    }
+
+    /// <summary>
+    /// Applies an arbitrary configuration delegate to the underlying options —
+    /// the escape hatch for options without a dedicated <c>With*</c> method.
+    /// </summary>
+    public HighwayServerBuilder WithOptions(Action<HighwayServerOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        configure(_opts);
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the data directory for AOF and checkpoints.
+    /// When omitted, the server runs in memory-only mode (no durability).
+    /// </summary>
+    public HighwayServerBuilder WithDataDir(string dataDir)
+    {
+        _opts.DataDir = dataDir;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the lease duration for RPC processing entries.
+    /// Use <see cref="TimeSpan.Zero"/> to disable the lazy requeue sweep.
+    /// Default: 5 minutes.
+    /// </summary>
+    public HighwayServerBuilder WithLease(TimeSpan lease)
+    {
+        _opts.Lease = lease;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the TTL applied to reply slots. Default: 5 minutes.
+    /// </summary>
+    public HighwayServerBuilder WithReplySlotTtl(TimeSpan ttl)
+    {
+        _opts.ReplySlotTtl = ttl;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the maximum allowed payload size in bytes. Default: 1 MiB.
+    /// </summary>
+    public HighwayServerBuilder WithMaxPayloadBytes(int maxBytes)
+    {
+        _opts.MaxPayloadBytes = maxBytes;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the backlog retention window and per-channel entry cap.
+    /// Default: 1 day, 10,000 entries.
+    /// </summary>
+    public HighwayServerBuilder WithBacklogRetention(TimeSpan retention, int maxEntries)
+    {
+        _opts.BacklogRetention  = retention;
+        _opts.MaxBacklogEntries = maxEntries;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the default and maximum count for HW.RECEIVE.
+    /// Default: count = 10, maxCount = 500.
+    /// </summary>
+    public HighwayServerBuilder WithReceiveDefaults(int count, int maxCount)
+    {
+        _opts.ReceiveDefaultCount = count;
+        _opts.ReceiveMaxCount     = maxCount;
+        return this;
+    }
+
+    /// <summary>
+    /// When <see langword="true"/>, the server waits for each AOF commit before
+    /// sending the response (strict durability, higher latency).
+    /// Only effective when a data directory is configured. Default: false.
+    /// </summary>
+    public HighwayServerBuilder WithWaitForCommit(bool waitForCommit)
+    {
+        _opts.WaitForCommit = waitForCommit;
+        return this;
+    }
+
+    /// <summary>Supplies a logger factory for structured logging from the server.</summary>
+    public HighwayServerBuilder WithLoggerFactory(ILoggerFactory loggerFactory)
+    {
+        _loggerFactory = loggerFactory;
+        return this;
+    }
+
+    /// <summary>
+    /// Builds the server, registers all HW.* commands, and returns the
+    /// <see cref="IHighwayServer"/> ready to be started via <see cref="IHighwayServer.Start"/>
+    /// or <see cref="IHighwayServer.RunAsync"/>.
+    /// </summary>
+    public IHighwayServer Build()
+    {
+        // Resolve a deferred bind-address string (WithBindAddress(string)) so an
+        // invalid value is rejected here, at Build(), naming the offending value.
+        if (_bindAddressText is not null)
+        {
+            if (!IPAddress.TryParse(_bindAddressText, out var parsed))
+                throw new ArgumentException(
+                    $"'{_bindAddressText}' is not a valid bind address (expected a dotted-quad IP address).",
+                    nameof(_bindAddressText));
+            _opts.BindAddress = parsed;
+            _bindAddressText  = null;
+        }
+
+        var garnetOpts = BuildGarnetOptions(_opts);
+        var logger = _loggerFactory?.CreateLogger<HighwayServerBuilder>();
+        logger?.LogInformation(
+            "Building Highway server: bind={BindAddress}, port={Port}, dataDir={DataDir}, lease={Lease}",
+            _opts.BindAddress, _opts.Port, _opts.DataDir ?? "(memory-only)", _opts.Lease);
+
+        var garnet = new HighwayGarnetServer(garnetOpts, _loggerFactory);
+        return new HighwayServer(garnet, _opts, _loggerFactory);
+    }
+
+    /// <summary>
+    /// Maps <see cref="HighwayServerOptions"/> to <see cref="GarnetServerOptions"/>
+    /// per the design table.
+    /// </summary>
+    internal static GarnetServerOptions BuildGarnetOptions(HighwayServerOptions opts)
+    {
+        var garnet = new GarnetServerOptions
+        {
+            // Endpoint — configured bind address (default loopback) on the configured port
+            EndPoints = [new IPEndPoint(opts.BindAddress, opts.Port)],
+
+            // PubSub must stay enabled for doorbells
+            // DisablePubSub is not a field on GarnetServerOptions; it stays at its default (false)
+
+            // Suppress cluster in v1
+            EnableCluster = false,
+        };
+
+        if (opts.DataDir is not null)
+        {
+            // Durable mode: AOF + storage tier + recovery
+            var dir = Path.GetFullPath(opts.DataDir);
+
+            garnet.EnableStorageTier = true;
+            garnet.LogDir            = Path.Combine(dir, "log");
+            garnet.CheckpointDir     = Path.Combine(dir, "checkpoints");
+            garnet.EnableAOF         = true;
+            garnet.CommitFrequencyMs = 0;   // commit per op
+            garnet.Recover           = true;
+
+            if (opts.WaitForCommit)
+                garnet.WaitForCommit = true;
+        }
+        else
+        {
+            // Memory-only mode: no AOF, no storage tier
+            garnet.EnableStorageTier = false;
+            garnet.EnableAOF         = false;
+        }
+
+        return garnet;
+    }
+}

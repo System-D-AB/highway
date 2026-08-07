@@ -1,0 +1,28 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test results
+TestResults/
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+
+# Benchmark output
+BenchmarkDotNet.Artifacts/
+
+# Rider
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store

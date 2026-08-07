@@ -1,0 +1,139 @@
+using FluentAssertions;
+using Highway.Client.Engine;
+using Highway.Client.Wire;
+using Highway.Server;
+using StackExchange.Redis;
+using Xunit;
+
+namespace Highway.Integration.Tests;
+
+/// <summary>
+/// Feature 005 Task 13 — Pub/Sub end-to-end through real engines. Every node
+/// hosts the it.* channels (assembly-wide scanning), so each published message
+/// fans out to every engine's group and every local subscriber records it.
+/// </summary>
+[Collection(SubscriberRecorderCollection.Name)]
+public class PubSubIntegrationTests : IDisposable
+{
+    private readonly HighwayTestServer _server = new();
+    private readonly List<EngineNode> _nodes = [];
+
+    public PubSubIntegrationTests()
+    {
+        SubscriberRecorder.Reset();
+    }
+
+    public void Dispose()
+    {
+        foreach (var node in _nodes)
+            node.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _server.Dispose();
+    }
+
+    private async Task<EngineNode> StartNodeAsync(string name, Action<Highway.Client.HighwayOptions>? tune = null)
+    {
+        var node = await EngineNode.StartAsync(_server.ConnectionString, name, tune);
+        _nodes.Add(node);
+        return node;
+    }
+
+    [Fact]
+    public async Task Publish_DeliveredToEveryNode_AndEveryLocalSubscriber()
+    {
+        var nodeA = await StartNodeAsync("pub-node-a");
+        await StartNodeAsync("pub-node-b");
+
+        await nodeA.Client.PublishAsync(new ItEvent { Data = "fanout-1" });
+
+        // Two nodes x two local subscribers = one record per subscriber per node.
+        var delivered = await SubscriberRecorder.WaitForAsync(() =>
+            SubscriberRecorder.CountEntries("A:fanout-1") >= 2 &&
+            SubscriberRecorder.CountEntries("B:fanout-1") >= 2);
+
+        delivered.Should().BeTrue(
+            "each of the two nodes runs both local subscribers on its own copy of the message");
+        SubscriberRecorder.CountEntries("A:fanout-1").Should().Be(2);
+        SubscriberRecorder.CountEntries("B:fanout-1").Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Publish_BeforeAnyEngineStarts_DeliveredWhenSubscriberComesOnline()
+    {
+        // Product success criterion 2 through the client consumption path.
+        // The backlog is seeded over raw RESP with a valid envelope because a
+        // client-API publish requires a running engine — and any running engine
+        // already registers groups for this channel (assembly-wide scanning).
+        using (var raw = ConnectionMultiplexer.Connect(_server.ConnectionString))
+        {
+            var envelope = HighwayJson.EncodeEnvelope("seed-node", new ItEvent { Data = "held-until-online" });
+            var count = (int)raw.GetDatabase().Execute("HW.PUBLISH", "it.events", envelope)!;
+            count.Should().Be(0, "no groups are registered yet, so the message goes to the backlog");
+        }
+
+        // The subscriber now comes online; its engine subscribes and drains the backlog.
+        await StartNodeAsync("late-subscriber");
+
+        var delivered = await SubscriberRecorder.WaitForAsync(() =>
+            SubscriberRecorder.CountEntries("A:held-until-online") >= 1);
+
+        delivered.Should().BeTrue("a message published with no online subscriber must be delivered once one starts");
+    }
+
+    /// <summary>
+    /// Task 13 restart-resume: the client never sends HW.UNSUBSCRIBE, so a node's
+    /// group outlives its process. Messages published while the node is down sit
+    /// in that group's queue and drain when it comes back under the same NodeName.
+    /// This also guards the 004.1 Requirement 1 fix from the client side — the
+    /// engine re-sends HW.SUBSCRIBE on every start, and that must not redeliver
+    /// anything the node already consumed.
+    /// </summary>
+    [Fact]
+    public async Task Subscriber_StopsAndRestartsWithSameNodeName_DrainsMessagesPublishedWhileDown()
+    {
+        const string nodeName = "resume-subscriber";
+
+        // A publisher that stays up for the whole test.
+        var publisher = await StartNodeAsync("resume-publisher");
+
+        // The subscriber node starts (registering its group), receives one
+        // message, then shuts down gracefully.
+        var subscriber = await EngineNode.StartAsync(_server.ConnectionString, nodeName);
+        await publisher.Client.PublishAsync(new ItEvent { Data = "before-restart" });
+        (await SubscriberRecorder.WaitForAsync(() =>
+            SubscriberRecorder.CountEntries("A:before-restart") >= 2)).Should().BeTrue();
+
+        await subscriber.DisposeAsync();
+
+        // Published while the subscriber node is down: its group still exists
+        // server-side, so the message accumulates rather than being dropped.
+        await publisher.Client.PublishAsync(new ItEvent { Data = "while-down" });
+
+        // Same NodeName → same group → the pending message drains on restart.
+        var restarted = await StartNodeAsync(nodeName);
+        restarted.Engine.State.Should().Be(EngineState.Running);
+
+        var drained = await SubscriberRecorder.WaitForAsync(() =>
+            SubscriberRecorder.CountEntries("A:while-down") >= 2);
+
+        drained.Should().BeTrue(
+            "a group is never unsubscribed, so messages published while the node was down survive its restart");
+
+        // The re-subscribe must not replay what was already consumed (004.1 Req 1).
+        SubscriberRecorder.CountEntries("A:before-restart").Should().Be(2,
+            "re-subscribing an existing group must not redeliver already-consumed messages");
+    }
+
+    [Fact]
+    public async Task SubscriberFailure_DoesNotBlockSiblings()
+    {
+        var node = await StartNodeAsync("failover-node");
+
+        await node.Client.PublishAsync(new ItFailEvent { Data = "boom-test" });
+
+        var survivorDelivered = await SubscriberRecorder.WaitForAsync(() =>
+            SubscriberRecorder.CountEntries("S:boom-test") >= 1);
+
+        survivorDelivered.Should().BeTrue(
+            "the failing subscriber must not abort its sibling or block the channel");
+    }
+}
