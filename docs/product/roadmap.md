@@ -131,6 +131,31 @@ Built-in observability with zero external infrastructure. Every operation is rec
 
 ---
 
+### 010 — Runnable Samples
+
+**Status:** Complete
+
+Three console apps under `samples/` — a broker, a service host, and a storefront
+— plus a shared contracts library. The first time Highway ran as a deployed
+system rather than inside a test host.
+
+**Found on the first run:** a caller-only node could address nothing, because
+the catalog derived addressing from locally hosted implementations. Every
+`ExecuteAsync` from a pure caller returned `SERVICE_NOT_FOUND` for services
+running in another process — the product's headline use case. 440 tests missed
+it because every integration node scans the same assembly and hosts everything.
+
+**Now proven end to end:** standalone broker process, RESP over a real socket
+between OS processes, generic-host lifecycle, cross-assembly scanning, durable
+delivery across subscriber downtime and across a broker restart, competing
+consumers, and RPC plus pub/sub over a non-loopback interface.
+
+Findings live in `samples/RUNLOG.md`. Running the samples is a recurring test:
+any feature changing the protocol or public API must update and re-run them
+(`.kiro/steering/spec-workflow.md` § Living Conformance).
+
+---
+
 ## Beyond v1 (Future)
 
 These are explicitly out of scope for the initial release but documented for future planning:

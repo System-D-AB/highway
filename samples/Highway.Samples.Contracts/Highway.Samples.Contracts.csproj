@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Samples are demonstrations, never shipped packages. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      ONLY Highway.Abstractions. No Highway.Client, no Highway.Server, no
+      third-party packages — that restraint is the point of this project.
+      ProjectReference (never PackageReference) so the samples always compile
+      against the current state of src/, and a breaking change fails the build
+      in the same commit that introduces it.
+    -->
+    <ProjectReference Include="..\..\src\Highway.Abstractions\Highway.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

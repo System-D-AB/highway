@@ -64,7 +64,11 @@ public static class ServiceCollectionExtensions
         }
 
         // 4. Build immutable catalog
-        var catalog = new ImmutableCatalog(scanResult.Services, scanResult.Channels);
+        var catalog = new ImmutableCatalog(
+            scanResult.Services,
+            scanResult.Channels,
+            scanResult.RequestContracts,
+            scanResult.MessageContracts);
 
         // 5. Register discovered types in DI
         CatalogDiRegistrar.Register(services, scanResult);

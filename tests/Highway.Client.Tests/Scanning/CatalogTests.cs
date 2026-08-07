@@ -174,4 +174,68 @@ public class CatalogTests
 
         info.Services.Should().BeEmpty();
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Caller-only addressing (feature 010 finding)
+    //
+    // Addressing used to be derived from locally hosted implementations, so a
+    // node that hosted nothing could address nothing: every ExecuteAsync
+    // returned SERVICE_NOT_FOUND for services running fine in another process.
+    // The whole test suite missed it because every integration node scans the
+    // same assembly and therefore hosts everything.
+    // ──────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void GetServiceNameForRequestType_NodeHostsNothing_StillResolvesFromContract()
+    {
+        var catalog = new ImmutableCatalog(
+            services: [],
+            channels: [],
+            requestContracts: new Dictionary<Type, string> { [typeof(TestRequest)] = "test.hello" });
+
+        catalog.GetServiceNameForRequestType(typeof(TestRequest)).Should().Be("test.hello",
+            "a caller must be able to address a service it does not host — that is location transparency");
+        catalog.AllServices.Should().BeEmpty("addressing a service is not the same as hosting it");
+    }
+
+    [Fact]
+    public void GetChannelNameForMessageType_NodeHasNoSubscriber_StillResolvesFromContract()
+    {
+        var catalog = new ImmutableCatalog(
+            services: [],
+            channels: [],
+            messageContracts: new Dictionary<Type, string> { [typeof(TestEvent)] = "test.events" });
+
+        catalog.GetChannelNameForMessageType(typeof(TestEvent)).Should().Be("test.events",
+            "a publisher must be able to publish to a channel it does not consume");
+    }
+
+    [Fact]
+    public void HostedService_IsAddressable_EvenWithoutAContractEntry()
+    {
+        var descriptor = new ServiceDescriptor
+        {
+            Name = "test.hello",
+            ImplementationType = typeof(TestService),
+            RequestType = typeof(TestRequest),
+            ResponseType = typeof(TestResponse),
+            Lifetime = HighwayServiceLifetime.Scoped,
+        };
+
+        var catalog = new ImmutableCatalog([descriptor], []);
+
+        catalog.GetServiceNameForRequestType(typeof(TestRequest)).Should().Be("test.hello");
+    }
+
+    [Fact]
+    public void UnknownRequestType_StillResolvesToNull()
+    {
+        var catalog = new ImmutableCatalog(
+            services: [],
+            channels: [],
+            requestContracts: new Dictionary<Type, string> { [typeof(TestRequest)] = "test.hello" });
+
+        catalog.GetServiceNameForRequestType(typeof(UnregisteredEvent)).Should().BeNull(
+            "a type with no [Service] contract must still produce the local 404");
+    }
 }
