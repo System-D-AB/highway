@@ -12,6 +12,52 @@ Every command below has been run. Output shown is real, captured from
 
 ---
 
+
+## The three verbs
+
+Choosing between them is one sentence: **one handler → Send, many handlers → Publish, need
+the answer → Execute.**
+
+| Storefront command | Verb | What happens |
+|---|---|---|
+| `order 2 WIDGET` | `ExecuteAsync` | RPC — one host answers, the caller waits |
+| `invoice ORD-1` | `SendAsync` | Queue — **exactly one** processor handles it, nobody waits |
+| `low WIDGET 2` | `PublishAsync` | Channel — **every** subscriber gets its own copy |
+
+**Run two order services to see the difference.** `invoice` work is *shared* between them;
+`low` is delivered to *both*. Same topology, different verb.
+
+## Demonstrating dead letters
+
+A poison message takes ~25 minutes to dead-letter with production defaults (5-minute lease
+× 5 attempts). Shorten them for a demonstration:
+
+```
+dotnet run --project samples/Highway.Samples.Broker -- --lease-seconds 2 --max-attempts 2
+```
+
+Then `poison` in the storefront, wait a few seconds, and `dlq poison.queue`.
+
+## Running with authentication
+
+The default run is unauthenticated on loopback — the right configuration for trying
+Highway, and the one this README shows first. To secure it:
+
+```
+dotnet run --project samples/Highway.Samples.Broker    -- --password sample-secret
+dotnet run --project samples/Highway.Samples.OrderService -- --server "127.0.0.1:6500,password=sample-secret"
+dotnet run --project samples/Highway.Samples.Storefront   -- --server "127.0.0.1:6500,password=sample-secret"
+```
+
+A client without the password is refused with a message naming the remedy. Note that
+Highway redacts the password from its own logs and exceptions — the endpoint appears, the
+credential does not.
+
+**Binding beyond loopback requires a password.** `--bind 0.0.0.0` with no `--password`
+fails at startup, deliberately: Highway can demand a password, and does so exactly where it
+starts to matter.
+
+
 ## Run it
 
 Three terminals, in this order. The broker must be up before the others.

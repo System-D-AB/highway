@@ -14,6 +14,88 @@ documentation defect and loses it.
 
 ---
 
+## 2026-08-08 — features 012, 013 and 014
+
+**Libraries:** everything through feature 014. 636 tests green before the run.
+**Ran:** broker + order service + storefront as three processes, **twice** —
+unauthenticated on loopback (the evaluation path) and with a password.
+
+### What was verified
+
+| Scenario | Result |
+|---|---|
+| All previous scenarios (RPC, errors-as-data, pub/sub, durability) | ✅ unchanged |
+| **`invoice` — queue work, exactly one processor** | ✅ `[queue] generated invoice for ORD-TEST` |
+| `SendAsync` returns a message id | ✅ returned and printed at the call site |
+| **`poison` → dead letter** | ✅ `1 dead letter(s) on 'poison.queue'` with timestamp, attempts and reason |
+| `dlq poison.queue` inspects without consuming | ✅ |
+| Queue and channel appear separately in the recorder | ✅ `invoices.generate` and `poison.queue` alongside `orders.create` |
+| Dashboard shows queue traffic | ✅ `/api/recorder` lists both queues |
+| Unauthenticated broker logs at **info**, not warning | ✅ "expected for local development" |
+| Password-secured broker refuses an unauthenticated client | ✅ names the remedy, not a stack trace |
+| Authenticated client works fully | ✅ RPC and queue both round-trip |
+
+### Finding 8 — the samples cannot demonstrate dead-lettering with production defaults *(usability, fixed)*
+
+**Symptom.** `poison` queued a message that always fails, and nothing reached the
+dead-letter queue for the length of the session.
+
+**Not a defect.** `Lease` defaults to 5 minutes and `MaxDeliveryAttempts` to 5, so a poison
+message takes roughly **25 minutes** to exhaust its attempts. That is correct for
+production and useless for a demonstration — the behaviour feature 013 exists to provide
+was undemonstrable in the one exercise meant to show it.
+
+**Fixed in the sample, not the library.** The broker sample gained `--lease-seconds` and
+`--max-attempts`. With `--lease-seconds 2 --max-attempts 2` the dead letter appears in about
+six seconds, and the defaults are untouched.
+
+### Finding 9 — `MaxDeliveryAttempts` is off by one, and the sample makes it visible *(defect, recorded)*
+
+Running with `--max-attempts 2`, the dead letter reported:
+
+```
+deadLetteredAt   2026-08-07T23:29:23.6792620Z
+attempts         3
+```
+
+Three deliveries for a limit of two. The comparison is `attempts > MaxDeliveryAttempts`, so
+the option permits N+1 deliveries while its name and documentation say N. With the default
+of 5 that is 6 attempts.
+
+The counter is really *redeliveries*; it was named and documented as *deliveries*. Recorded
+in `constraints.md` § Open Decisions rather than changed here — it alters behaviour for
+anyone who has already tuned the value, and deserves its own decision rather than a
+drive-by fix during a sample run.
+
+**Worth noting this was already known from reading the code, and the sample is what made it
+concrete.** A number in a spec is arguable; `attempts 3` under a limit of 2 is not.
+
+### Finding 10 — the queue makes the Send/Publish distinction visible *(observation)*
+
+With one order service running, `invoice` was handled once and `low` was delivered to every
+subscriber — the same topology producing different behaviour depending on the verb. This is
+the distinction the samples previously had no way to show, and the reason `PublishAsync` was
+being pressed into service as a queue.
+
+### Authentication
+
+Run twice deliberately. The default sample run stays **unauthenticated on loopback**,
+because that is the path a newcomer meets first and running only the secured version would
+leave it untested by the one exercise that catches what unit tests cannot.
+
+With `--password sample-secret`, an unauthenticated storefront failed with:
+
+```
+Could not start: The Highway server at '127.0.0.1:6630' rejected the supplied credentials.
+Check the password, and that the server was started with WithPassword.
+```
+
+Naming the remedy rather than reporting a refusal — and note the endpoint is present while
+the password is not, which is the redaction working on a real path rather than in a unit
+test.
+
+---
+
 ## 2026-08-07 — feature 002 (observability)
 
 **Libraries:** features 001–007 and 010 merged, plus the flight recorder.

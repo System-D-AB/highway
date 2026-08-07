@@ -163,7 +163,7 @@ findings so it does not start from scratch.
 
 *Requirements:* R6.4
 
-### - [ ] T14 — Samples
+### - [x] T14 — Samples
 
 Keep the default sample run **unauthenticated on loopback** — it is the evaluation path. Add
 authentication and TLS as a flag or environment variable rather than a source edit.
@@ -178,7 +178,7 @@ that catches what unit tests cannot.
 Any defect found is fixed **in the library with a regression test**, never worked around in
 the sample.
 
-### - [ ] T15 — Full verification
+### - [x] T15 — Full verification
 
 *Requirements:* R6.6
 **Done when:** every test passes and `dotnet build` is warning-free.

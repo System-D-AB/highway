@@ -28,3 +28,37 @@ public sealed class InventoryLow : IPublish
     public string Item { get; set; } = "";
     public int Remaining { get; set; }
 }
+
+// ---------------------------------------------------------------------------
+// Queue (feature 014) — work handled by exactly ONE processor.
+//
+// Contrast with InventoryLow above, which is a [Channel]: every subscriber node
+// receives its own copy. This is the whole distinction between the two verbs:
+//
+//   three instances of a processor  → they SHARE the work
+//   three instances of a subscriber → each gets its OWN copy
+//
+// One handler → SendAsync. Many handlers → PublishAsync. Need the answer → ExecuteAsync.
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// Generate an invoice for an order. Fire-and-forget work: the storefront does not
+/// wait for it, and exactly one worker performs it.
+/// </summary>
+[Queue("invoices.generate")]
+public sealed record GenerateInvoice : ISend
+{
+    public string OrderId { get; init; } = "";
+    public decimal Total { get; init; }
+}
+
+/// <summary>
+/// Deliberately fails every time, to demonstrate dead-lettering (feature 013).
+/// After MaxDeliveryAttempts the message leaves the queue and lands in the DLQ, where
+/// <c>HW.DLQ PEEK Q poison.queue</c> can find it — instead of looping forever.
+/// </summary>
+[Queue("poison.queue")]
+public sealed record AlwaysFails : ISend
+{
+    public string Reason { get; init; } = "";
+}

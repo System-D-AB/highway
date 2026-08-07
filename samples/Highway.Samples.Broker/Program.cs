@@ -43,15 +43,37 @@ using var loggerFactory = LoggerFactory.Create(b => b
 
 var dashboardPort = SampleConfig.Int(args, "--dashboard-port", "HIGHWAY_DASHBOARD_PORT", 7500);
 
-var server = new HighwayServerBuilder()
+// Lease and attempt limit are exposed so the samples can demonstrate dead-lettering in a
+// session rather than in half an hour: the defaults (5 minutes x 5 attempts) are right for
+// production and mean a poison message takes ~25 minutes to reach the DLQ.
+//
+//   --lease-seconds 2 --max-attempts 2   → a poison message dead-letters in about 6 seconds
+var leaseSeconds = SampleConfig.Int(args, "--lease-seconds", "HIGHWAY_LEASE_SECONDS", 0);
+var maxAttempts  = SampleConfig.Int(args, "--max-attempts", "HIGHWAY_MAX_ATTEMPTS", 0);
+
+// Authentication is off by default because that is the evaluation path: a loopback broker
+// with no password is the right configuration for trying Highway. Set HIGHWAY_PASSWORD (or
+// --password) to secure it, and every participant must then present the same value.
+var password = SampleConfig.String(args, "--password", "HIGHWAY_PASSWORD", "");
+
+var builder = new HighwayServerBuilder()
     .WithPort(port)
     .WithBindAddress(bind)
     .WithDataDir(dataDir)          // durability on by default, so restarts are observable
     // The dashboard binds loopback and serves recorded message payloads, so it is
     // safe here and would need an API key anywhere else (feature 011).
     .WithDashboard(dashboardPort)
-    .WithLoggerFactory(loggerFactory)
-    .Build();
+    .WithOptions(o =>
+    {
+        if (leaseSeconds > 0) o.Lease = TimeSpan.FromSeconds(leaseSeconds);
+        if (maxAttempts > 0) o.MaxDeliveryAttempts = maxAttempts;
+    })
+    .WithLoggerFactory(loggerFactory);
+
+if (!string.IsNullOrEmpty(password))
+    builder.WithPassword(password);
+
+var server = builder.Build();
 
 Console.WriteLine($"Dashboard: http://127.0.0.1:{dashboardPort}/");
 

@@ -75,3 +75,40 @@ public sealed class InventoryLowSubscriber(ILogger<InventoryLowSubscriber> log)
         return Task.CompletedTask;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Queue processors (feature 014)
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// Processes queued invoice work. Exactly one processor handles each message; run two
+/// copies of this service and they <b>share</b> the queue rather than each receiving a
+/// copy — that is what distinguishes SendAsync from PublishAsync.
+/// </summary>
+public sealed class InvoiceProcessor(ILogger<InvoiceProcessor> logger)
+    : IProcess<GenerateInvoice>
+{
+    public Task ProcessAsync(GenerateInvoice message, CancellationToken ct = default)
+    {
+        logger.LogInformation("  [queue] generated invoice for {OrderId} ({Total:0.00})",
+            message.OrderId, message.Total);
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Always throws, so the message is never acknowledged, is redelivered until
+/// MaxDeliveryAttempts is exhausted, and then dead-letters (feature 013).
+///
+/// <para>Before feature 013 this would have been retried for the life of the process —
+/// and, the queue being FIFO, retried ahead of everything behind it.</para>
+/// </summary>
+public sealed class AlwaysFailsProcessor(ILogger<AlwaysFailsProcessor> logger)
+    : IProcess<AlwaysFails>
+{
+    public Task ProcessAsync(AlwaysFails message, CancellationToken ct = default)
+    {
+        logger.LogWarning("  [queue] deliberately failing '{Reason}' — this will dead-letter", message.Reason);
+        throw new InvalidOperationException($"This processor always fails: {message.Reason}");
+    }
+}

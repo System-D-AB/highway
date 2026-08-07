@@ -88,6 +88,9 @@ while (true)
             case "get":     await GetAsync(parts); break;
             case "cancel":  await CancelAsync(parts); break;
             case "low":     await LowAsync(parts); break;
+            case "invoice": await InvoiceAsync(parts); break;
+            case "poison":  await PoisonAsync(); break;
+            case "dlq":     await DlqAsync(parts); break;
             case "discover": await DiscoverAsync(parts); break;
             case "stats":   await StatsAsync(parts); break;
             case "replay":  await ReplayAsync(parts); break;
@@ -159,6 +162,58 @@ async Task CancelAsync(string[] parts)
 
     PrintFailure(response);
     Console.WriteLine($"  (failed in {elapsed.TotalMilliseconds:F0} ms — fast-fail via the registry, nothing enqueued)");
+}
+
+// ---------------------------------------------------------------------------
+// Queue (feature 014). Contrast with `low`, which publishes to a channel: run two
+// order services and `invoice` work is SHARED between them, while `low` is delivered
+// to BOTH. Same topology, different verb, different behaviour.
+// ---------------------------------------------------------------------------
+async Task InvoiceAsync(string[] parts)
+{
+    var orderId = parts.Length > 1 ? parts[1] : "ORD-1";
+
+    // SendAsync returns the message id — keep it, because it is how you find the
+    // message in the dead-letter queue if the job misbehaves.
+    var id = await client.SendAsync(new GenerateInvoice { OrderId = orderId, Total = 9.99m });
+
+    Console.WriteLine($"  queued invoice for {orderId} (message {id})");
+    Console.WriteLine("  exactly one processor will handle it — run two order services to see them share");
+}
+
+async Task PoisonAsync()
+{
+    var id = await client.SendAsync(new AlwaysFails { Reason = "demonstrating dead letters" });
+    Console.WriteLine($"  queued a message that always fails (message {id})");
+    Console.WriteLine("  it is retried up to MaxDeliveryAttempts, then dead-letters — try 'dlq poison.queue'");
+}
+
+async Task DlqAsync(string[] parts)
+{
+    var queue = parts.Length > 1 ? parts[1] : "poison.queue";
+
+    // HW.DLQ is not on IHighwayClient — it is an operator command, so the sample
+    // issues it over raw RESP exactly as a CLI or the dashboard would.
+    await using var raw = await ConnectionMultiplexer.ConnectAsync(server);
+    var result = (RedisResult[])(await raw.GetDatabase().ExecuteAsync("HW.DLQ", "PEEK", "Q", queue))!;
+
+    if (result.Length == 0)
+    {
+        Console.WriteLine($"  no dead letters on '{queue}'");
+        return;
+    }
+
+    Console.WriteLine($"  {result.Length} dead letter(s) on '{queue}':");
+    foreach (var entry in result)
+    {
+        var fields = (RedisResult[])entry!;
+        for (var i = 0; i + 1 < fields.Length; i += 2)
+        {
+            var name = fields[i].ToString();
+            if (name is "payload") continue;   // the whole envelope; noisy here
+            Console.WriteLine($"    {name,-16} {fields[i + 1]}");
+        }
+    }
 }
 
 async Task LowAsync(string[] parts)
@@ -251,7 +306,10 @@ void PrintHelp() => Console.WriteLine("""
       order <qty> [item]     place an order      (RPC, typed response)
       get <id>               fetch an order      (RPC, returns 404 as data)
       cancel <id>            call a service nobody hosts (fast-fail 404)
-      low <item> [remaining] publish InventoryLow
+      low <item> [remaining] publish InventoryLow (every subscriber gets a copy)
+      invoice [orderId]      queue work — exactly ONE processor handles it
+      poison                 queue a message that always fails, to show dead-lettering
+      dlq [queue]            inspect a queue's dead letters
       discover [service]     which nodes host a service
       stats [name]           server / service / channel counters
       stats recorder         flight recorder health

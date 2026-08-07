@@ -159,7 +159,7 @@ recorded by the flight recorder.
 **Done when:** every option has a documented default with its reasoning, and
 `new HighwayServerBuilder().Build()` still starts a working broker with no configuration.
 
-### - [ ] T17 — Samples
+### - [x] T17 — Samples
 
 A poison message reaching the DLQ, a delayed publish, and a duplicate suppressed.
 
@@ -168,7 +168,7 @@ A poison message reaching the DLQ, a delayed publish, and a duplicate suppressed
 `samples/RUNLOG.md` records what was found. Any defect found is fixed **in the library with
 a regression test**, never worked around in the sample.
 
-### - [ ] T18 — Product docs and full verification
+### - [x] T18 — Product docs and full verification
 
 *Requirements:* R8.8, R8.10
 **Done when:** every test passes, `dotnet build` is warning-free, and `product.md` and the
