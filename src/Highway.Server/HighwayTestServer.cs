@@ -27,8 +27,12 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
     private HighwayServer _server;
 
     /// <summary>
-    /// Connection string in the form <c>localhost:PORT</c>, valid immediately
-    /// after construction and stable across <see cref="Restart"/>.
+    /// Connection string valid immediately after construction and stable across
+    /// <see cref="Restart"/>.
+    ///
+    /// <para>Carries the generated password, so a test connects with it transparently.
+    /// Never log this — it is a credential-bearing string, which is why the client
+    /// redacts every connection string it emits.</para>
     /// </summary>
     public string ConnectionString { get; }
 
@@ -71,6 +75,14 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
             DataDir = null,   // memory-only unless the delegate sets a data dir
         };
 
+        // Authenticated by default (feature 012). This is what makes the loopback
+        // exemption defensible: users get the free path on loopback, and the suite still
+        // exercises AUTH on every connection regardless of what they choose. A random
+        // credential per instance means no test can accidentally depend on a shared one.
+        //
+        // The delegate runs first so a test can opt out by clearing the password.
+        _opts.Authentication.Password = $"test-{Guid.NewGuid():N}";
+
         configure?.Invoke(_opts);
         _opts.Port = Port;    // the delegate cannot change the probed port
 
@@ -79,7 +91,9 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
         // Start on construction so ConnectionString is immediately valid
         _server.Start();
 
-        ConnectionString = $"localhost:{Port}";
+        ConnectionString = _opts.Authentication.IsConfigured
+            ? $"localhost:{Port},password={_opts.Authentication.Password}"
+            : $"localhost:{Port}";
     }
 
     /// <summary>
