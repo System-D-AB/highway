@@ -235,6 +235,54 @@ is independent of every other decision here.
 
 ---
 
+## C6 — Security (feature 012)
+
+### C6.1 — An unauthenticated broker cannot reach the network by accident
+
+**Status: Met.**
+
+`Build()` refuses a server bound off loopback with no authentication, unless
+`WithoutAuthentication()` is called explicitly. Loopback is exempt: running open is the right
+configuration for development, and a loopback-bound broker is reachable only by processes
+already on the machine.
+
+`new HighwayServerBuilder().Build()` therefore still starts an unsecured broker, deliberately,
+and a test named for that exists to stop it regressing.
+
+### C6.2 — Credentials never appear in a log or an exception
+
+**Status: Met.**
+
+Three sites leaked before feature 012 — the engine logged the connection string at
+Information level, and two exception paths embedded it. All now pass through one shared
+redactor, and the tests were confirmed to fail with it removed.
+
+### C6.3 — Authentication failures are permanent and legible
+
+**Status: Met.**
+
+`NOAUTH`, `WRONGPASS` and `NOPERM` map to typed permanent exceptions, distinct from a network
+failure. StackExchange.Redis wraps them in a connection exception, so without inspecting the
+chain a wrong password is indistinguishable from a dead host.
+
+### C6.4 — TLS is available and never required
+
+**Status: Met.**
+
+PFX file or certificate-store subject, mTLS, revocation checking and refresh. Validated at
+`Build()` so a missing file is a startup error naming it. **The password crosses the wire in
+clear text without TLS** — documented at the point of configuration.
+
+### C6.5 — The tested path is the secured path
+
+**Status: Met.**
+
+`HighwayTestServer` authenticates by default with a random credential per instance, so the
+whole integration suite exercises `AUTH`. This is what makes C6.1's loopback exemption
+defensible: users get the free path, and the suite still covers the secured one.
+
+---
+
 ## Status summary
 
 | | Constraint | Status |
@@ -258,6 +306,11 @@ is independent of every other decision here.
 | C4.4 | Every queue-like structure bounded | ❌ Not met — 015, 016 |
 | C4.5 | Durable by default | ❌ Not met — 016 |
 | C4.6 | Bounded over time | ❌ Not met — 016 |
+| C6.1 | Cannot reach the network unauthenticated by accident | ✅ Met |
+| C6.2 | Credentials never logged | ✅ Met |
+| C6.3 | Auth failures permanent and legible | ✅ Met |
+| C6.4 | TLS available, never required | ✅ Met |
+| C6.5 | The tested path is the secured path | ✅ Met |
 
 **All six unmet constraints are in C4** — retention, storage and durability — which is one
 coherent feature rather than six. Feature 014 delivered C1.

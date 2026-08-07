@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 2.1** — reflects everything shipped through feature 014.
+**Protocol version 2.2** — reflects everything shipped through features 012 and 014.
 
 ## About
 
@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 2.1**
+**Current version: 2.2**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 2.2 | 012 | **Security.** No command changes. `AUTH` joins the stock dependencies a client must issue against a secured server; the error contract gains a third class (`NOAUTH`, `WRONGPASS`, `NOPERM` — permanent, carrying neither existing marker); a section documents authentication, TLS and the `@dangerous` trap. Additive. |
 | 2.1 | 014 | **The queue.** Adds `HW.QSEND`, `HW.QCLAIM` and `HW.QACK` under a `hw:q:` key space, a `Q` target on `HW.DLQ`, a `Q:name` form on `HW.STATS`, and a `queues` list in the node catalog. Additive — no existing command, reply or key changed. A queue is RPC minus the reply and shares its lease sweep, so dead-lettering, deferred delivery and `[Idempotent]` all apply unchanged. |
 | 2.0 | 013 | Reliable delivery, parts 1 and 2. **Delayed delivery:** `HW.PUBLISH` gains an optional `AT <ticks>` argument (arity 3 → -3) and the `hw:ch:{channel}:delayed` sorted set; promotion is driven by `HW.RECEIVE`, not a timer. **Dead letters:** Adds a **delivery attempt count** to four entry framings and a `0xFF` version byte that makes pre-013 entries detectable; adds `HW.DLQ`, the dead-letter keys, the `HW_STORAGE_FORMAT` error, a `deadLettered` field on two `HW.STATS` forms, and two recorder event types. **Major** because the stored entry format changed: a broker started against a pre-013 data directory refuses to serve the affected queues rather than misparsing them. Nothing on the wire changed — no client needs modifying. |
 | 1.1 | 002 | Observability. Adds `HW.REPLAY` and a fourth `HW.STATS` form (`RECORDER`); adds the optional `tp` envelope field carrying W3C trace context; documents the `ActivitySource` names. Additive — no existing command, reply or envelope field changed. |
@@ -163,10 +164,17 @@ Highway's own errors carry the `ERR HW_` prefix so the bare Garnet message stays
 | `ERR HW_INVALID_ARG <detail>` | An identifier is blank, contains a control character, exceeds the length cap, or is otherwise malformed (a non-numeric message ID; a second `HW.HEARTBEAT` argument that is neither `BYE` nor valid catalog JSON) | Permanent |
 | `ERR HW_PAYLOAD_TOO_LARGE <actual> > <limit>` | Payload above `MaxPayloadBytes`, or catalog above `MaxCatalogBytes` | Permanent |
 | `ERR HW_INVALID_COUNT <detail>` | `HW.RECEIVE` `COUNT` non-numeric, zero, negative, overflowing, or above `ReceiveMaxCount` | Permanent |
+| `NOAUTH <detail>` | The server requires authentication and none was presented | **Permanent** — configuration, not code |
+| `WRONGPASS <detail>` | The credentials were rejected | **Permanent** |
+| `NOPERM <detail>` | Authenticated, but not permitted to run the command | **Permanent** |
 | `ERR HW_STORAGE_FORMAT <detail>` | A queue holds entries written by a pre-013 Highway. The message names the key | Permanent — drain the queue or delete the data directory |
 | `ERR HW_INTERNAL <detail>` | An unexpected exception escaped a command handler | Permanent — a server bug |
 | `ERR Transaction failed.` | Garnet aborted the transaction; no work was performed | **Transient — retry** |
 | `ERR wrong number of arguments...` | Garnet's arity check, before the command runs | Permanent |
+
+**The authentication errors carry neither marker.** They are not `ERR HW_`-prefixed and are not the bare transient abort, so a client following the two-class rule literally has nowhere to put them. They are permanent: retrying a wrong password wastes the backoff budget and trips attempt counters on systems that keep them. They are worth their own exception type because the remedy differs from every other permanent failure — it is a configuration problem, not a code or network one.
+
+Note that StackExchange.Redis surfaces `NOAUTH`/`WRONGPASS` raised during connection setup inside a *connection* exception, so a client that does not inspect the message chain will report a wrong password as an unreachable host and send its operator to check the network.
 
 `HW_INTERNAL` is permanent deliberately. Several commands rewrite a whole list (acknowledgement, the lease sweeps), so a mid-operation failure can leave partial state that retrying would compound rather than repair.
 
@@ -820,8 +828,38 @@ A client built only from the `HW.*` commands cannot function. These stock comman
 | `SUBSCRIBE hw:door:...` | Observe doorbells. Optional — doorbells are a latency optimization and correctness never depends on them. |
 | `SET hw:idem:... NX EX` / `GET` / `DEL` | **Deduplication.** Optional — required only for a client that implements `[Idempotent]`-style at-most-once handler invocation. See below. |
 | `PING` / `ECHO` | Connection health, as with any RESP server. |
+| `AUTH <password>` or `AUTH <user> <password>` | **Required against a secured server.** Highway's own client sends the password alone; the username defaults to Garnet's `default`. |
 
 **The reply doorbell is node-global.** Every client subscribed to `hw:door:rep` receives a notification for **every** reply on the server, not just its own. A client must ignore request IDs it did not issue, and in particular must never `DEL` a slot it does not own — doing so destroys another caller's reply and hangs that call until its timeout. This is a real defect that occurred during development, not a hypothetical.
+
+### Authentication and transport security
+
+Highway does not define an authentication protocol — it configures Garnet's. A client
+therefore authenticates exactly as it would against any RESP server, with `AUTH`.
+
+**Password authentication.** A server secured with `WithPassword` has exactly one user,
+Garnet's `default`. A client may send the password alone or pair it with that username;
+anything else is refused. There is no configuration file and no user directory.
+
+**When authentication is required.** Highway refuses to build a server bound to a
+**non-loopback** address with no authentication, unless the operator explicitly opts out.
+Loopback is exempt: running open is the right configuration for development, and a
+loopback-bound broker is reachable only by processes already on the machine. This means
+`new HighwayServerBuilder().Build()` starts an unsecured broker, deliberately.
+
+**TLS is never required.** Not on loopback, not off it, not alongside a password. Highway
+can demand a password; it cannot invent a certificate, so a TLS-by-default server would be
+one that cannot start. **The password crosses the wire in clear text without it** — RESP
+`AUTH` sends it as an ordinary bulk string — so TLS is strongly recommended wherever a
+password crosses a network.
+
+**A trap worth knowing if you configure Garnet's ACL directly.** Highway's commands fall
+under Garnet's `@dangerous` ACL category, not `@admin`. A rule set of `+@all -@dangerous` —
+a common hardening idiom — connects successfully and then refuses **every** `HW.*` command
+with `NOPERM`. That reads like a Highway bug and is not. Grant `+@custom`, or name the
+commands individually.
+
+---
 
 ### Deduplication is a client protocol, not a server one
 

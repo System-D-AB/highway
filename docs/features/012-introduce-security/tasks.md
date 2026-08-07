@@ -27,7 +27,7 @@ Established that `ACL SETUSER` does not persist, that nothing reaches the AOF, a
 
 ## Phase 1 — Server
 
-### - [ ] T3 — Authentication options and validation
+### - [x] T3 — Authentication options and validation
 
 `AuthenticationOptions` with the password, the `IAuthenticationSettings` escape hatch, and
 `CreateSettings()` mapping onto `AclAuthenticationPasswordSettings(null, password)`.
@@ -37,7 +37,7 @@ Established that `ACL SETUSER` does not persist, that nothing reaches the AOF, a
 **Done when:** a password-configured server refuses no credentials, a wrong password, and an
 unrecognised username — the three rows the spike measured.
 
-### - [ ] T4 — `WithPassword`, `WithoutAuthentication`, and the bind-address policy
+### - [x] T4 — `WithPassword`, `WithoutAuthentication`, and the bind-address policy
 
 Builder methods, the mapping onto `GarnetServerOptions.AuthSettings`, the policy in one
 place, the informational line on loopback, the `Build()` refusal off it, and the warning
@@ -56,7 +56,7 @@ design decision, not an incidental choice.
 
 ## Phase 2 — Client
 
-### - [ ] T5 — Client credentials
+### - [x] T5 — Client credentials
 
 `Username`, `Password`, `ConfigureConnection` on `HighwayOptions`; the mapping onto
 `ConfigurationOptions`; documented precedence between connection string, properties, and the
@@ -66,7 +66,7 @@ delegate.
 **Done when:** all three routes work and precedence is asserted by a test rather than
 described.
 
-### - [ ] T6 — Error mapping
+### - [x] T6 — Error mapping
 
 `HighwayAuthenticationException` and `HighwayAuthorizationException`, both permanent;
 `Classify` extended for `NOAUTH`, `WRONGPASS`, `NOPERM`; the refused command name attached at
@@ -77,7 +77,7 @@ the call site, since T1 established the server does not send it.
 and a test asserts the **attempt count** for a wrong password — proving it was not retried,
 not merely that it eventually failed.
 
-### - [ ] T7 — Credential redaction
+### - [x] T7 — Credential redaction
 
 The shared `Redact` helper; the three known leak sites fixed
 (`HighwayEngine.cs:150`, `HighwayConnection.cs:100`, `HighwayConnection.cs:113`).
@@ -88,7 +88,7 @@ endpoint, and asserts that string appears in neither captured log output nor the
 Then confirm the test fails with the helper removed — a redaction test that cannot detect a
 leak is worse than none.
 
-### - [ ] T8 — Authenticated client end to end
+### - [x] T8 — Authenticated client end to end
 
 Heartbeats, doorbell subscriptions, backstop sweeps and reconnection against an authenticated
 server, including re-authentication after a dropped connection.
@@ -102,7 +102,7 @@ assumption about someone else's library and is therefore tested rather than trus
 
 ## Phase 3 — TLS
 
-### - [ ] T9 — Server and client TLS
+### - [x] T9 — Server and client TLS
 
 `HighwayTlsOptions` both sides, `WithTls` overloads (PFX, subject name, delegate, raw
 `IGarnetTlsOptions`), the mapping onto `GarnetServerOptions.TlsOptions`, certificate loading
@@ -115,7 +115,7 @@ file and subject are each reported at `Build()` naming the value — not as a ha
 later. Garnet's own production warning is quoted in the XML docs on `WithTls` alongside the
 `IGarnetTlsOptions` escape hatch.
 
-### - [ ] T10 — TLS end to end
+### - [x] T10 — TLS end to end
 
 Self-signed certificate generated **in the test**, TLS round trip, mTLS round trip, and a
 mismatch producing a diagnosable error.
@@ -129,7 +129,7 @@ of surfacing an opaque socket failure.
 
 ## Phase 4 — Conformance
 
-### - [ ] T11 — Authenticate the test suite, and retire the spikes
+### - [x] T11 — Authenticate the test suite, and retire the spikes
 
 `HighwayTestServer` generates a random credential per instance and authenticates by default.
 Delete `AclSpike.cs`, `AclUserCreationSpike.cs` and `SimpleAuthSpike.cs`, keeping only what
@@ -145,7 +145,7 @@ not an inconvenience.
 Keep T4's deliberately-unauthenticated tests on an explicitly unauthenticated server, so both
 postures stay covered.
 
-### - [ ] T12 — Protocol document
+### - [x] T12 — Protocol document
 
 `AUTH` added to § Stock Garnet Dependencies. § Error Contract gains the third class
 (`NOAUTH` / `WRONGPASS` / `NOPERM` — permanent, carrying neither existing marker). A section
@@ -156,7 +156,7 @@ covers authentication and TLS for client implementers, **including the `@dangero
 **Done when:** `ProtocolConformanceTests` is green and an implementer reading only the
 protocol file can build a working authenticated client.
 
-### - [ ] T13 — Product documentation and roadmap
+### - [x] T13 — Product documentation and roadmap
 
 Including a roadmap entry for the deferred roles feature, pointing at this feature's recorded
 findings so it does not start from scratch.

@@ -1,6 +1,7 @@
 using System.Net;
 using Garnet.server;
 using Garnet.server.Auth.Settings;
+using Garnet.server.TLS;
 using Highway.Server.Internal;
 using Microsoft.Extensions.Logging;
 
@@ -211,6 +212,54 @@ public sealed class HighwayServerBuilder
         return this;
     }
 
+    /// <summary>
+    /// Serves TLS using a PFX certificate file (feature 012).
+    ///
+    /// <para><b>Never required, and strongly recommended wherever a password crosses a
+    /// network.</b> RESP <c>AUTH</c> sends the password as an ordinary bulk string, so
+    /// without TLS it is on the wire in clear text. Highway makes authentication mandatory
+    /// off loopback because it can demand a password; it cannot demand a certificate, so
+    /// TLS stays opt-in.</para>
+    ///
+    /// <para>The certificate is loaded at <see cref="Build"/> so a missing file or wrong
+    /// password is a startup error naming the file, rather than an opaque handshake failure
+    /// minutes later.</para>
+    /// </summary>
+    public HighwayServerBuilder WithTls(string certFileName, string? certPassword = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(certFileName);
+        _opts.Tls.CertFileName = certFileName;
+        _opts.Tls.CertPassword = certPassword;
+        return this;
+    }
+
+    /// <summary>
+    /// Configures TLS in full — certificate store subject names, mTLS, revocation checking
+    /// and certificate refresh.
+    ///
+    /// <para>Read <see cref="Security.TlsOptions.Settings"/> before relying on this in
+    /// production: it quotes Garnet's own warning that the TLS class Highway wraps is
+    /// sample code not intended for production without review, and offers the escape
+    /// hatch.</para>
+    /// </summary>
+    public HighwayServerBuilder WithTls(Action<Security.TlsOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        configure(_opts.Tls);
+        return this;
+    }
+
+    /// <summary>
+    /// Escape hatch: uses <paramref name="settings"/> verbatim instead of the wrapper over
+    /// Garnet's sample TLS implementation.
+    /// </summary>
+    public HighwayServerBuilder WithTls(IGarnetTlsOptions settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        _opts.Tls.Settings = settings;
+        return this;
+    }
+
     /// <summary>Supplies a logger factory for structured logging from the server.</summary>
     public HighwayServerBuilder WithLoggerFactory(ILoggerFactory loggerFactory)
     {
@@ -250,6 +299,7 @@ public sealed class HighwayServerBuilder
 
         _opts.Observability.Validate();
         _opts.Authentication.Validate();
+        _opts.Tls.Validate();
         ValidateDeliveryOptions(_opts);
 
         var garnetOpts = BuildGarnetOptions(_opts);
@@ -316,6 +366,10 @@ public sealed class HighwayServerBuilder
             // Authentication (feature 012). Null when this server runs open, which is
             // Garnet's own default and means every connection is accepted.
             AuthSettings = opts.Authentication.CreateSettings(),
+
+            // Transport security (feature 012). Null when TLS is not configured, which is
+            // the default and is Garnet's own default too.
+            TlsOptions = opts.Tls.CreateTlsOptions(null),
         };
 
         if (opts.DataDir is not null)

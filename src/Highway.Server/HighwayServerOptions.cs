@@ -186,6 +186,12 @@ public sealed class HighwayServerOptions
     public Security.AuthenticationOptions Authentication { get; set; } = new();
 
     /// <summary>
+    /// Transport security (feature 012). Off by default and never mandatory — Highway can
+    /// demand a password but cannot invent a certificate.
+    /// </summary>
+    public Security.TlsOptions Tls { get; set; } = new();
+
+    /// <summary>
     /// How long a published message is kept in the backlog for late subscribers.
     /// Default: 1 day.
     /// </summary>

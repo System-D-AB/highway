@@ -28,10 +28,16 @@ public class AuthenticationTests : IDisposable
         connection.Should().NotBeNull();
     }
 
+    /// <summary>
+    /// The bare endpoint, without the password <c>HighwayTestServer.ConnectionString</c>
+    /// now carries by default (feature 012 T11).
+    /// </summary>
+    private string EndpointOnly => $"localhost:{_server.Port}";
+
     [Fact]
     public async Task NoCredentials_AreRefused_Legibly()
     {
-        var connect = async () => await HighwayConnection.ConnectAsync(_server.ConnectionString);
+        var connect = async () => await HighwayConnection.ConnectAsync(EndpointOnly);
 
         (await connect.Should().ThrowAsync<HighwayAuthenticationException>())
             .WithMessage("*rejected the supplied credentials*")
@@ -43,7 +49,7 @@ public class AuthenticationTests : IDisposable
     public async Task WrongPassword_IsRefused()
     {
         var connect = async () => await HighwayConnection.ConnectAsync(
-            _server.ConnectionString, new HighwayOptions { Password = "not-the-password" });
+            EndpointOnly, new HighwayOptions { Password = "not-the-password" });
 
         await connect.Should().ThrowAsync<HighwayAuthenticationException>();
     }
