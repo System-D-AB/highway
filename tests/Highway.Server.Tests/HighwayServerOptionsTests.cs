@@ -19,8 +19,6 @@ public class HighwayServerOptionsTests
         opts.Lease.Should().Be(TimeSpan.FromMinutes(5));
         opts.ReplySlotTtl.Should().Be(TimeSpan.FromMinutes(5));
         opts.MaxPayloadBytes.Should().Be(1 * 1024 * 1024);
-        opts.BacklogRetention.Should().Be(TimeSpan.FromDays(1));
-        opts.MaxBacklogEntries.Should().Be(10_000);
         opts.ReceiveDefaultCount.Should().Be(10);
         opts.ReceiveMaxCount.Should().Be(500);
         opts.WaitForCommit.Should().BeFalse();
@@ -36,8 +34,6 @@ public class HighwayServerOptionsTests
             Lease = TimeSpan.FromMinutes(10),
             ReplySlotTtl = TimeSpan.FromSeconds(30),
             MaxPayloadBytes = 512 * 1024,
-            BacklogRetention = TimeSpan.FromHours(2),
-            MaxBacklogEntries = 1_000,
             ReceiveDefaultCount = 5,
             ReceiveMaxCount = 100,
             WaitForCommit = true,
@@ -48,8 +44,6 @@ public class HighwayServerOptionsTests
         opts.Lease.Should().Be(TimeSpan.FromMinutes(10));
         opts.ReplySlotTtl.Should().Be(TimeSpan.FromSeconds(30));
         opts.MaxPayloadBytes.Should().Be(512 * 1024);
-        opts.BacklogRetention.Should().Be(TimeSpan.FromHours(2));
-        opts.MaxBacklogEntries.Should().Be(1_000);
         opts.ReceiveDefaultCount.Should().Be(5);
         opts.ReceiveMaxCount.Should().Be(100);
         opts.WaitForCommit.Should().BeTrue();

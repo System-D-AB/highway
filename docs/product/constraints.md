@@ -108,19 +108,14 @@ returns to find its messages waiting. Verified across real processes in the samp
 
 ### C2.4 — Pub/Sub is **not** a store for messages nobody has subscribed to
 
-**Status: Not met — the backlog still exists. Removal planned with feature 014.**
+**Status: Met** — the backlog was removed once `SendAsync` gave that use case a proper home.
 
-Today, a message published while **zero** groups are registered goes to a channel backlog
-that a future subscriber inherits. That produces a surprising rule: a group registering later
-receives an arbitrary prefix of history, determined by when the *first* subscriber happened
-to start.
+A publish with no registered group is delivered to nobody. A group registering later starts
+empty. The surprising rule this removes: a late group used to receive an arbitrary prefix of
+history, determined by when the *first* subscriber happened to start.
 
-**Once `SendAsync` exists, that use case has a proper home and the backlog goes away.** A
-publish with no registered subscriber means nobody was interested; there is nothing to keep.
-"Queue it until someone can handle it" is what a queue is for.
-
-Removing it also deletes the one known implementation obstacle in this document — see
-Obstacles.
+"Hold this until someone can handle it" is `SendAsync` and a queue — durable by design, with
+no dependence on subscription timing.
 
 ### C2.5 — Pub/Sub is not a replayable log
 
@@ -192,7 +187,7 @@ an error can retry or shed load. One that receives silent success cannot.
 
 | Structure | Bounded? |
 |---|---|
-| Channel backlog | Yes — but being removed (C2.4) |
+| Channel backlog | **Removed** (C2.4) |
 | Dead-letter queues | Yes — `MaxDeadLetterEntries` (feature 013) |
 | **Pub/Sub group queues** | **No — nothing at all** |
 | **Queues (C1)** | Not built yet; must be bounded from the start |
@@ -295,7 +290,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C2.1 | At-least-once per registered group | ✅ Met |
 | C2.2 | Acknowledged means gone | ✅ Met |
 | C2.3 | A down subscriber receives what it missed | ✅ Met |
-| C2.4 | Not a store for absent subscribers | ❌ Not met — backlog to be removed |
+| C2.4 | Not a store for absent subscribers | ✅ Met |
 | C2.5 | Not a replayable log | ✅ Met |
 | C3.1 | In-flight requests survive departure | ✅ Met |
 | C3.2 | An answer or a timeout, never silence | ✅ Met |
@@ -312,22 +307,10 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C6.4 | TLS available, never required | ✅ Met |
 | C6.5 | The tested path is the secured path | ✅ Met |
 
-**All six unmet constraints are in C4** — retention, storage and durability — which is one
+**All five unmet constraints are in C4** — retention, storage and durability — which is one
 coherent feature rather than six. Feature 014 delivered C1.
 
 ---
-
-## Obstacles
-
-Things that must be fixed *before* a constraint above can be met.
-
-**The backlog copy is O(entire backlog) in memory.**
-`HwSubscribeCommand.CopyBacklogToGroup` pops the whole backlog with
-`ListLeftPop(key, int.MaxValue)`, walks it, and pushes it all back inside one transaction
-holding an exclusive lock. Correct at 10,000 entries; fatal at 1 GB.
-
-**Removing the backlog (C2.4) deletes this obstacle entirely** rather than requiring it to be
-chunked — one of the better arguments for doing 014 before 016.
 
 ---
 

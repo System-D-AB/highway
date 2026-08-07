@@ -7,8 +7,8 @@ namespace Highway.Integration.Tests;
 
 /// <summary>
 /// Feature 004.1 Task 12 — Requirement 7 AC1–AC4: reply-slot TTL,
-/// last-writer-wins replies, backlog retention window, and backlog entry cap.
-/// Covers 004 Requirements 4 AC4/AC5 and 10 AC4 for the first time.
+/// last-writer-wins replies. The backlog cases it once covered were removed with the
+/// backlog itself (feature 014 follow-up).
 /// </summary>
 public class RetentionTests
 {
@@ -42,41 +42,29 @@ public class RetentionTests
             "the documented rule is last-writer-wins (004 Req 4 AC4)");
     }
 
+    /// <summary>
+    /// The channel backlog is gone (feature 014 follow-up). A publish with no registered
+    /// group is delivered to nobody, and a group registering later starts empty.
+    ///
+    /// <para>Highway used to hold such messages for a future subscriber, which produced a
+    /// surprising rule — a late group received an arbitrary prefix of history determined by
+    /// when the <i>first</i> subscriber happened to start. It existed because nothing else
+    /// could hold a message until someone could handle it. <c>SendAsync</c> now can.</para>
+    /// </summary>
     [Fact]
-    public void Backlog_ExpiredEntries_NotDeliveredToLateSubscriber()
+    public void PublishWithNoSubscribers_IsDeliveredToNobody()
     {
-        using var server = new HighwayTestServer(o => o.BacklogRetention = TimeSpan.FromMilliseconds(300));
+        using var server = new HighwayTestServer();
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        // Publish with zero groups → backlog
-        db.Execute("HW.PUBLISH", "ret.ch", "old-message");
+        db.Execute("HW.PUBLISH", "retention.ch", "orphan"u8.ToArray());
 
-        Thread.Sleep(TimeSpan.FromMilliseconds(700));
+        // Subscribing afterwards starts empty — the message was not kept for anyone.
+        db.Execute("HW.SUBSCRIBE", "retention.ch", "late-group");
 
-        // Late subscriber arrives after the retention window
-        db.Execute("HW.SUBSCRIBE", "ret.ch", "late-grp");
-        var received = (RedisResult[])db.Execute("HW.RECEIVE", "ret.ch", "late-grp", "COUNT", "10")!;
-
-        received.Should().BeEmpty(
-            "backlog entries older than the retention window must not be delivered (004 Req 10 AC4)");
-    }
-
-    [Fact]
-    public void Backlog_EntryCap_DropsOldest()
-    {
-        using var server = new HighwayTestServer(o => o.MaxBacklogEntries = 3);
-        using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
-        var db = redis.GetDatabase();
-
-        for (var i = 1; i <= 5; i++)
-            db.Execute("HW.PUBLISH", "cap.ch", $"m{i}");
-
-        db.Execute("HW.SUBSCRIBE", "cap.ch", "cap-grp");
-        var received = (RedisResult[])db.Execute("HW.RECEIVE", "cap.ch", "cap-grp", "COUNT", "10")!;
-
-        var payloads = received.Select(r => (string)((RedisResult[])r!)[1]!).ToList();
-        payloads.Should().Equal(["m3", "m4", "m5"],
-            "the backlog is capped at MaxBacklogEntries, dropping oldest first (004 Req 10 AC4)");
+        var received = db.Execute("HW.RECEIVE", "retention.ch", "late-group");
+        (received.IsNull || ((RedisResult[])received!).Length == 0)
+            .Should().BeTrue("a publish with no registered group reaches nobody");
     }
 }

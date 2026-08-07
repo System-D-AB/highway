@@ -145,19 +145,4 @@ public class AttemptCountTests
         => new HighwayServerOptions().MaxIdentifierBytes
             .Should().BeLessThan(Envelope.MaxUnambiguousIdentifierBytes);
 
-    /// <summary>
-    /// Backlog entries are deliberately unversioned: they have never been delivered, so
-    /// they carry no attempt count, and leaving the format alone means existing backlog
-    /// data survives the upgrade and promotes correctly.
-    /// </summary>
-    [Fact]
-    public void BacklogEntry_IsUnchanged_AndStillRoundTrips()
-    {
-        var encoded = Envelope.EncodeBacklogEntry(111L, 222L, "body"u8);
-        Envelope.DecodeBacklogEntry(encoded, out var publishTicks, out var messageId, out var payload);
-
-        publishTicks.Should().Be(111L);
-        messageId.Should().Be(222L);
-        payload.ToArray().Should().Equal("body"u8.ToArray());
-    }
 }

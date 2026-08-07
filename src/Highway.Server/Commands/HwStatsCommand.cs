@@ -14,7 +14,7 @@ namespace Highway.Server.Commands;
 /// <list type="bullet">
 ///   <item>no argument → <c>kind server nodes N services N channels N pendingRequests N</c></item>
 ///   <item>service name → <c>kind service queueDepth N hosts N inFlight N deadLettered N</c></item>
-///   <item>channel name → <c>kind channel groups N pending N backlog N deadLettered N</c></item>
+///   <item>channel name → <c>kind channel groups N pending N deadLettered N</c></item>
 ///   <item><c>Q:name</c> → <c>kind queue depth N workers N inFlight N deferred N deadLettered N</c></item>
 /// </list>
 ///
@@ -143,7 +143,6 @@ internal sealed class HwStatsCommand : HighwayCommandBase
                 api.GET(CreateArgSlice(HighwayKeys.ChannelGroupList(_name)), out PinnedSpanByte groups);
                 _channelGroups = SplitList(groups);
 
-                AddKey(CreateArgSlice(HighwayKeys.ChannelBacklog(_name)), LockType.Shared, StoreType.Object);
                 foreach (var group in _channelGroups)
                 {
                     AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_name, group)), LockType.Shared, StoreType.Object);
@@ -318,14 +317,11 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             deadLettered += dead;
         }
 
-        api.ListLength(CreateArgSlice(HighwayKeys.ChannelBacklog(channel)), out var backlog);
-
         return
         [
             ("kind", "channel"),
             ("groups", _channelGroups.Length.ToString()),
             ("pending", pending.ToString()),
-            ("backlog", backlog.ToString()),
             ("deadLettered", deadLettered.ToString()),
         ];
     }

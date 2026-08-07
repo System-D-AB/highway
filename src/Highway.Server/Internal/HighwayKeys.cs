@@ -97,8 +97,6 @@ internal static class HighwayKeys
     /// <summary>Per-channel message-ID sequence counter.  hw:ch:{channel}:seq</summary>
     public static string ChannelSeq(string channel) => $"hw:ch:{channel}:seq";
 
-    /// <summary>Backlog of messages published with no active subscriber groups.  hw:ch:{channel}:backlog</summary>
-    public static string ChannelBacklog(string channel) => $"hw:ch:{channel}:backlog";
 
     /// <summary>Pending message queue for a specific subscriber group.  hw:ch:{channel}:grp:{group}:q</summary>
     /// <summary>
@@ -200,9 +198,6 @@ internal static class HighwayKeys
 
     public static byte[] ChannelSeqBytes(string channel) =>
         Encoding.UTF8.GetBytes(ChannelSeq(channel));
-
-    public static byte[] ChannelBacklogBytes(string channel) =>
-        Encoding.UTF8.GetBytes(ChannelBacklog(channel));
 
     public static byte[] GroupQueueBytes(string channel, string group) =>
         Encoding.UTF8.GetBytes(GroupQueue(channel, group));

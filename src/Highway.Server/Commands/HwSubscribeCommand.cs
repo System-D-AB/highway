@@ -39,7 +39,6 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
 
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(_channel)), LockType.Exclusive, StoreType.Main);
-        AddKey(CreateArgSlice(HighwayKeys.ChannelBacklog(_channel)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_channel, _group)), LockType.Exclusive, StoreType.Object);
         return true;
     }
@@ -76,9 +75,11 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
             // ONLY for a genuinely new group. A re-subscribe (e.g. feature 005's
             // engine sends HW.SUBSCRIBE on every start) must not re-copy the
             // backlog, and a group that unsubscribed and re-subscribes IS new
-            // (HW.UNSUBSCRIBE removed it from the set and deleted its queue).
-            if (addedCount > 0)
-                CopyBacklogToGroup(api);
+            // Nothing is copied into a new group. Highway used to seed it from a
+            // per-channel backlog, which meant a late subscriber received an arbitrary
+            // prefix of history depending on when the first subscriber started — and the
+            // copy materialised the entire backlog under an exclusive lock, which was
+            // fatal at any serious size. A new group starts empty (feature 014 follow-up).
 
             WriteSimpleString(ref output, "OK");
         }
@@ -88,37 +89,6 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
         }
     }
 
-    private void CopyBacklogToGroup<TGarnetApi>(TGarnetApi api) where TGarnetApi : IGarnetApi
-    {
-        var backlogKey    = CreateArgSlice(HighwayKeys.ChannelBacklog(_channel));
-        var groupQueueKey = CreateArgSlice(HighwayKeys.GroupQueue(_channel, _group));
-
-        // Pop everything from the backlog to examine
-        var status = api.ListLeftPop(backlogKey, int.MaxValue, out var backlogEntries);
-        if (status != GarnetStatus.OK || backlogEntries is null || backlogEntries.Length == 0)
-            return;
-
-        var retentionCutoff = DateTime.UtcNow.Ticks - _opts.BacklogRetention.Ticks;
-
-        // Process backlog entries in order, filtering expired ones
-        foreach (var backlogEntry in backlogEntries)
-        {
-            var span = backlogEntry.ReadOnlySpan;
-            if (span.Length < 16) continue; // malformed
-
-            Envelope.DecodeBacklogEntry(span, out var publishTicks, out var messageId, out var payload);
-
-            // Retain in backlog (expired or not — keep for future subscribers)
-            api.ListRightPush(backlogKey, CreateArgSlice(span.ToArray()), out _);
-
-            // Skip expired entries when copying to the group queue
-            if (publishTicks < retentionCutoff) continue;
-
-            // Copy as channel entry (ID preserved, backlog timestamp stripped)
-            var channelEntry = Envelope.EncodeChannelEntry(messageId, payload);
-            api.ListRightPush(groupQueueKey, CreateArgSlice(channelEntry), out _);
-        }
-    }
 
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
         => _recorder.Record(

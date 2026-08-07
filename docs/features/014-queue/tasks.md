@@ -167,23 +167,25 @@ stop pretending to be a store.
 
 ### To remove
 
-- [ ] **The channel backlog.** `hw:ch:{channel}:backlog`, `BacklogRetention`, `MaxBacklogEntries`, and the backlog branch in `HwPublishCommand` — a publish with no registered group delivers to nobody, which is what "publish" means
-- [ ] **`CopyBacklogToGroup` in `HwSubscribeCommand`.** This deletes the one entry in `constraints.md` § Obstacles: it pops the entire backlog under an exclusive lock with `ListLeftPop(key, int.MaxValue)`, which is fatal at any serious size. Removing it is better than chunking it
-- [ ] The backlog entry framing in `Envelope` — the only unversioned framing left after feature 013
+- [x] **The channel backlog.** `hw:ch:{channel}:backlog`, `BacklogRetention`, `MaxBacklogEntries`, and the backlog branch in `HwPublishCommand` — a publish with no registered group delivers to nobody, which is what "publish" means
+- [x] **`CopyBacklogToGroup` in `HwSubscribeCommand`.** This deletes the one entry in `constraints.md` § Obstacles: it pops the entire backlog under an exclusive lock with `ListLeftPop(key, int.MaxValue)`, which is fatal at any serious size. Removing it is better than chunking it
+- [x] The backlog entry framing in `Envelope` — the only unversioned framing left after feature 013
 
 ### To update
 
-- [ ] `constraints.md` — **C2.4** moves from *Not met* to *Met*, and its documented exception disappears entirely rather than needing defending
-- [ ] `docs/HIGHWAY-PROTOCOL.md` — remove the backlog key, the backlog framing, and the "zero groups → the backlog" rule from § HW.PUBLISH; state plainly that a publish with no registered group is delivered to nobody
-- [ ] `HW.SUBSCRIBE` — no longer copies anything; a new group starts empty
-- [ ] `HW.STATS` channel form — drop `backlog`
-- [ ] Samples and README — the scenario that demonstrates backlog behaviour becomes a queue scenario
-- [ ] **Migration note.** Existing backlog data becomes unreachable. Highway has not shipped, so the remedy is deleting the data directory; it is documented anyway, because a silently orphaned key is worse than a documented one
+- [x] `constraints.md` — **C2.4** moves from *Not met* to *Met*, and its documented exception disappears entirely rather than needing defending
+- [x] `docs/HIGHWAY-PROTOCOL.md` — remove the backlog key, the backlog framing, and the "zero groups → the backlog" rule from § HW.PUBLISH; state plainly that a publish with no registered group is delivered to nobody
+- [x] `HW.SUBSCRIBE` — no longer copies anything; a new group starts empty
+- [x] `HW.STATS` channel form — drop `backlog`
+- [x] Samples and README — the scenario that demonstrates backlog behaviour becomes a queue scenario
+- [x] **Migration note.** Existing backlog data becomes unreachable. Highway has not shipped, so the remedy is deleting the data directory; it is documented anyway, because a silently orphaned key is worse than a documented one
 
 ### To decide
 
-- [ ] **Does Pub/Sub keep dead-lettering and delayed publish?** Both should stay: a subscriber that fails repeatedly still needs its poison message removed, and a delayed notification is genuinely useful. Only the *backlog* is being removed, not feature 013
-- [ ] **Do group queues keep retention and size caps** (`constraints.md` C4.4), or does bounding move entirely to queues? They must stay bounded — an orphaned group queue is what actually consumes a gigabyte, and feature 015 depends on it
+- [x] **Does Pub/Sub keep dead-lettering and delayed publish?** Yes — both stayed; only the backlog was removed.
+- [x] ~~original~~ Both should stay: a subscriber that fails repeatedly still needs its poison message removed, and a delayed notification is genuinely useful. Only the *backlog* is being removed, not feature 013
+- [x] **Do group queues keep retention and size caps** — yes, deferred to 016.
+- [x] ~~original~~ (`constraints.md` C4.4), or does bounding move entirely to queues? They must stay bounded — an orphaned group queue is what actually consumes a gigabyte, and feature 015 depends on it
 
 ---
 
