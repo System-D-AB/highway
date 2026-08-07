@@ -164,18 +164,18 @@ the current defaults.**
 
 ### C4.1 — Retention: 100 days
 
-**Status: Not met — default is 1 day.** Feature 016.
+**Status: Not met — default is 1 day.** Feature 016 (specced).
 
 ### C4.2 — Size cap: 1 GB, configurable
 
-**Status: Not met — the cap is a count of 10,000 entries, not a size.** Feature 016.
+**Status: Not met — the cap is a count of 10,000 entries, not a size.** Feature 016 (specced).
 
 What exhausts a server is bytes, not entries, and a count cannot express "as much memory as I
 am willing to give this".
 
 ### C4.3 — Reaching a limit is never silent
 
-**Status: Not met — the backlog drops its oldest entry.** Feature 016.
+**Status: Not met.** Feature 016 (specced). The backlog that used to drop silently is gone; what remains is that group queues and queues have no refusal path.
 
 **Intended: refuse the send or publish.** Under C1.2 a queued message is one nobody has ever
 processed; discarding it is losing data the queue exists to protect. A producer that receives
@@ -183,7 +183,7 @@ an error can retry or shed load. One that receives silent success cannot.
 
 ### C4.4 — Every queue-like structure is bounded
 
-**Status: Not met.** Feature 016.
+**Status: Not met.** Feature 016 (specced).
 
 | Structure | Bounded? |
 |---|---|
@@ -198,14 +198,14 @@ gigabyte. Its remedy is feature 015.
 
 ### C4.5 — Durability is the default, not an option
 
-**Status: Not met.** Feature 016.
+**Status: Not met.** Feature 016 (specced) — **the most urgent of the five**, because every C1 and C2 guarantee is false without it.
 
 `new HighwayServerBuilder().Build()` is memory-only: no data directory, no AOF, everything
 lost on restart. Every guarantee in C1 and C2 is false in that configuration.
 
 ### C4.6 — Storage growth is bounded over time, not just in the moment
 
-**Status: Not met.** Feature 016.
+**Status: Not met.** Feature 016 (specced) — independent of every other decision there, and worth doing even if the rest is descoped.
 
 Highway enables AOF and sets a checkpoint directory but sets no `AofSizeLimit` and leaves
 `CompactionFrequencySecs` at `0`. The log grows without limit and restart recovery replays all
