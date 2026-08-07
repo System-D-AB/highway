@@ -220,7 +220,19 @@ behalf. Closes C1.5's unbounded growth.
 
 ### 016 — Retention, Storage and Durability
 
-Closes C1.3, C2.1 through C2.6. One coherent piece of work rather than six.
+**Specced** — `docs/features/016-retention-and-durability/requirements.md`. Closes all five
+remaining unmet constraints (C4.1–C4.6). One coherent piece of work rather than five
+problems.
+
+**C4.5 is the one that makes the others conditional:** `new HighwayServerBuilder().Build()`
+is memory-only, so every queue and pub/sub guarantee is false in the configuration a
+newcomer meets first. Feature 014 shipped a warning because a silent lie was unacceptable;
+this replaces the warning with the fix.
+
+**Four open decisions are recorded in the requirements rather than guessed** — what the byte
+budget is measured against, whether a full-queue refusal is permanent or transient, the
+`MaxDeliveryAttempts` off-by-one, and where the default data directory lives. Each changes
+the shape of the feature, so the design is not written until they are settled.
 
 - Byte-based caps with real accounting; 1 GB default, configurable
 - 100-day retention default
