@@ -14,6 +14,74 @@ documentation defect and loses it.
 
 ---
 
+## 2026-08-07 — feature 002 (observability)
+
+**Libraries:** features 001–007 and 010 merged, plus the flight recorder.
+**Ran:** broker + order service + storefront as three processes; the core
+scenarios plus the new `replay` and `stats recorder` commands.
+
+### Finding 6 — a rejection poisoned every later call on the same connection *(defect, fixed)*
+
+Found while investigating a duplicate event in the recorder, not by looking for
+it.
+
+**Symptom.** The sample's recorder showed **two** `RpcClaimed` events for one
+order. Chasing that led to a far worse one: on a single connection, a command
+that failed validation caused every *subsequent* invocation of that command to
+return the **previous** call's error. A valid `HW.CALL` answered
+`ERR HW_PAYLOAD_TOO_LARGE 100 > 16` — a rejection belonging to a request sent
+earlier.
+
+**Root cause.** Garnet caches one procedure instance per session
+(`CustomCommandManagerSession.sessionTransactionProcMap`) and reuses it for every
+invocation of that command on that connection. `HighwayCommandBase` never cleared
+its captured error, so the first rejection stuck. The duplicate `RpcClaimed` was
+the same mechanism: a claimed request ID left over from a successful dequeue made
+each later *nil* dequeue re-record a claim that never happened.
+
+In production this is serious. The 005 client shares one multiplexer per node, so
+a single oversize payload would have made that command fail for the whole node
+until it reconnected.
+
+**Fix.** `HighwayCommandBase.Prepare` is now `sealed`: it clears per-invocation
+state and delegates to a new abstract `PrepareCore`, and commands override
+`ResetState()` for their own conditionally-assigned fields. Sealing makes the
+class of bug structurally impossible rather than fixed once. Covered by
+`SessionStateIsolationTests` (5 tests).
+
+**Why every test missed it.** Each test used a fresh connection, or never issued
+a good call after a bad one on the same connection.
+
+### Finding 7 — the "upstream Garnet parser quirk" was Highway's own bug *(correction)*
+
+Feature 004.1 recorded a finding that a rejected `HW.*` command containing a raw
+newline desynced subsequent custom-command parsing on the same session, and
+attributed it to Garnet. `NewlineDesyncProbe` asserted the broken behaviour with
+a note to "flip this assertion when Garnet fixes it".
+
+Fixing finding 6 made that test fail: the follow-up command now succeeds. The
+desync was never Garnet's — it was the same state leak. Newlines were incidental;
+**any** rejection did it. The probe has been rewritten to document the correction,
+and the misattribution is recorded rather than quietly deleted.
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| RPC, errors-as-data, publish/subscribe (all 010 scenarios) | ✅ unchanged |
+| `replay orders.create` | ✅ RpcEnqueued → RpcClaimed → RpcAcknowledged, in order, with sizes |
+| Rejected command recorded with its error code | ✅ `HW_PAYLOAD_TOO_LARGE` |
+| `stats recorder` | ✅ enabled, names, events, bytes, drop counters, failures 0 |
+| Recording adds no keys to the Garnet keyspace | ✅ `KEYS hw:fdr:*` empty |
+| Liveness heartbeats not recorded | ✅ registration only |
+| OTEL wiring shown in the broker sample | ✅ copy-pasteable, no package added |
+
+Before the fix the same run showed a phantom duplicate `RpcClaimed`; after it,
+the lifecycle reads exactly as it should. The recorder found a bug in Highway on
+its first real use, which is roughly the best argument for it.
+
+---
+
 ## 2026-08-07 — first run (feature 010)
 
 **Libraries:** features 001–007 merged, 440 tests green before the run.

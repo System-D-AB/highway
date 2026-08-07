@@ -24,7 +24,7 @@ public class HighwayCommandBaseTests
         public bool ExposeFail(string code, string detail) => Fail(code, detail);
         public bool ExposeTryWriteError(ref MemoryResult<byte> output) => TryWriteError(ref output);
 
-        public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput) => true;
+        protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput) => true;
         public override void Main<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output) { }
     }
 

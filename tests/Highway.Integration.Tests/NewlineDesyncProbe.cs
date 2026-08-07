@@ -10,13 +10,21 @@ namespace Highway.Integration.Tests;
 /// Feature 004.1 — regression tests documenting the session behavior around raw
 /// newline bytes in command arguments (research.md § "Finding 6").
 ///
-/// Known upstream quirk: a REJECTED custom HW.* command whose argument contains
-/// a literal newline can desync subsequent custom-command parsing on the SAME
-/// session (the follow-up command reads a shifted/blank argument), while PING
-/// and stock commands keep working and a fresh connection is unaffected.
-/// Accepted commands with newlines (e.g. payloads) never desync. Highway 005
-/// clients validate identifiers client-side and never send control characters,
-/// so this is unreachable in normal operation.
+/// <b>Correction (feature 002).</b> These tests were written for a supposed
+/// upstream Garnet parser quirk: a rejected <c>HW.*</c> command carrying a raw
+/// newline appeared to desync subsequent custom-command parsing on the same
+/// session. That diagnosis was wrong.
+///
+/// The real cause was Highway's own: Garnet caches one procedure instance per
+/// session, and <c>HighwayCommandBase</c> never cleared its captured validation
+/// error, so <em>any</em> rejection — newline or not — was replayed for every
+/// later invocation of that command on that connection. Garnet's parser was
+/// never involved.
+///
+/// The tests are kept because newline handling is still worth pinning, and
+/// because the file records how a Highway bug spent two features attributed to
+/// someone else's code. The session-isolation guarantee itself is covered by
+/// <c>SessionStateIsolationTests</c>.
 /// </summary>
 public class NewlineDesyncProbe : IDisposable
 {
@@ -88,18 +96,24 @@ public class NewlineDesyncProbe : IDisposable
     }
 
     [Fact]
-    public void RejectedCommand_WithNewlineArg_DocumentsKnownSessionDesync()
+    public void RejectedCommand_WithNewlineArg_DoesNotAffectTheNextCommand()
     {
         // C1: rejected — group contains a raw newline
         var bad = Probe(() => _db.Execute("HW.SUBSCRIBE", "probe.ch", "a\nb").ToString());
         bad.Should().StartWith("ERR: ERR HW_INVALID_ARG");
 
-        // C2: KNOWN QUIRK — the next custom command on the same session is
-        // mis-parsed. Asserted (not "hoped") so any future Garnet bump that
-        // fixes or changes this behavior is surfaced loudly.
+        // C2: the follow-up now SUCCEEDS.
+        //
+        // This assertion used to expect a failure, attributed to an upstream
+        // Garnet parser quirk. That diagnosis was wrong. The cause was Highway's
+        // own state leak: Garnet caches one procedure instance per session, and
+        // HighwayCommandBase never cleared its captured error, so the rejection
+        // above was replayed for every later invocation on this connection. It
+        // had nothing to do with newlines — any rejection did it. Feature 002
+        // found and fixed it (see SessionStateIsolationTests).
         var clean = Probe(() => _db.Execute("HW.SUBSCRIBE", "probe.ch", "clean-group").ToString());
-        clean.Should().StartWith("ERR:",
-            "documents the upstream desync; flip this assertion when Garnet fixes it");
+        clean.Should().StartWith("OK:",
+            "a rejected command must not affect the next command on the same connection");
 
         // C3: PING still works — framing is intact, only custom-command arg
         // parsing is affected.
@@ -112,7 +126,7 @@ public class NewlineDesyncProbe : IDisposable
             .Should().Be("OK");
 
         _output.WriteLine($"C1 rejected \\n subscribe  : {bad}");
-        _output.WriteLine($"C2 same-conn follow-up    : {clean} (known desync)");
+        _output.WriteLine($"C2 same-conn follow-up    : {clean} (was a Highway bug, now fixed)");
         _output.WriteLine($"C3 PING after             : {ping}");
         _output.WriteLine("C4 fresh connection       : OK");
     }

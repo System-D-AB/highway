@@ -3,6 +3,8 @@ using System.Text.Json;
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
+using Highway.Abstractions.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -53,15 +55,27 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
     private enum Form { Liveness, Registration, Departure }
 
     private readonly HighwayServerOptions _opts;
+    private readonly FlightRecorder _recorder;
 
     private string _nodeId = null!;
     private Form _form;
     private byte[] _catalog = [];
     private string[] _catalogServices = [];
 
-    public HwHeartbeatCommand(HighwayServerOptions opts) => _opts = opts;
+    public HwHeartbeatCommand(HighwayServerOptions opts, FlightRecorder recorder)
+    {
+        _opts = opts;
+        _recorder = recorder;
+    }
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    protected override void ResetState()
+    {
+        _form = Form.Liveness;
+        _catalog = [];
+        _catalogServices = [];
+    }
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         var idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "nodeId", _opts.MaxIdentifierBytes, out _nodeId))
@@ -315,5 +329,21 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
             AddKey(CreateArgSlice(HighwayKeys.ServiceNodes(service)), LockType.Exclusive, StoreType.Object);
             AddKey(CreateArgSlice(HighwayKeys.ServiceNodeList(service)), LockType.Exclusive, StoreType.Main);
         }
+    }
+
+    /// <summary>
+    /// Records registration and departure only. Liveness beats are deliberately
+    /// not recorded: feature 006 made them fire every five seconds per node, so
+    /// recording them would evict real history to store the fact that nothing happened.
+    /// </summary>
+    public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
+    {
+        if (_form == Form.Liveness && !Failed) return;
+
+        _recorder.Record(
+            _form == Form.Departure ? HighwayEventType.NodeDeparted : HighwayEventType.NodeRegistered,
+            _nodeId ?? "?",
+            nodeId: _nodeId,
+            errorCode: FailureCode);
     }
 }

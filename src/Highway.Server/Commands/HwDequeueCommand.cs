@@ -3,6 +3,8 @@ using System.Text;
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
+using Highway.Abstractions.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -17,17 +19,31 @@ namespace Highway.Server.Commands;
 internal sealed class HwDequeueCommand : HighwayCommandBase
 {
     private readonly HighwayServerOptions _opts;
+    private readonly FlightRecorder _recorder;
 
     private string _service = null!;
     private string _nodeId = null!;
     private string[] _knownNodes = [];
+    private string? _claimedRequestId;
 
-    public HwDequeueCommand(HighwayServerOptions opts)
+    public HwDequeueCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
         _opts = opts;
+        _recorder = recorder;
     }
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    /// <summary>
+    /// Cleared because Garnet reuses one instance per session: a claimed request
+    /// id left over from a previous successful dequeue would make the next NIL
+    /// dequeue re-record a phantom claim.
+    /// </summary>
+    protected override void ResetState()
+    {
+        _claimedRequestId = null;
+        _knownNodes = [];
+    }
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         int idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "service", _opts.MaxIdentifierBytes, out _service))
@@ -151,6 +167,7 @@ internal sealed class HwDequeueCommand : HighwayCommandBase
             }
 
             // Reply [requestId, payload]
+            _claimedRequestId = Encoding.UTF8.GetString(requestId);
             WriteBulkStringArray(ref output, CreateArgSlice(requestId), CreateArgSlice(deqPayload));
         }
         catch (Exception ex)
@@ -229,5 +246,16 @@ internal sealed class HwDequeueCommand : HighwayCommandBase
         span[2] = (byte)'1';
         span[3] = (byte)'\r';
         span[4] = (byte)'\n';
+    }
+
+    /// <summary>Records the claim. A nil dequeue records nothing — an empty poll is not an event.</summary>
+    public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
+    {
+        if (!Failed && _claimedRequestId is null) return;
+        _recorder.Record(
+            HighwayEventType.RpcClaimed, _service ?? "?",
+            nodeId: _nodeId,
+            requestId: _claimedRequestId,
+            errorCode: FailureCode);
     }
 }

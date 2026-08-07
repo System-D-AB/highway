@@ -90,6 +90,7 @@ while (true)
             case "low":     await LowAsync(parts); break;
             case "discover": await DiscoverAsync(parts); break;
             case "stats":   await StatsAsync(parts); break;
+            case "replay":  await ReplayAsync(parts); break;
             case "help":    PrintHelp(); break;
             default:
                 Console.WriteLine($"  unknown command '{command}' — try 'help'");
@@ -172,7 +173,7 @@ async Task LowAsync(string[] parts)
 
 // NOTE: discover and stats drop to raw RESP because Highway.Client exposes no
 // public API for HW.DISCOVER / HW.STATS. See samples/RUNLOG.md, finding 2.
-async Task DiscoverAsync(string[] parts)
+async Task  DiscoverAsync(string[] parts)
 {
     var service = parts.Length > 1 ? parts[1] : "orders.create";
 
@@ -190,6 +191,36 @@ async Task DiscoverAsync(string[] parts)
     {
         var pair = (RedisResult[])entry!;
         Console.WriteLine($"    {(string)pair[0]!}  (last beat {(string)pair[1]!}s ago)");
+    }
+}
+
+// The flight recorder (feature 002): what the server has seen recently.
+// Volatile by design — it is a debugging aid, not an audit log.
+async Task ReplayAsync(string[] parts)
+{
+    var name = parts.Length > 1 ? parts[1] : "orders.create";
+
+    using var redis = await ConnectionMultiplexer.ConnectAsync(server);
+    var events = (RedisResult[])(await redis.GetDatabase()
+        .ExecuteAsync("HW.REPLAY", name, "FROM", "-5min", "LIMIT", "20"))!;
+
+    if (events.Length == 0)
+    {
+        Console.WriteLine($"  nothing recorded for '{name}' in the last 5 minutes");
+        return;
+    }
+
+    Console.WriteLine($"  last {events.Length} operations on '{name}':");
+    foreach (var raw in events)
+    {
+        var flat = (RedisResult[])raw!;
+        var f = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var i = 0; i + 1 < flat.Length; i += 2)
+            f[(string)flat[i]!] = (string)flat[i + 1]!;
+
+        var when = DateTimeOffset.TryParse(f["timestamp"], out var ts) ? ts.ToString("HH:mm:ss.fff") : f["timestamp"];
+        var detail = f["errorCode"].Length > 0 ? $"FAILED {f["errorCode"]}" : $"{f["payloadSize"]} bytes";
+        Console.WriteLine($"    {when}  {f["eventType"],-20} {detail}");
     }
 }
 
@@ -223,6 +254,8 @@ void PrintHelp() => Console.WriteLine("""
       low <item> [remaining] publish InventoryLow
       discover [service]     which nodes host a service
       stats [name]           server / service / channel counters
+      stats recorder         flight recorder health
+      replay [name]          recent recorded operations for a service
       help                   this list
       quit                   graceful shutdown
     """);

@@ -2,6 +2,8 @@ using System.Text;
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
+using Highway.Abstractions.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -15,16 +17,18 @@ namespace Highway.Server.Commands;
 internal sealed class HwUnsubscribeCommand : HighwayCommandBase
 {
     private readonly HighwayServerOptions _opts;
+    private readonly FlightRecorder _recorder;
 
     private string _channel = null!;
     private string _group = null!;
 
-    public HwUnsubscribeCommand(HighwayServerOptions opts)
+    public HwUnsubscribeCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
         _opts = opts;
+        _recorder = recorder;
     }
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         int idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "channel", _opts.MaxIdentifierBytes, out _channel))
@@ -77,4 +81,10 @@ internal sealed class HwUnsubscribeCommand : HighwayCommandBase
             WriteError(ref output, HighwayErrors.InternalError(ex.Message));
         }
     }
+
+    public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
+        => _recorder.Record(
+            HighwayEventType.GroupRemoved, _channel ?? "?",
+            nodeId: _group,
+            errorCode: FailureCode);
 }

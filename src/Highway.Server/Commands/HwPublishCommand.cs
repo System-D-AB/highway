@@ -3,6 +3,8 @@ using System.Text;
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
+using Highway.Abstractions.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -18,19 +20,28 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 {
     private readonly HighwayServerOptions _opts;
     private readonly DoorbellBridge _doorbell;
+    private readonly FlightRecorder _recorder;
 
     private string _channel = null!;
     private byte[] _payloadBytes = [];
     private string[] _groups = [];
     private long _messageId;
 
-    public HwPublishCommand(HighwayServerOptions opts, DoorbellBridge doorbell)
+    public HwPublishCommand(HighwayServerOptions opts, DoorbellBridge doorbell, FlightRecorder recorder)
     {
         _opts     = opts;
         _doorbell = doorbell;
+        _recorder = recorder;
     }
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    protected override void ResetState()
+    {
+        _groups = [];
+        _messageId = 0;
+        _payloadBytes = [];
+    }
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         int idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "channel", _opts.MaxIdentifierBytes, out _channel))
@@ -111,6 +122,15 @@ internal sealed class HwPublishCommand : HighwayCommandBase
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
     {
         if (Failed) return; // a rejected command must never ring a doorbell
+        _recorder.Record(
+            HighwayEventType.Published, _channel ?? "?",
+            messageId: _messageId == 0 ? null : _messageId,
+            payload: _payloadBytes,
+            errorCode: FailureCode,
+            count: _groups.Length);
+
+        if (Failed) return;
+
         var msgIdBytes = Encoding.UTF8.GetBytes(_messageId.ToString());
         foreach (var group in _groups)
             _doorbell.Ring(HighwayKeys.GroupDoorbell(_channel, group), msgIdBytes);

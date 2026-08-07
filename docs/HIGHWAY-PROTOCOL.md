@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 1.0** — reflects everything shipped through feature 006.
+**Protocol version 1.1** — reflects everything shipped through feature 002.
 
 ## About
 
@@ -25,6 +25,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 - [RPC Commands](#rpc-commands)
 - [Pub/Sub Commands](#pubsub-commands)
 - [Registry Commands](#registry-commands)
+- [Observability Commands](#observability-commands)
 - [Stock Garnet Dependencies](#stock-garnet-dependencies)
 - [Key Schema](#key-schema)
 - [Entry Framing](#entry-framing)
@@ -36,7 +37,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 1.0**
+**Current version: 1.1**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -44,6 +45,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 1.1 | 002 | Observability. Adds `HW.REPLAY` and a fourth `HW.STATS` form (`RECORDER`); adds the optional `tp` envelope field carrying W3C trace context; documents the `ActivitySource` names. Additive — no existing command, reply or envelope field changed. |
 | 1.0 | 004, 004.1, 005, 006 | Initial specification. Nine RPC and pub/sub commands (004); the `ERR HW_*` error contract, identifier rules and mirror keys (004.1); reply-slot retrieval and the client envelope (005); three registry commands, the three-form `HW.HEARTBEAT`, and dead-node pruning (006). |
 
 ---
@@ -65,7 +67,8 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.RACK` | 4 | 1 | Acknowledge a consumed message |
 | `HW.HEARTBEAT` | -2 | 3 | Register a catalog, prove liveness, or depart |
 | `HW.DISCOVER` | 2 | 1 | Live nodes hosting a service |
-| `HW.STATS` | -1 | 3 | Server, service, or channel counters |
+| `HW.STATS` | -1 | 4 | Server, service, channel, or recorder counters |
+| `HW.REPLAY` | -2 | 1 | Recent recorded operations for one name |
 
 ---
 
@@ -114,6 +117,14 @@ The `HW.*` commands never inspect a payload, so the payload format is a client c
 | `src` | Sending node's name — the audit and tracing hook. |
 | `ts` | Send timestamp, ISO-8601 UTC. |
 | `body` | The application object, embedded as a nested JSON value. |
+| `tp` | **Optional.** W3C `traceparent` for distributed tracing (feature 002). |
+
+The `tp` field is optional in both directions and does **not** change the
+envelope version. `v` and `body` are the only required fields, and a reader
+ignores properties it does not recognise — verified both ways: an existing reader
+given an envelope carrying `tp` reads it correctly, and a new reader given one
+without simply finds it absent. A reader that does not understand `tp` must
+ignore it rather than reject the envelope.
 
 No polymorphic type metadata is ever written. The wire carries a service or channel name and a JSON shape, never CLR type identity.
 
@@ -522,8 +533,143 @@ Operational counters. The reply is a **flat array of alternating field names and
 | server | `nodes` (live registrations), `services` and `channels` (distinct names across live catalogs) |
 | service | `queueDepth` (pending requests), `hosts` (live nodes hosting it), `inFlight` (claimed but unacknowledged, across all nodes) |
 | channel | `groups` (registered subscriber groups), `pending` (undelivered across all groups), `backlog` (entries held for late subscribers) |
+| recorder | `enabled`, `names`, `events`, `bytes`, `droppedCapacity`, `droppedBudget`, `failures` |
+
+**The `RECORDER` form.** `HW.STATS RECORDER` reports flight-recorder health
+(feature 002). `RECORDER` is a **reserved name**, matched case-insensitively, and
+takes priority over a service or channel that happens to share it — the same kind
+of explicit resolution rule as service-beats-channel above.
+
+```
+HW.STATS RECORDER
+  -> kind recorder  enabled 1  names 12  events 84213  bytes 41224192
+     droppedCapacity 1902  droppedBudget 0  failures 0
+```
+
+Drop counters are cumulative since server start, so an operator can tell whether
+history is being lost rather than only how much is held. `droppedCapacity` counts
+events pushed out of a name's own buffer; `droppedBudget` counts reclamation
+forced by the server-wide memory budget. `failures` counts recording attempts
+that threw and were swallowed — non-zero means a bug worth reporting, never a
+lost operation. The form answers when the recorder is disabled, reporting
+`enabled 0` rather than an error.
 
 **No snapshot consistency.** Counters are read under the command's locks but describe independently-mutating structures. The reply is a set of point-in-time readings, not a coherent instant. Fine for monitoring; do not build invariants on cross-field arithmetic.
+
+---
+
+## Observability Commands
+
+Highway records what it does. Two independent mechanisms, either disableable:
+
+- the **flight recorder** — a bounded, in-process record of recent operations, read with `HW.REPLAY`;
+- **activity emission** — `System.Diagnostics.Activity`, which any OpenTelemetry pipeline collects.
+
+### The flight recorder is volatile
+
+**Its contents are lost when the server stops.** It holds events in ordinary process memory, not in the Garnet keyspace, and nothing about it enters the AOF.
+
+That is deliberate. Storing events in the keyspace would put them in the AOF, where recovery would replay them with replay-time timestamps and fabricate history on every restart — and it would make a debugging aid compete with the actual queues for the same store. **Anyone needing a durable audit trail wants the activity/OpenTelemetry path**, exported continuously to a system built to retain it.
+
+Recording is **best-effort**: a failure to record never fails, delays, or alters the operation being recorded.
+
+### What is recorded
+
+Recording happens per **name** — a service name or a channel name — and each name has its own bounded buffer with its own retention and payload-capture mode. One high-volume name therefore cannot evict another's history.
+
+| Command | Event | Note |
+|---|---|---|
+| `HW.CALL` | `RpcEnqueued` | |
+| `HW.DEQUEUE` | `RpcClaimed` | a nil dequeue records nothing |
+| `HW.REPLY` | `RpcReplied` | |
+| `HW.ACK` | `RpcAcknowledged` | |
+| `HW.PUBLISH` | `Published` | `count` carries the group count |
+| `HW.SUBSCRIBE` / `HW.UNSUBSCRIBE` | `GroupRegistered` / `GroupRemoved` | |
+| `HW.RECEIVE` | `MessagesReceived` | one event per **batch**; `count` carries the batch size |
+| `HW.RACK` | `MessageAcknowledged` | |
+| `HW.HEARTBEAT` registration / `BYE` | `NodeRegistered` / `NodeDeparted` | |
+| `HW.HEARTBEAT` liveness | **nothing** | fires every few seconds per node; recording it would evict real history to store the fact that nothing happened |
+| `HW.DISCOVER`, `HW.STATS`, `HW.REPLAY` | **nothing** | read-only; recording reads would drown the record, and querying it would record the query |
+
+**Failed commands are recorded**, carrying the error code that rejected them. A flight recorder that showed only successes would omit the thing it exists for.
+
+### Payload capture
+
+Per name, one of three modes:
+
+| Mode | Retains |
+|---|---|
+| `Full` (default) | The complete payload bytes |
+| `HeadersOnly` | Metadata and the payload **size**, but no content |
+| `Off` | Nothing — no buffer is allocated for that name |
+
+**`Full` is the default, and the consequence is worth stating plainly:** payload content sits in server memory and is readable by anyone who can issue `HW.REPLAY`, and **Highway has no authentication**. For names carrying personal or sensitive data use `HeadersOnly`, or disable replay entirely while keeping the recorder for metrics.
+
+### HW.REPLAY
+
+```
+HW.REPLAY <name> [FROM <ts>] [TO <ts>] [LIMIT <n>] [NODE <nodeId>]
+```
+
+Returns one name's recorded operations in chronological order.
+
+| | |
+|---|---|
+| **Arguments** | `name` — identifier. The rest are optional keyword arguments in any order. |
+| **Reply** | An array of flat field/value arrays, one per event. Empty array when the name is unknown, disabled, or has nothing in range — never an error. |
+| **Keys** | **None.** The recorder is not in the keyspace, so this is read-only with respect to Garnet and cannot contend with traffic. |
+| **Idempotency** | Read-only. |
+
+`FROM` and `TO` accept either an ISO-8601 timestamp or a **relative offset** — `-30s`, `-5min`, `-1h`, `-2d` — which is what an operator actually types during an incident. Units accepted: `s`/`sec`/`secs`, `m`/`min`/`mins`, `h`/`hr`/`hrs`, `d`/`day`/`days`. Omitting them defaults to a recent window (`ReplayDefaultWindow`, default 5 minutes) ending now.
+
+`LIMIT` defaults to `ReplayDefaultLimit` (100) and may not exceed `ReplayMaxLimit` (1,000); violations return `HW_INVALID_COUNT`. `NODE` restricts results to events involving one node.
+
+Each event is a flat field/value array — the same self-describing shape `HW.STATS` uses, so fields can be appended later without breaking readers:
+
+```
+timestamp    2026-08-07T13:26:59.1234567+00:00
+eventType    RpcEnqueued
+name         orders.create
+nodeId       (empty unless the command carried one)
+requestId    a3f1...  (opaque string, not necessarily a GUID)
+messageId    (empty for RPC events; a channel sequence number for pub/sub)
+payloadSize  512
+errorCode    (empty on success; e.g. HW_INVALID_ARG when rejected)
+statusCode   (empty unless the operation produced a client-facing status)
+count        (group count for a publish, batch size for a receive)
+payload      (empty unless the name is captured at Full)
+```
+
+`payloadSize` is always present, even when `payload` is empty — so throughput and message shape stay visible under `HeadersOnly`.
+
+Invalid arguments are rejected with the codes in [Error Contract](#error-contract): `HW_INVALID_COUNT` for `LIMIT`, `HW_INVALID_ARG` otherwise. When `ReplayEnabled` is false the command returns `HW_INVALID_ARG` explaining that replay is disabled — the recorder keeps running and `HW.STATS RECORDER` keeps answering.
+
+### Activity emission
+
+Highway emits `System.Diagnostics.Activity` spans and takes **no OpenTelemetry dependency**. Applications that want OTLP add the OpenTelemetry packages themselves and subscribe to these sources:
+
+| Source | Emits |
+|---|---|
+| `Highway.Client` | caller-side spans around `ExecuteAsync` and `PublishAsync` |
+| `Highway.Server` | server-side spans around command execution |
+
+That is how `HttpClient` and ASP.NET Core do it. It keeps the client light, and leaves sampling, exporters and resource attributes under the application's control rather than Highway's.
+
+Trace context travels in the envelope's optional `tp` field (see [Transport & Framing](#transport--framing)). A server-side span parses it and joins the caller's trace, so one distributed trace spans both processes.
+
+Attributes follow OpenTelemetry messaging semantic conventions:
+
+| Attribute | Value |
+|---|---|
+| `messaging.system` | `highway` |
+| `messaging.operation` | `publish`, `receive`, or `process` |
+| `messaging.destination.name` | service or channel name |
+| `messaging.message.id` | request or message ID |
+| `messaging.client.id` | node name |
+
+**Payload content is never placed on a span.** Spans leave the process for third-party systems; message bodies must not ride along by default.
+
+With no listener attached, `StartActivity` returns null and nothing is materialised, so emission costs essentially nothing when unobserved.
 
 ---
 

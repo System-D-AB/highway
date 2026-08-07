@@ -1,6 +1,7 @@
 using Garnet.server;
 using Highway.Server.Commands;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -14,6 +15,7 @@ public sealed class HighwayServer : IHighwayServer
 {
     private readonly HighwayGarnetServer _garnet;
     private readonly DoorbellBridge _doorbell;
+    private readonly FlightRecorder _recorder;
     private readonly HighwayServerOptions _opts;
     private readonly ILogger<HighwayServer> _logger;
     private bool _started;
@@ -27,11 +29,12 @@ public sealed class HighwayServer : IHighwayServer
         _garnet   = garnet;
         _opts     = opts;
         _doorbell = new DoorbellBridge(_garnet);
+        _recorder = new FlightRecorder(opts.Observability);
         _logger   = (loggerFactory ?? NullLoggerFactory.Instance)
                         .CreateLogger<HighwayServer>();
 
         // Register commands BEFORE Start() — required for AOF replay correctness
-        RegisterCommands(_garnet, _doorbell, _opts);
+        RegisterCommands(_garnet, _doorbell, _recorder, _opts);
         _logger.LogInformation("Highway commands registered.");
     }
 
@@ -70,6 +73,7 @@ public sealed class HighwayServer : IHighwayServer
     {
         if (_disposed) return;
         _disposed = true;
+        _recorder.Dispose();
         _garnet.Dispose();
         _logger.LogInformation("Highway server disposed.");
     }
@@ -99,24 +103,29 @@ public sealed class HighwayServer : IHighwayServer
     /// </summary>
     internal static IReadOnlyList<HighwayCommandRegistration> CommandTable(
         HighwayServerOptions opts,
-        DoorbellBridge doorbell) =>
+        DoorbellBridge doorbell,
+        FlightRecorder recorder) =>
     [
-        new("HW.CALL",        4, () => new HwCallCommand(opts, doorbell)),
-        new("HW.REPLY",       3, () => new HwReplyCommand(opts, doorbell)),
-        new("HW.DEQUEUE",     3, () => new HwDequeueCommand(opts)),
-        new("HW.ACK",         4, () => new HwAckCommand(opts)),
-        new("HW.SUBSCRIBE",   3, () => new HwSubscribeCommand(opts)),
-        new("HW.UNSUBSCRIBE", 3, () => new HwUnsubscribeCommand(opts)),
-        new("HW.PUBLISH",     3, () => new HwPublishCommand(opts, doorbell)),
-        new("HW.RECEIVE",    -3, () => new HwReceiveCommand(opts)),
-        new("HW.RACK",        4, () => new HwRackCommand(opts)),
+        new("HW.CALL",        4, () => new HwCallCommand(opts, doorbell, recorder)),
+        new("HW.REPLY",       3, () => new HwReplyCommand(opts, doorbell, recorder)),
+        new("HW.DEQUEUE",     3, () => new HwDequeueCommand(opts, recorder)),
+        new("HW.ACK",         4, () => new HwAckCommand(opts, recorder)),
+        new("HW.SUBSCRIBE",   3, () => new HwSubscribeCommand(opts, recorder)),
+        new("HW.UNSUBSCRIBE", 3, () => new HwUnsubscribeCommand(opts, recorder)),
+        new("HW.PUBLISH",     3, () => new HwPublishCommand(opts, doorbell, recorder)),
+        new("HW.RECEIVE",    -3, () => new HwReceiveCommand(opts, recorder)),
+        new("HW.RACK",        4, () => new HwRackCommand(opts, recorder)),
 
         // Registry commands (feature 006). Negative arity marks an optional
         // trailing argument: HW.HEARTBEAT's selects the form (absent = liveness,
         // "BYE" = departure, otherwise = catalog); HW.STATS's selects the scope.
-        new("HW.HEARTBEAT",  -2, () => new HwHeartbeatCommand(opts)),
+        new("HW.HEARTBEAT",  -2, () => new HwHeartbeatCommand(opts, recorder)),
         new("HW.DISCOVER",    2, () => new HwDiscoverCommand(opts)),
-        new("HW.STATS",      -1, () => new HwStatsCommand(opts)),
+        new("HW.STATS",      -1, () => new HwStatsCommand(opts, recorder)),
+
+        // Observability (feature 002). Arity -2: the name is required, and
+        // FROM/TO/LIMIT/NODE are optional keyword arguments in any order.
+        new("HW.REPLAY",     -2, () => new HwReplayCommand(opts, recorder)),
     ];
 
     /// <summary>
@@ -130,9 +139,10 @@ public sealed class HighwayServer : IHighwayServer
     internal static void RegisterCommands(
         HighwayGarnetServer server,
         DoorbellBridge doorbell,
+        FlightRecorder recorder,
         HighwayServerOptions opts)
     {
-        foreach (var command in CommandTable(opts, doorbell))
+        foreach (var command in CommandTable(opts, doorbell, recorder))
         {
             server.Register.NewTransactionProc(
                 command.Name,

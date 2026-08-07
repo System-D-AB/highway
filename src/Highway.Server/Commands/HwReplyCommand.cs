@@ -1,6 +1,8 @@
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
+using Highway.Abstractions.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -15,18 +17,26 @@ internal sealed class HwReplyCommand : HighwayCommandBase
 {
     private readonly HighwayServerOptions _opts;
     private readonly DoorbellBridge _doorbell;
+    private readonly FlightRecorder _recorder;
 
     private string _requestId = null!;
     private byte[] _requestIdBytes = [];
     private byte[] _payloadBytes = [];
 
-    public HwReplyCommand(HighwayServerOptions opts, DoorbellBridge doorbell)
+    public HwReplyCommand(HighwayServerOptions opts, DoorbellBridge doorbell, FlightRecorder recorder)
     {
         _opts     = opts;
         _doorbell = doorbell;
+        _recorder = recorder;
     }
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    protected override void ResetState()
+    {
+        _requestIdBytes = [];
+        _payloadBytes = [];
+    }
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         int idx = 0;
         if (!TryReadIdentifier(ref procInput, ref idx, "requestId", _opts.MaxIdentifierBytes, out _requestId, out _requestIdBytes))
@@ -57,6 +67,12 @@ internal sealed class HwReplyCommand : HighwayCommandBase
 
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
     {
+        _recorder.Record(
+            HighwayEventType.RpcReplied, _requestId ?? "?",
+            requestId: _requestId,
+            payload: _payloadBytes,
+            errorCode: FailureCode);
+
         if (Failed) return; // a rejected command must never ring a doorbell
         _doorbell.Ring(HighwayKeys.ReplyDoorbell, _requestIdBytes);
     }

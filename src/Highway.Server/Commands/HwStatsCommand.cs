@@ -3,6 +3,7 @@ using System.Text;
 using Garnet.common;
 using Garnet.server;
 using Highway.Server.Internal;
+using Highway.Server.Observability;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -32,16 +33,35 @@ namespace Highway.Server.Commands;
 internal sealed class HwStatsCommand : HighwayCommandBase
 {
     private readonly HighwayServerOptions _opts;
+    private readonly FlightRecorder _recorder;
 
     private string? _name;
     private string[] _registeredNodes = [];
     private string[] _serviceHosts = [];
     private string[] _channelGroups = [];
     private bool _isService;
+    private bool _isRecorder;
 
-    public HwStatsCommand(HighwayServerOptions opts) => _opts = opts;
+    /// <summary>Reserved name selecting the recorder form.</summary>
+    private const string RecorderForm = "RECORDER";
 
-    public override bool Prepare<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
+    public HwStatsCommand(HighwayServerOptions opts, FlightRecorder recorder)
+    {
+        _opts = opts;
+        _recorder = recorder;
+    }
+
+    protected override void ResetState()
+    {
+        _name = null;
+        _isService = false;
+        _isRecorder = false;
+        _registeredNodes = [];
+        _serviceHosts = [];
+        _channelGroups = [];
+    }
+
+    protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         var idx = 0;
         var arg = GetNextArg(ref procInput, ref idx);
@@ -56,6 +76,15 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             }
 
             _name = Encoding.UTF8.GetString(arg.ReadOnlySpan);
+
+            // RECORDER is a reserved name and takes priority over a service or
+            // channel that happens to share it. Documented alongside the existing
+            // service-versus-channel resolution rule.
+            if (string.Equals(_name, RecorderForm, StringComparison.OrdinalIgnoreCase))
+            {
+                _isRecorder = true;
+                return true;   // reads no keys and locks none
+            }
 
             // A name is a service when the discovery index knows it; otherwise
             // it is reported as a channel (zeroed when neither).
@@ -102,6 +131,7 @@ internal sealed class HwStatsCommand : HighwayCommandBase
         {
             var fields = _name is null
                 ? ServerStats(api)
+                : _isRecorder ? RecorderStats()
                 : _isService ? ServiceStats(api, _name) : ChannelStats(api, _name);
 
             WriteFieldArray(ref output, fields);
@@ -110,6 +140,27 @@ internal sealed class HwStatsCommand : HighwayCommandBase
         {
             WriteError(ref output, HighwayErrors.InternalError(ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Flight recorder health (feature 002). Answers even when the recorder is
+    /// disabled, reporting that state rather than erroring — an operator asking
+    /// "is it on?" deserves an answer.
+    /// </summary>
+    private List<(string Name, string Value)> RecorderStats()
+    {
+        var snapshot = _recorder.Snapshot();
+        return
+        [
+            ("kind", "recorder"),
+            ("enabled", snapshot.Enabled ? "1" : "0"),
+            ("names", snapshot.Names.ToString()),
+            ("events", snapshot.Events.ToString()),
+            ("bytes", snapshot.Bytes.ToString()),
+            ("droppedCapacity", snapshot.DroppedCapacity.ToString()),
+            ("droppedBudget", snapshot.DroppedBudget.ToString()),
+            ("failures", snapshot.Failures.ToString()),
+        ];
     }
 
     private List<(string Name, string Value)> ServerStats<TGarnetApi>(TGarnetApi api)

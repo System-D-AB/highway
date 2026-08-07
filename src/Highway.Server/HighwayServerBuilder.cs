@@ -130,6 +130,22 @@ public sealed class HighwayServerBuilder
         return this;
     }
 
+    /// <summary>
+    /// Configures the flight recorder and activity emission (feature 002).
+    ///
+    /// <para>Defaults are useful with no configuration. The one setting worth a
+    /// deliberate decision is payload capture: it defaults to
+    /// <c>PayloadCapture.Full</c>, which means payload content sits in server
+    /// memory readable by anyone who can issue <c>HW.REPLAY</c> — and Highway
+    /// has no authentication. Use <c>HeadersOnly</c> for sensitive names, or set
+    /// <c>ReplayEnabled = false</c> to keep the metrics without serving bodies.</para>
+    /// </summary>
+    public HighwayServerBuilder WithObservability(Action<Observability.ObservabilityOptions> configure)
+    {
+        configure(_opts.Observability);
+        return this;
+    }
+
     /// <summary>Supplies a logger factory for structured logging from the server.</summary>
     public HighwayServerBuilder WithLoggerFactory(ILoggerFactory loggerFactory)
     {
@@ -155,6 +171,8 @@ public sealed class HighwayServerBuilder
             _opts.BindAddress = parsed;
             _bindAddressText  = null;
         }
+
+        _opts.Observability.Validate();
 
         var garnetOpts = BuildGarnetOptions(_opts);
         var logger = _loggerFactory?.CreateLogger<HighwayServerBuilder>();
