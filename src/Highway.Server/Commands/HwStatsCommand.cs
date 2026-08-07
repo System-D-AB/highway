@@ -13,8 +13,8 @@ namespace Highway.Server.Commands;
 ///
 /// <list type="bullet">
 ///   <item>no argument → <c>kind server nodes N services N channels N pendingRequests N</c></item>
-///   <item>service name → <c>kind service queueDepth N hosts N inFlight N</c></item>
-///   <item>channel name → <c>kind channel groups N pending N backlog N</c></item>
+///   <item>service name → <c>kind service queueDepth N hosts N inFlight N deadLettered N</c></item>
+///   <item>channel name → <c>kind channel groups N pending N backlog N deadLettered N</c></item>
 /// </list>
 ///
 /// <para>A flat field/value array stays readable in <c>redis-cli</c> and
@@ -95,6 +95,7 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             if (_isService)
             {
                 AddKey(CreateArgSlice(HighwayKeys.ServiceQueue(_name)), LockType.Shared, StoreType.Object);
+                AddKey(CreateArgSlice(HighwayKeys.ServiceDeadLetter(_name)), LockType.Shared, StoreType.Object);
                 foreach (var node in _serviceHosts)
                 {
                     AddKey(CreateArgSlice(HighwayKeys.ServiceProcessing(_name, node)), LockType.Shared, StoreType.Object);
@@ -108,7 +109,10 @@ internal sealed class HwStatsCommand : HighwayCommandBase
 
                 AddKey(CreateArgSlice(HighwayKeys.ChannelBacklog(_name)), LockType.Shared, StoreType.Object);
                 foreach (var group in _channelGroups)
+                {
                     AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_name, group)), LockType.Shared, StoreType.Object);
+                    AddKey(CreateArgSlice(HighwayKeys.GroupDeadLetter(_name, group)), LockType.Shared, StoreType.Object);
+                }
             }
 
             return true;
@@ -160,6 +164,7 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             ("droppedCapacity", snapshot.DroppedCapacity.ToString()),
             ("droppedBudget", snapshot.DroppedBudget.ToString()),
             ("failures", snapshot.Failures.ToString()),
+            ("observerFailures", snapshot.ObserverFailures.ToString()),
         ];
     }
 
@@ -214,12 +219,19 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             inFlight += procLen;
         }
 
+        // Dead letters are reported alongside the live depth so a non-zero DLQ is
+        // visible in the place an operator already looks, rather than only in the
+        // recorder. Dead-lettering makes a previously loud failure quiet; if nothing
+        // surfaces it, the fix has traded an obvious bug for a silent one.
+        api.ListLength(CreateArgSlice(HighwayKeys.ServiceDeadLetter(service)), out var deadLettered);
+
         return
         [
             ("kind", "service"),
             ("queueDepth", queueDepth.ToString()),
             ("hosts", hosts.ToString()),
             ("inFlight", inFlight.ToString()),
+            ("deadLettered", deadLettered.ToString()),
         ];
     }
 
@@ -227,10 +239,14 @@ internal sealed class HwStatsCommand : HighwayCommandBase
         where TGarnetApi : IGarnetApi
     {
         var pending = 0;
+        var deadLettered = 0;
         foreach (var group in _channelGroups)
         {
             api.ListLength(CreateArgSlice(HighwayKeys.GroupQueue(channel, group)), out var len);
             pending += len;
+
+            api.ListLength(CreateArgSlice(HighwayKeys.GroupDeadLetter(channel, group)), out var dead);
+            deadLettered += dead;
         }
 
         api.ListLength(CreateArgSlice(HighwayKeys.ChannelBacklog(channel)), out var backlog);
@@ -241,6 +257,7 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             ("groups", _channelGroups.Length.ToString()),
             ("pending", pending.ToString()),
             ("backlog", backlog.ToString()),
+            ("deadLettered", deadLettered.ToString()),
         ];
     }
 

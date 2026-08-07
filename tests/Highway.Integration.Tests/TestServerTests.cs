@@ -162,6 +162,7 @@ public class TestServerTests
         using var server = new HighwayServerBuilder()
             .WithPort(port)
             .WithBindAddress(IPAddress.Any)
+            .WithoutAuthentication()
             .Build();
         server.Start();
 

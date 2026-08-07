@@ -18,6 +18,13 @@ internal static class HighwayKeys
     /// <summary>Pending RPC request queue for a service.  hw:svc:{service}:q</summary>
     public static string ServiceQueue(string service) => $"hw:svc:{service}:q";
 
+    /// <summary>
+    /// Dead letters for one service: requests that exhausted
+    /// <see cref="HighwayServerOptions.MaxDeliveryAttempts"/> (feature 013).
+    /// Entries leave the live queue exactly once and never loop again.
+    /// </summary>
+    public static string ServiceDeadLetter(string service) => $"hw:svc:{service}:dlq";
+
     /// <summary>Processing list owned by one node.  hw:svc:{service}:proc:{nodeId}</summary>
     public static string ServiceProcessing(string service, string nodeId) =>
         $"hw:svc:{service}:proc:{nodeId}";
@@ -58,6 +65,35 @@ internal static class HighwayKeys
     public static string ChannelBacklog(string channel) => $"hw:ch:{channel}:backlog";
 
     /// <summary>Pending message queue for a specific subscriber group.  hw:ch:{channel}:grp:{group}:q</summary>
+    /// <summary>
+    /// Dead letters for one channel group: messages that exhausted
+    /// <see cref="HighwayServerOptions.MaxDeliveryAttempts"/> (feature 013).
+    /// </summary>
+    /// <summary>
+    /// Messages published with a future delivery time (feature 013). Sorted set, score =
+    /// delivery time in .NET UTC ticks, member = the channel entry.
+    ///
+    /// <para>Not fanned out to groups until promotion, so a group that subscribes during
+    /// the delay still receives the message — a delayed publish behaves like a publish
+    /// that happens later, which is the only reading of "delay" that is not surprising.</para>
+    /// </summary>
+    public static string ChannelDelayed(string channel) => $"hw:ch:{channel}:delayed";
+
+    /// <summary>
+    /// Messages held for one group's retry backoff (feature 013). Sorted set, score =
+    /// the time the message becomes claimable again.
+    ///
+    /// <para><b>Per group, not per channel.</b> The channel-wide delayed set is promoted
+    /// to <i>every</i> registered group, which is right for a delayed publish and wrong
+    /// for a retry: a message failing for one group would be redelivered to all the
+    /// others as a duplicate.</para>
+    /// </summary>
+    public static string GroupRetry(string channel, string group) =>
+        $"hw:ch:{channel}:grp:{group}:retry";
+
+    public static string GroupDeadLetter(string channel, string group) =>
+        $"hw:ch:{channel}:grp:{group}:dlq";
+
     public static string GroupQueue(string channel, string group) =>
         $"hw:ch:{channel}:grp:{group}:q";
 

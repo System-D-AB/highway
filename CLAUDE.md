@@ -60,6 +60,17 @@ Two rules when you do:
 1. **Do not rewrite history.** `research.md` is a record of what was believed *at the time*, and its value is that it explains why decisions were made. Correct it with dated addenda and inline pointers, not by silently editing the original analysis. `product.md`'s goals are the product's intent — distinguish *unbuilt intent* from *wrong*.
 2. **Do not restate the protocol.** `docs/HIGHWAY-PROTOCOL.md` is the single definition. Product docs link to it; they never copy it.
 
+## Constraints Are Enumerated, Not Implied
+
+[`docs/product/constraints.md`](docs/product/constraints.md) numbers every guarantee Highway
+makes and records whether the code currently keeps it. It exists so intent and reality can
+be compared line by line instead of inferred.
+
+Two rules:
+
+1. **A feature that changes any behaviour it describes updates the status in the same feature.** Same discipline as the protocol file, applied to product guarantees.
+2. **A gap is either a defect or a planned feature — never a silent difference.** If a constraint turns out to be wrong, change the constraint and say why. Do not let the code quietly diverge and call it the spec.
+
 ## The Protocol Lives in One File
 
 **[`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md) is the authoritative definition of the Highway wire protocol** — every `HW.*` command, reply shape, error code, key, entry framing, doorbell channel, and cross-command invariant.

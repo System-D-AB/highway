@@ -155,7 +155,20 @@ internal sealed class HighwayClient : IHighwayClient
         return Cast<TResponse>(response);
     }
 
-    public async Task PublishAsync(IPublish message, CancellationToken ct = default)
+    public Task PublishAsync(IPublish message, CancellationToken ct = default)
+        => PublishCoreAsync(message, deliverAt: null, ct);
+
+    /// <inheritdoc/>
+    public Task PublishAsync(IPublish message, TimeSpan delay, CancellationToken ct = default)
+        => PublishCoreAsync(
+            message,
+            // A non-positive delay is an immediate publish rather than an error: it falls
+            // out of ordinary arithmetic on a caller's schedule, and refusing it would
+            // make every caller write the guard Highway can write once.
+            delay > TimeSpan.Zero ? DateTimeOffset.UtcNow + delay : null,
+            ct);
+
+    private async Task PublishCoreAsync(IPublish message, DateTimeOffset? deliverAt, CancellationToken ct)
     {
         if (_engine.State != EngineState.Running || _engineInternals.Connection is not { } connection)
         {
@@ -188,10 +201,21 @@ internal sealed class HighwayClient : IHighwayClient
 
         // The connection retries the transient class (watch-conflicted publishes
         // delivered nothing) with bounded backoff before this throws.
-        var groupCount = await connection.PublishCommandAsync(channelName, envelope, ct).ConfigureAwait(false);
+        var groupCount = await connection
+            .PublishCommandAsync(channelName, envelope, deliverAt, ct).ConfigureAwait(false);
 
-        _logger.LogDebug("Published to channel '{Channel}'; delivered to {GroupCount} groups",
-            channelName, groupCount);
+        if (deliverAt is { } at)
+        {
+            _logger.LogDebug(
+                "Published to channel '{Channel}' for delivery no earlier than {DeliverAt:O}; " +
+                "held until a consumer polls after that time",
+                channelName, at);
+        }
+        else
+        {
+            _logger.LogDebug("Published to channel '{Channel}'; delivered to {GroupCount} groups",
+                channelName, groupCount);
+        }
     }
 
     private static TResponse Cast<TResponse>(Output response) where TResponse : Output

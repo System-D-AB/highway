@@ -9,38 +9,114 @@ namespace Highway.Server.Internal;
 ///
 /// Entry wire formats:
 /// <code>
-/// RPC queue entry:          [u16 BE requestIdLen][requestId bytes][payload bytes]
-/// RPC processing entry:     [i64 BE claimTicksUtc] + RPC queue entry
-/// Channel entry:            [i64 BE messageId][payload bytes]
-/// Backlog entry:            [i64 BE publishTicksUtc] + Channel entry
-/// Group processing entry:   [i64 BE receiveTicksUtc] + Channel entry
+/// RPC queue entry:          [u8 0xFF][u16 attempts][u16 requestIdLen][requestId][payload]
+/// RPC processing entry:     [u8 0xFF][i64 claimTicksUtc][u16 attempts][u16 requestIdLen][requestId][payload]
+/// Channel entry:            [u8 0xFF][u16 attempts][i64 messageId][payload]
+/// Group processing entry:   [u8 0xFF][i64 receiveTicksUtc][u16 attempts][i64 messageId][payload]
+/// Backlog entry:            [i64 publishTicksUtc][i64 messageId][payload]      (unversioned — see below)
 /// </code>
+///
+/// <para><b>The attempt count</b> (feature 013) is what bounds redelivery. It is
+/// incremented when an entry is requeued after a lease expiry, and an entry that
+/// exceeds <c>MaxDeliveryAttempts</c> is dead-lettered instead of requeued. It lives
+/// <i>in the entry</i> rather than in a side key so that incrementing it is atomic
+/// with the move that caused it — a count kept beside the entry would be lost by
+/// exactly the crash it exists to survive.</para>
+///
+/// <para><b>The version byte</b> exists so a pre-013 entry is <i>refused</i> rather
+/// than misparsed. Without it, an old entry read as a new one would reinterpret its
+/// leading bytes as an attempt count, read a wrong length, and hand a corrupt payload
+/// to an application — far worse than an error. <c>0xFF</c> is unambiguous against
+/// every legacy leading byte:</para>
+///
+/// <list type="bullet">
+///   <item><description>legacy RPC entry — high byte of a u16 request-ID length, bounded by <c>MaxIdentifierBytes</c> (validated below 0xFF00)</description></item>
+///   <item><description>legacy channel entry — high byte of a message-ID counter that starts at 1</description></item>
+///   <item><description>legacy processing entry — high byte of a .NET tick count, currently 0x08</description></item>
+/// </list>
+///
+/// <para><b>Backlog entries are deliberately unversioned and unchanged.</b> A backlog
+/// entry has never been delivered, so it has no attempt count to carry; it gains one
+/// (at zero) when promoted into a group queue. Leaving the format alone also means old
+/// backlog entries survive an upgrade and promote correctly, which is a smaller blast
+/// radius for no loss.</para>
 ///
 /// Encode methods return a freshly allocated <c>byte[]</c>.
 /// Decode methods work over a <see cref="ReadOnlySpan{T}"/> without allocation.
-/// All decode methods throw <see cref="InvalidDataException"/> on truncated or
-/// otherwise corrupt input.
+/// All decode methods throw <see cref="InvalidDataException"/> on truncated,
+/// pre-013, or otherwise corrupt input.
 /// </summary>
 internal static class Envelope
 {
+    /// <summary>
+    /// Leading byte of every versioned entry. See the type remarks for why this
+    /// value cannot collide with any pre-013 entry.
+    /// </summary>
+    public const byte FormatVersion = 0xFF;
+
+    /// <summary>
+    /// Highest <see cref="HighwayServerOptions.MaxIdentifierBytes"/> for which
+    /// <see cref="FormatVersion"/> stays unambiguous against a legacy RPC entry,
+    /// whose leading byte is the high half of a u16 identifier length.
+    /// </summary>
+    public const int MaxUnambiguousIdentifierBytes = 0xFF00 - 1;
+
+    /// <summary>
+    /// Largest representable attempt count. The count saturates here rather than
+    /// wrapping — a wrapped counter would silently restore the infinite-retry bug
+    /// this field exists to fix.
+    /// </summary>
+    public const ushort MaxAttempts = ushort.MaxValue;
+
+    /// <summary>Increments an attempt count without wrapping past <see cref="MaxAttempts"/>.</summary>
+    public static ushort NextAttempt(ushort attempts)
+        => attempts == MaxAttempts ? MaxAttempts : (ushort)(attempts + 1);
+
+    /// <summary>
+    /// Throws when <paramref name="data"/> is a pre-013 entry, with a message an
+    /// operator can act on. Called at the head of every versioned decode.
+    /// </summary>
+    private static void RequireCurrentFormat(ReadOnlySpan<byte> data, string entryKind)
+    {
+        if (data.Length == 0)
+            throw new InvalidDataException($"{entryKind} is empty.");
+
+        if (data[0] != FormatVersion)
+            throw new InvalidDataException(
+                $"{entryKind} is in the pre-013 storage format (leading byte 0x{data[0]:X2}). " +
+                "Drain the queue with the previous version, or delete the data directory. " +
+                "Refusing rather than misparsing, which would deliver a corrupt payload.");
+    }
+
+    /// <summary>
+    /// Whether <paramref name="data"/> looks like a pre-013 entry. Lets a command
+    /// report a storage-format problem without catching an exception to find out.
+    /// </summary>
+    public static bool IsLegacyEntry(ReadOnlySpan<byte> data)
+        => data.Length > 0 && data[0] != FormatVersion;
+
     // -------------------------------------------------------------------------
-    // RPC queue entry:  [u16 requestIdLen][requestId][payload]
+    // RPC queue entry:  [u8 ver][u16 attempts][u16 requestIdLen][requestId][payload]
     // -------------------------------------------------------------------------
+
+    private const int RpcHeader = 1 + 2 + 2;
 
     /// <summary>Encodes an RPC queue entry.</summary>
     public static byte[] EncodeRpcEntry(
         ReadOnlySpan<byte> requestId,
-        ReadOnlySpan<byte> payload)
+        ReadOnlySpan<byte> payload,
+        ushort attempts = 0)
     {
         if (requestId.Length > ushort.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(requestId),
                 $"requestId length {requestId.Length} exceeds u16 max ({ushort.MaxValue}).");
 
-        // [u16 requestIdLen][requestId][payload]
-        var buf = new byte[2 + requestId.Length + payload.Length];
-        BinaryPrimitives.WriteUInt16BigEndian(buf, (ushort)requestId.Length);
-        requestId.CopyTo(buf.AsSpan(2));
-        payload.CopyTo(buf.AsSpan(2 + requestId.Length));
+        var buf = new byte[RpcHeader + requestId.Length + payload.Length];
+        buf[0] = FormatVersion;
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(1), attempts);
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(3), (ushort)requestId.Length);
+        requestId.CopyTo(buf.AsSpan(RpcHeader));
+        payload.CopyTo(buf.AsSpan(RpcHeader + requestId.Length));
         return buf;
     }
 
@@ -48,42 +124,50 @@ internal static class Envelope
     public static void DecodeRpcEntry(
         ReadOnlySpan<byte> data,
         out ReadOnlySpan<byte> requestId,
-        out ReadOnlySpan<byte> payload)
+        out ReadOnlySpan<byte> payload,
+        out ushort attempts)
     {
-        const int headerSize = 2;
-        if (data.Length < headerSize)
-            throw new InvalidDataException(
-                $"RPC entry too short ({data.Length} bytes); minimum is {headerSize}.");
+        RequireCurrentFormat(data, "RPC entry");
 
-        var idLen = BinaryPrimitives.ReadUInt16BigEndian(data);
-        if (data.Length < headerSize + idLen)
+        if (data.Length < RpcHeader)
             throw new InvalidDataException(
-                $"RPC entry truncated: requestId length {idLen} but only {data.Length - headerSize} bytes remain.");
+                $"RPC entry too short ({data.Length} bytes); minimum is {RpcHeader}.");
 
-        requestId = data.Slice(headerSize, idLen);
-        payload   = data.Slice(headerSize + idLen);
+        attempts  = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(1));
+        var idLen = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(3));
+        if (data.Length < RpcHeader + idLen)
+            throw new InvalidDataException(
+                $"RPC entry truncated: requestId length {idLen} but only {data.Length - RpcHeader} bytes remain.");
+
+        requestId = data.Slice(RpcHeader, idLen);
+        payload   = data.Slice(RpcHeader + idLen);
     }
 
     // -------------------------------------------------------------------------
-    // RPC processing entry:  [i64 claimTicksUtc][u16 requestIdLen][requestId][payload]
+    // RPC processing entry:
+    //   [u8 ver][i64 claimTicksUtc][u16 attempts][u16 requestIdLen][requestId][payload]
     // -------------------------------------------------------------------------
+
+    private const int RpcProcHeader = 1 + 8 + 2 + 2;
 
     /// <summary>Encodes an RPC processing entry.</summary>
     public static byte[] EncodeRpcProcessingEntry(
         long claimTicks,
         ReadOnlySpan<byte> requestId,
-        ReadOnlySpan<byte> payload)
+        ReadOnlySpan<byte> payload,
+        ushort attempts = 0)
     {
         if (requestId.Length > ushort.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(requestId),
                 $"requestId length {requestId.Length} exceeds u16 max ({ushort.MaxValue}).");
 
-        // [i64 claimTicks][u16 requestIdLen][requestId][payload]
-        var buf = new byte[8 + 2 + requestId.Length + payload.Length];
-        BinaryPrimitives.WriteInt64BigEndian(buf, claimTicks);
-        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(8), (ushort)requestId.Length);
-        requestId.CopyTo(buf.AsSpan(10));
-        payload.CopyTo(buf.AsSpan(10 + requestId.Length));
+        var buf = new byte[RpcProcHeader + requestId.Length + payload.Length];
+        buf[0] = FormatVersion;
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1), claimTicks);
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(9), attempts);
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(11), (ushort)requestId.Length);
+        requestId.CopyTo(buf.AsSpan(RpcProcHeader));
+        payload.CopyTo(buf.AsSpan(RpcProcHeader + requestId.Length));
         return buf;
     }
 
@@ -92,33 +176,40 @@ internal static class Envelope
         ReadOnlySpan<byte> data,
         out long claimTicks,
         out ReadOnlySpan<byte> requestId,
-        out ReadOnlySpan<byte> payload)
+        out ReadOnlySpan<byte> payload,
+        out ushort attempts)
     {
-        const int headerSize = 8 + 2; // i64 + u16
-        if (data.Length < headerSize)
-            throw new InvalidDataException(
-                $"RPC processing entry too short ({data.Length} bytes); minimum is {headerSize}.");
+        RequireCurrentFormat(data, "RPC processing entry");
 
-        claimTicks = BinaryPrimitives.ReadInt64BigEndian(data);
-        var idLen  = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(8));
-        if (data.Length < headerSize + idLen)
+        if (data.Length < RpcProcHeader)
             throw new InvalidDataException(
-                $"RPC processing entry truncated: requestId length {idLen} but only {data.Length - headerSize} bytes remain.");
+                $"RPC processing entry too short ({data.Length} bytes); minimum is {RpcProcHeader}.");
 
-        requestId = data.Slice(headerSize, idLen);
-        payload   = data.Slice(headerSize + idLen);
+        claimTicks = BinaryPrimitives.ReadInt64BigEndian(data.Slice(1));
+        attempts   = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(9));
+        var idLen  = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(11));
+        if (data.Length < RpcProcHeader + idLen)
+            throw new InvalidDataException(
+                $"RPC processing entry truncated: requestId length {idLen} but only {data.Length - RpcProcHeader} bytes remain.");
+
+        requestId = data.Slice(RpcProcHeader, idLen);
+        payload   = data.Slice(RpcProcHeader + idLen);
     }
 
     // -------------------------------------------------------------------------
-    // Channel entry:  [i64 messageId][payload]
+    // Channel entry:  [u8 ver][u16 attempts][i64 messageId][payload]
     // -------------------------------------------------------------------------
 
+    private const int ChannelHeader = 1 + 2 + 8;
+
     /// <summary>Encodes a channel (pub/sub delivery) entry.</summary>
-    public static byte[] EncodeChannelEntry(long messageId, ReadOnlySpan<byte> payload)
+    public static byte[] EncodeChannelEntry(long messageId, ReadOnlySpan<byte> payload, ushort attempts = 0)
     {
-        var buf = new byte[8 + payload.Length];
-        BinaryPrimitives.WriteInt64BigEndian(buf, messageId);
-        payload.CopyTo(buf.AsSpan(8));
+        var buf = new byte[ChannelHeader + payload.Length];
+        buf[0] = FormatVersion;
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(1), attempts);
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(3), messageId);
+        payload.CopyTo(buf.AsSpan(ChannelHeader));
         return buf;
     }
 
@@ -126,18 +217,24 @@ internal static class Envelope
     public static void DecodeChannelEntry(
         ReadOnlySpan<byte> data,
         out long messageId,
-        out ReadOnlySpan<byte> payload)
+        out ReadOnlySpan<byte> payload,
+        out ushort attempts)
     {
-        if (data.Length < 8)
-            throw new InvalidDataException(
-                $"Channel entry too short ({data.Length} bytes); minimum is 8.");
+        RequireCurrentFormat(data, "Channel entry");
 
-        messageId = BinaryPrimitives.ReadInt64BigEndian(data);
-        payload   = data.Slice(8);
+        if (data.Length < ChannelHeader)
+            throw new InvalidDataException(
+                $"Channel entry too short ({data.Length} bytes); minimum is {ChannelHeader}.");
+
+        attempts  = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(1));
+        messageId = BinaryPrimitives.ReadInt64BigEndian(data.Slice(3));
+        payload   = data.Slice(ChannelHeader);
     }
 
     // -------------------------------------------------------------------------
     // Backlog entry:  [i64 publishTicksUtc][i64 messageId][payload]
+    //
+    // Unversioned and unchanged — see the type remarks.
     // -------------------------------------------------------------------------
 
     /// <summary>Encodes a backlog entry.</summary>
@@ -170,19 +267,25 @@ internal static class Envelope
     }
 
     // -------------------------------------------------------------------------
-    // Group processing entry:  [i64 receiveTicksUtc][i64 messageId][payload]
+    // Group processing entry:
+    //   [u8 ver][i64 receiveTicksUtc][u16 attempts][i64 messageId][payload]
     // -------------------------------------------------------------------------
+
+    private const int GroupProcHeader = 1 + 8 + 2 + 8;
 
     /// <summary>Encodes a group processing entry.</summary>
     public static byte[] EncodeGroupProcessingEntry(
         long receiveTicks,
         long messageId,
-        ReadOnlySpan<byte> payload)
+        ReadOnlySpan<byte> payload,
+        ushort attempts = 0)
     {
-        var buf = new byte[8 + 8 + payload.Length];
-        BinaryPrimitives.WriteInt64BigEndian(buf, receiveTicks);
-        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(8), messageId);
-        payload.CopyTo(buf.AsSpan(16));
+        var buf = new byte[GroupProcHeader + payload.Length];
+        buf[0] = FormatVersion;
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1), receiveTicks);
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(9), attempts);
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(11), messageId);
+        payload.CopyTo(buf.AsSpan(GroupProcHeader));
         return buf;
     }
 
@@ -191,15 +294,19 @@ internal static class Envelope
         ReadOnlySpan<byte> data,
         out long receiveTicks,
         out long messageId,
-        out ReadOnlySpan<byte> payload)
+        out ReadOnlySpan<byte> payload,
+        out ushort attempts)
     {
-        if (data.Length < 16)
-            throw new InvalidDataException(
-                $"Group processing entry too short ({data.Length} bytes); minimum is 16.");
+        RequireCurrentFormat(data, "Group processing entry");
 
-        receiveTicks = BinaryPrimitives.ReadInt64BigEndian(data);
-        messageId    = BinaryPrimitives.ReadInt64BigEndian(data.Slice(8));
-        payload      = data.Slice(16);
+        if (data.Length < GroupProcHeader)
+            throw new InvalidDataException(
+                $"Group processing entry too short ({data.Length} bytes); minimum is {GroupProcHeader}.");
+
+        receiveTicks = BinaryPrimitives.ReadInt64BigEndian(data.Slice(1));
+        attempts     = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(9));
+        messageId    = BinaryPrimitives.ReadInt64BigEndian(data.Slice(11));
+        payload      = data.Slice(GroupProcHeader);
     }
 
     // -------------------------------------------------------------------------
@@ -213,7 +320,7 @@ internal static class Envelope
     /// </summary>
     public static ReadOnlySpan<byte> GetRequestId(ReadOnlySpan<byte> processingEntry)
     {
-        DecodeRpcProcessingEntry(processingEntry, out _, out var requestId, out _);
+        DecodeRpcProcessingEntry(processingEntry, out _, out var requestId, out _, out _);
         return requestId;
     }
 
@@ -224,7 +331,7 @@ internal static class Envelope
     /// </summary>
     public static long GetMessageId(ReadOnlySpan<byte> processingEntry)
     {
-        DecodeGroupProcessingEntry(processingEntry, out _, out var messageId, out _);
+        DecodeGroupProcessingEntry(processingEntry, out _, out var messageId, out _, out _);
         return messageId;
     }
 }

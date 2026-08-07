@@ -34,11 +34,24 @@ internal sealed class HwPublishCommand : HighwayCommandBase
         _recorder = recorder;
     }
 
+    /// <summary>
+    /// Absolute delivery time in .NET UTC ticks, or 0 for immediate (feature 013).
+    ///
+    /// <para><b>Absolute, not a relative delay.</b> The client computes
+    /// <c>UtcNow + delay</c> and the server stores what it was told, so a slow round trip
+    /// cannot silently extend the delay — and, more importantly, AOF replay cannot
+    /// re-delay from replay time. A stored relative delay would fabricate a new future on
+    /// every recovery, the same way storing recorder events in the keyspace would have
+    /// fabricated a new past (feature 002).</para>
+    /// </summary>
+    private long _deliverAtTicks;
+
     protected override void ResetState()
     {
         _groups = [];
         _messageId = 0;
         _payloadBytes = [];
+        _deliverAtTicks = 0;
     }
 
     protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
@@ -48,6 +61,33 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             return true;
         if (!TryReadPayload(ref procInput, ref idx, _opts.MaxPayloadBytes, out _payloadBytes))
             return true;
+
+        // Optional: AT <absolute delivery time in .NET UTC ticks>
+        var keyword = GetNextArg(ref procInput, ref idx);
+        if (keyword.Length > 0)
+        {
+            var word = Encoding.ASCII.GetString(keyword.ReadOnlySpan).ToUpperInvariant();
+            if (word != "AT")
+            {
+                Fail(HighwayErrors.InvalidArg, $"unknown argument '{word}'; expected AT");
+                return true;
+            }
+
+            var value = GetNextArg(ref procInput, ref idx);
+            if (value.Length == 0
+                || !long.TryParse(Encoding.ASCII.GetString(value.ReadOnlySpan), out var ticks)
+                || ticks < 0)
+            {
+                Fail(HighwayErrors.InvalidArg, "AT requires a non-negative .NET UTC tick count");
+                return true;
+            }
+
+            // A delivery time in the past is delivered immediately rather than rejected:
+            // clock skew between a client and the broker is normal, and failing a publish
+            // over a few milliseconds of it would be worse than delivering slightly early
+            // relative to the client's clock.
+            _deliverAtTicks = ticks;
+        }
 
         // Read group membership from the main-store group list key.
         // We CANNOT use SetMembers here because GarnetWatchApi triggers a WATCH
@@ -64,6 +104,11 @@ internal sealed class HwPublishCommand : HighwayCommandBase
         AddKey(CreateArgSlice(HighwayKeys.ChannelSeq(_channel)), LockType.Exclusive, StoreType.Main);
         AddKey(grpListKey, LockType.Exclusive, StoreType.Main);
         AddKey(CreateArgSlice(HighwayKeys.ChannelBacklog(_channel)), LockType.Exclusive, StoreType.Object);
+
+        // Name-only derivation, so no Prepare-phase read and therefore no watch
+        // conflict (004.1).
+        AddKey(CreateArgSlice(HighwayKeys.ChannelDelayed(_channel)), LockType.Exclusive, StoreType.Object);
+
         foreach (var group in _groups)
             AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_channel, group)), LockType.Exclusive, StoreType.Object);
 
@@ -80,7 +125,27 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             var seqKey = CreateArgSlice(HighwayKeys.ChannelSeq(_channel));
             api.Increment(seqKey, out _messageId);
 
-            if (_groups.Length == 0)
+            if (_deliverAtTicks > DateTime.UtcNow.Ticks)
+            {
+                // Delayed: hold the message whole rather than fanning it out now. Groups
+                // are resolved at promotion time, so a group that subscribes during the
+                // delay still receives it — a delayed publish behaves like a publish that
+                // happens later, which is the only reading of "delay" that is not
+                // surprising.
+                var delayedKey = CreateArgSlice(HighwayKeys.ChannelDelayed(_channel));
+                var entry = Envelope.EncodeChannelEntry(_messageId, _payloadBytes);
+
+                api.SortedSetAdd(
+                    delayedKey,
+                    CreateArgSlice(Encoding.ASCII.GetBytes(_deliverAtTicks.ToString())),
+                    CreateArgSlice(entry),
+                    out _);
+
+                // Zero groups notified now. The reply counts delivery, and nothing has
+                // been delivered yet.
+                WriteInt64(ref output, 0L);
+            }
+            else if (_groups.Length == 0)
             {
                 // No active groups — write to backlog
                 var backlogKey = CreateArgSlice(HighwayKeys.ChannelBacklog(_channel));
@@ -131,9 +196,17 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
         if (Failed) return;
 
+        // A delayed message is in nobody's queue yet, so ringing would wake every
+        // consumer to find nothing. Promotion happens on the consumer's own backstop
+        // poll instead — see HW.RECEIVE.
+        if (_deliverAtTicks > DateTime.UtcNow.Ticks) return;
+
         var msgIdBytes = Encoding.UTF8.GetBytes(_messageId.ToString());
+
+        // _channel is non-null past the guard: the only way it stays unset is
+        // TryReadIdentifier failing, which calls Fail() and so returns above.
         foreach (var group in _groups)
-            _doorbell.Ring(HighwayKeys.GroupDoorbell(_channel, group), msgIdBytes);
+            _doorbell.Ring(HighwayKeys.GroupDoorbell(_channel!, group), msgIdBytes);
     }
 
     private void PurgeExpiredBacklogHead<TGarnetApi>(TGarnetApi api, PinnedSpanByte backlogKey)

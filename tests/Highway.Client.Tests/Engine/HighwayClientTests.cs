@@ -144,18 +144,61 @@ public class HighwayClientTests
     [Fact]
     public async Task PublishAsync_SendsHwPublishWithTheCatalogChannelName()
     {
-        _connection.PublishCommandAsync("test.events", Arg.Any<byte[]>(), Arg.Any<CancellationToken>()).Returns(2L);
+        _connection.PublishCommandAsync(
+            "test.events", Arg.Any<byte[]>(), Arg.Any<DateTimeOffset?>(), Arg.Any<CancellationToken>()).Returns(2L);
 
         await CreateClient().PublishAsync(new TestEvent { Data = "x" });
 
         await _connection.Received(1).PublishCommandAsync(
-            "test.events", Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+            "test.events", Arg.Any<byte[]>(), null, Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// Feature 013. The delay is converted to an <b>absolute</b> delivery time on the
+    /// client, so a slow round trip cannot silently extend it and AOF replay cannot
+    /// re-delay from replay time.
+    /// </summary>
+    [Fact]
+    public async Task PublishAsync_WithDelay_SendsAnAbsoluteDeliveryTime()
+    {
+        _connection.PublishCommandAsync(
+            "test.events", Arg.Any<byte[]>(), Arg.Any<DateTimeOffset?>(), Arg.Any<CancellationToken>()).Returns(0L);
+
+        var before = DateTimeOffset.UtcNow;
+        await CreateClient().PublishAsync(new TestEvent { Data = "x" }, TimeSpan.FromMinutes(5));
+
+        await _connection.Received(1).PublishCommandAsync(
+            "test.events",
+            Arg.Any<byte[]>(),
+            Arg.Is<DateTimeOffset?>(at => at != null
+                                          && at.Value >= before.AddMinutes(5)
+                                          && at.Value <= before.AddMinutes(6)),
+            Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// A non-positive delay publishes immediately rather than failing: it falls out of
+    /// ordinary arithmetic on a caller's schedule, and refusing it would make every caller
+    /// write the guard Highway can write once.
+    /// </summary>
+    [Fact]
+    public async Task PublishAsync_WithNonPositiveDelay_PublishesImmediately()
+    {
+        _connection.PublishCommandAsync(
+            "test.events", Arg.Any<byte[]>(), Arg.Any<DateTimeOffset?>(), Arg.Any<CancellationToken>()).Returns(1L);
+
+        await CreateClient().PublishAsync(new TestEvent { Data = "x" }, TimeSpan.Zero);
+        await CreateClient().PublishAsync(new TestEvent { Data = "x" }, TimeSpan.FromSeconds(-30));
+
+        await _connection.Received(2).PublishCommandAsync(
+            "test.events", Arg.Any<byte[]>(), null, Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task PublishAsync_TransportFailure_Propagates()
     {
-        _connection.PublishCommandAsync("test.events", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+        _connection.PublishCommandAsync(
+                "test.events", Arg.Any<byte[]>(), Arg.Any<DateTimeOffset?>(), Arg.Any<CancellationToken>())
             .Returns<long>(_ => throw new HighwayTransportException("down"));
 
         await CreateClient().Invoking(c => c.PublishAsync(new TestEvent { Data = "x" }))

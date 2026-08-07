@@ -95,9 +95,9 @@ internal sealed class HwRackCommand : HighwayCommandBase
             foreach (var entry in entries)
             {
                 var span = entry.ReadOnlySpan;
-                if (!found && span.Length >= 16)
+                if (!found && !Envelope.IsLegacyEntry(span))
                 {
-                    Envelope.DecodeGroupProcessingEntry(span, out _, out var msgId, out _);
+                    Envelope.DecodeGroupProcessingEntry(span, out _, out var msgId, out _, out _);
                     if (msgId == _messageId)
                     {
                         found = true;
