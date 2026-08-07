@@ -12,6 +12,32 @@ public interface IHighwayClient
         where TResponse : Output;
 
     /// <summary>
+    /// Send work to a queue, to be handled by <b>exactly one</b> <see cref="IProcess{T}"/>
+    /// (feature 014). Returns the message id.
+    ///
+    /// <para><b>Send or Publish?</b> One handler → Send. Many handlers → Publish. Need the
+    /// answer → Execute. Three instances of a processor <i>share</i> the work; three
+    /// instances of a subscriber each get <i>their own copy</i>.</para>
+    ///
+    /// <para><b>Sending never requires a running processor.</b> The message waits in the
+    /// queue until one claims it.</para>
+    ///
+    /// <para>The id is returned because the first thing anyone wants when a queued job
+    /// misbehaves is to find it in the dead-letter queue, and <c>HW.DLQ PEEK</c> reports
+    /// entries by id. Keep it if you will want to.</para>
+    /// </summary>
+    Task<string> SendAsync(ISend message, CancellationToken ct = default);
+
+    /// <summary>
+    /// Send work that must not be processed before <paramref name="delay"/> has elapsed.
+    ///
+    /// <para>A "not before", not an alarm clock: delivery is driven by workers polling, so
+    /// the message is claimed on the first poll after its time. A non-positive delay sends
+    /// immediately.</para>
+    /// </summary>
+    Task<string> SendAsync(ISend message, TimeSpan delay, CancellationToken ct = default);
+
+    /// <summary>
     /// Publish a message to all subscribers of the associated channel.
     /// </summary>
     Task PublishAsync(IPublish message, CancellationToken ct = default);

@@ -34,7 +34,73 @@ internal sealed class DefaultTypeScanner : ITypeScanner
         Channels = DiscoverChannels(allTypes),
         RequestContracts = DiscoverRequestContracts(allTypes),
         MessageContracts = DiscoverMessageContracts(allTypes),
+        Queues = DiscoverQueues(allTypes),
+        QueueContracts = DiscoverQueueContracts(allTypes),
     };
+
+    /// <summary>
+    /// Every message type carrying <c>[Queue]</c>, whether or not this node processes it
+    /// (feature 014).
+    ///
+    /// <para>Addressing derives from the <b>contract</b>, never from local processors. A
+    /// node that only sends must still know that <c>GenerateInvoice</c> addresses
+    /// <c>"invoices"</c> — deriving it from what happens to be hosted is precisely the
+    /// caller-only defect feature 010 found in the samples.</para>
+    /// </summary>
+    private static IReadOnlyDictionary<Type, string> DiscoverQueueContracts(List<Type> allTypes)
+    {
+        var contracts = new Dictionary<Type, string>();
+
+        foreach (var type in allTypes)
+        {
+            if (!typeof(ISend).IsAssignableFrom(type)) continue;
+
+            // A type implementing ISend without the attribute is a mistake rather than a
+            // deliberate opt-out: unlike IReturn<>, ISend has no meaning outside Highway.
+            var attribute = type.GetCustomAttribute<QueueAttribute>()
+                            ?? throw new QueueAttributeMissingException(type);
+
+            contracts[type] = attribute.Name;
+        }
+
+        return contracts;
+    }
+
+    /// <summary>
+    /// Queues this node processes: one <c>IProcess&lt;T&gt;</c> implementation each.
+    /// </summary>
+    private static IReadOnlyList<QueueDescriptor> DiscoverQueues(List<Type> allTypes)
+    {
+        var processInterface = typeof(IProcess<>);
+        var byMessageType = new Dictionary<Type, QueueDescriptor>();
+
+        foreach (var type in allTypes)
+        {
+            var impl = type.GetInterfaces()
+                .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == processInterface);
+
+            if (impl is null) continue;
+
+            var messageType = impl.GetGenericArguments()[0];
+
+            var attribute = messageType.GetCustomAttribute<QueueAttribute>()
+                            ?? throw new QueueAttributeMissingException(messageType);
+
+            if (byMessageType.TryGetValue(messageType, out var existing))
+                throw new DuplicateQueueProcessorException(messageType, existing.ProcessorType, type);
+
+            byMessageType[messageType] = new QueueDescriptor
+            {
+                Name = attribute.Name,
+                MessageType = messageType,
+                ProcessorType = type,
+                Lifetime = type.GetCustomAttribute<ServiceLifetimeAttribute>()?.Lifetime
+                           ?? HighwayServiceLifetime.Scoped,
+            };
+        }
+
+        return [.. byMessageType.Values];
+    }
 
     /// <summary>
     /// Every request type carrying <c>[Service]</c>, whether or not this node

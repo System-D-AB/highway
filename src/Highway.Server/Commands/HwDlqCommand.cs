@@ -12,6 +12,7 @@ namespace Highway.Server.Commands;
 ///
 /// <code>
 /// HW.DLQ PEEK    SVC &lt;service&gt;            [COUNT n]  → array of entries, non-destructive
+/// HW.DLQ PEEK    Q   &lt;queue&gt;              [COUNT n]
 /// HW.DLQ PEEK    CH  &lt;channel&gt; &lt;group&gt;    [COUNT n]
 /// HW.DLQ REQUEUE SVC &lt;service&gt;            [COUNT n]  → integer moved back
 /// HW.DLQ PURGE   SVC &lt;service&gt;            [COUNT n]  → integer removed
@@ -39,6 +40,7 @@ internal sealed class HwDlqCommand : HighwayCommandBase
     private const string ActionPurge = "PURGE";
     private const string TargetService = "SVC";
     private const string TargetChannel = "CH";
+    private const string TargetQueue = "Q";
 
     private readonly HighwayServerOptions _opts;
 
@@ -107,8 +109,18 @@ internal sealed class HwDlqCommand : HighwayCommandBase
                 break;
             }
 
+            case TargetQueue:
+            {
+                if (!TryReadIdentifier(ref procInput, ref idx, "queue", _opts.MaxIdentifierBytes, out var queue))
+                    return true;
+                _isService = true;   // queue entries share the RPC framing (id + payload)
+                _dlqKey  = HighwayKeys.QueueDeadLetter(queue);
+                _liveKey = HighwayKeys.Queue(queue);
+                break;
+            }
+
             default:
-                Fail(HighwayErrors.InvalidArg, $"unknown target '{kind}'; expected SVC or CH");
+                Fail(HighwayErrors.InvalidArg, $"unknown target '{kind}'; expected SVC, Q or CH");
                 return true;
         }
 

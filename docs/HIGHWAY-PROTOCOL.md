@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 2.0** — reflects everything shipped through feature 013.
+**Protocol version 2.1** — reflects everything shipped through feature 014.
 
 ## About
 
@@ -26,6 +26,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 - [Pub/Sub Commands](#pubsub-commands)
 - [Registry Commands](#registry-commands)
 - [Observability Commands](#observability-commands)
+- [Queue Commands](#queue-commands)
 - [Dead Letter Commands](#dead-letter-commands)
 - [Stock Garnet Dependencies](#stock-garnet-dependencies)
 - [Key Schema](#key-schema)
@@ -38,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 2.0**
+**Current version: 2.1**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -46,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 2.1 | 014 | **The queue.** Adds `HW.QSEND`, `HW.QCLAIM` and `HW.QACK` under a `hw:q:` key space, a `Q` target on `HW.DLQ`, a `Q:name` form on `HW.STATS`, and a `queues` list in the node catalog. Additive — no existing command, reply or key changed. A queue is RPC minus the reply and shares its lease sweep, so dead-lettering, deferred delivery and `[Idempotent]` all apply unchanged. |
 | 2.0 | 013 | Reliable delivery, parts 1 and 2. **Delayed delivery:** `HW.PUBLISH` gains an optional `AT <ticks>` argument (arity 3 → -3) and the `hw:ch:{channel}:delayed` sorted set; promotion is driven by `HW.RECEIVE`, not a timer. **Dead letters:** Adds a **delivery attempt count** to four entry framings and a `0xFF` version byte that makes pre-013 entries detectable; adds `HW.DLQ`, the dead-letter keys, the `HW_STORAGE_FORMAT` error, a `deadLettered` field on two `HW.STATS` forms, and two recorder event types. **Major** because the stored entry format changed: a broker started against a pre-013 data directory refuses to serve the affected queues rather than misparsing them. Nothing on the wire changed — no client needs modifying. |
 | 1.1 | 002 | Observability. Adds `HW.REPLAY` and a fourth `HW.STATS` form (`RECORDER`); adds the optional `tp` envelope field carrying W3C trace context; documents the `ActivitySource` names. Additive — no existing command, reply or envelope field changed. |
 | 1.0 | 004, 004.1, 005, 006 | Initial specification. Nine RPC and pub/sub commands (004); the `ERR HW_*` error contract, identifier rules and mirror keys (004.1); reply-slot retrieval and the client envelope (005); three registry commands, the three-form `HW.HEARTBEAT`, and dead-node pruning (006). |
@@ -72,6 +74,9 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.STATS` | -1 | 4 | Server, service, channel, or recorder counters |
 | `HW.REPLAY` | -2 | 1 | Recent recorded operations for one name |
 | `HW.DLQ` | -3 | 3 | Inspect, requeue, or purge dead letters |
+| `HW.QSEND` | -4 | 2 | Enqueue work for exactly one processor, now or at a future time |
+| `HW.QCLAIM` | 3 | 1 | Claim the next queued message for a worker; promotes deferred work and sweeps expired leases |
+| `HW.QACK` | 4 | 1 | Acknowledge a claimed queued message |
 
 ---
 
@@ -720,6 +725,7 @@ With no listener attached, `StartActivity` returns null and nothing is materiali
 
 ```
 HW.DLQ PEEK    SVC <service>          [COUNT n]   →   array of dead letters (non-destructive)
+HW.DLQ PEEK    Q   <queue>            [COUNT n]
 HW.DLQ PEEK    CH  <channel> <group>  [COUNT n]
 HW.DLQ REQUEUE SVC <service>          [COUNT n]   →   :n   (moved back to the live queue)
 HW.DLQ REQUEUE CH  <channel> <group>  [COUNT n]
@@ -747,6 +753,59 @@ payload         <bytes>
 **An unknown service, channel or group returns an empty array or `:0`, never an error**, matching `HW.DISCOVER` and `HW.STATS`.
 
 **Recorded events:** none. `HW.DLQ` is an operator command, and recording reads would drown the record — the same reasoning that keeps `HW.STATS` and `HW.REPLAY` out of the recorder. The *dead-lettering* itself is recorded, by the sweep that performed it.
+
+---
+
+## Queue Commands
+
+A **queue** is a named, durable, competing-consumer work list: exactly one worker processes each message, and the sender does not wait for a result. Mechanically it is RPC minus the reply — the same queue, lease, attempt counting and dead-lettering, with no reply slot.
+
+**Queues have their own key space** (`hw:q:`), so a queue and a service may share a name without colliding. A queue never appears in `HW.DISCOVER` and carries no response type.
+
+### HW.QSEND
+
+```
+HW.QSEND <queue> <messageId> <payload>              →   +OK
+HW.QSEND <queue> <messageId> <payload> AT <ticks>   →   +OK   (deferred)
+```
+
+| | |
+|---|---|
+| **Arguments** | `queue`, `messageId` — identifiers. `payload` — opaque, up to `MaxPayloadBytes`. `AT <ticks>` — optional absolute .NET UTC delivery time. |
+| **Reply** | `+OK` |
+| **Keys written** | `hw:q:{queue}:q`, or `hw:q:{queue}:delayed` when `AT` is in the future |
+| **Doorbell** | `hw:door:q:{queue}`, payload = `messageId`. **None for a deferred send**, which is in no worker's reach yet. |
+| **Idempotency** | Not idempotent. Repeating enqueues a second message. |
+
+**Sending never requires a running worker.** The message waits until one claims it. That is the whole point of a queue, and the capability whose absence leads people to misuse `HW.PUBLISH`.
+
+`AT` is absolute rather than a relative delay so AOF replay cannot re-delay from replay time — the same reasoning as `HW.PUBLISH`. A time in the past delivers immediately.
+
+### HW.QCLAIM
+
+```
+HW.QCLAIM <queue> <nodeId>   →   [messageId, payload]   |   *-1 (nil, queue empty)
+```
+
+| | |
+|---|---|
+| **Reply** | Two-element array, or a nil array when there is nothing to claim |
+| **Keys written** | `hw:q:{queue}:q`, `:proc:{nodeId}`, `:delayed`, `:dlq`, `:nodes`, `:nodelist` |
+| **Idempotency** | Not idempotent — each call claims a different message. |
+
+Before serving, it **promotes** deferred messages whose time has passed, then **sweeps expired leases** across every known worker: an entry past its lease returns to the queue with its attempt count incremented, or is dead-lettered once it exceeds `MaxDeliveryAttempts`. This is the same shared implementation `HW.DEQUEUE` uses, not a second copy.
+
+Unlike `HW.DEQUEUE` there is no dead-node prune — a queue has no service registry, so an abandoned claim is recovered by the lease sweep alone.
+
+**Competing consumers by default.** Every worker calling this shares the work; there is no group name and no coupling to node identity.
+
+### HW.QACK
+
+```
+HW.QACK <queue> <nodeId> <messageId>   →   :1 removed   |   :0 not found
+```
+
+Until this arrives the message remains in the worker's processing list and will be redelivered once its lease expires — that is what makes delivery at least once. Acknowledging an unknown message returns `:0` rather than an error: a worker retrying an acknowledgement is doing the right thing.
 
 ---
 
@@ -796,6 +855,12 @@ Every key Highway creates lives under the `hw:` namespace and cannot collide wit
 | `hw:svc:{service}:nodes` | Object | Set | Nodes that have claimed work for this service |
 | `hw:svc:{service}:nodelist` | Main | String | Newline-delimited mirror of the nodes set |
 | `hw:svc:{service}:dlq` | Object | List | Dead letters: requests that exhausted `MaxDeliveryAttempts`. Capped at `MaxDeadLetterEntries` |
+| `hw:q:{queue}:q` | Object | List | Queued work, FIFO |
+| `hw:q:{queue}:proc:{nodeId}` | Object | List | Claimed by one worker, not yet acknowledged |
+| `hw:q:{queue}:nodes` | Object | Set | Workers that have claimed from this queue |
+| `hw:q:{queue}:nodelist` | Main | String | Newline-delimited mirror of the workers set |
+| `hw:q:{queue}:dlq` | Object | List | Dead letters. Capped at `MaxDeadLetterEntries` |
+| `hw:q:{queue}:delayed` | Object | Sorted Set | Work awaiting a future delivery time. Score = delivery time in ticks |
 | `hw:rep:{requestId}` | Main | String | Reply slot. **TTL `ReplySlotTtl`** (default 5 min) |
 | `hw:idem:{service}:{requestId}` | Main | String | Deduplication marker for an `[Idempotent]` contract: an in-progress sentinel, then the response envelope. **TTL = the contract's window** (default 5 min). Written by *clients*, not by any `HW.*` command |
 

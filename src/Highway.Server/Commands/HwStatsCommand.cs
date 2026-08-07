@@ -15,6 +15,7 @@ namespace Highway.Server.Commands;
 ///   <item>no argument → <c>kind server nodes N services N channels N pendingRequests N</c></item>
 ///   <item>service name → <c>kind service queueDepth N hosts N inFlight N deadLettered N</c></item>
 ///   <item>channel name → <c>kind channel groups N pending N backlog N deadLettered N</c></item>
+///   <item><c>Q:name</c> → <c>kind queue depth N workers N inFlight N deferred N deadLettered N</c></item>
 /// </list>
 ///
 /// <para>A flat field/value array stays readable in <c>redis-cli</c> and
@@ -45,6 +46,17 @@ internal sealed class HwStatsCommand : HighwayCommandBase
     /// <summary>Reserved name selecting the recorder form.</summary>
     private const string RecorderForm = "RECORDER";
 
+    /// <summary>
+    /// Prefix selecting the queue form: <c>HW.STATS Q:invoices</c> (feature 014).
+    ///
+    /// <para>A prefix rather than name resolution, because a queue and a service may share
+    /// a name — the caller has to say which it means, and guessing would report the wrong
+    /// one exactly when it matters.</para>
+    /// </summary>
+    private const string QueuePrefix = "Q:";
+
+    private string? _queueName;
+
     public HwStatsCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
         _opts = opts;
@@ -54,6 +66,7 @@ internal sealed class HwStatsCommand : HighwayCommandBase
     protected override void ResetState()
     {
         _name = null;
+        _queueName = null;
         _isService = false;
         _isRecorder = false;
         _registeredNodes = [];
@@ -84,6 +97,29 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             {
                 _isRecorder = true;
                 return true;   // reads no keys and locks none
+            }
+
+            if (_name.StartsWith(QueuePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                _queueName = _name[QueuePrefix.Length..];
+                if (_queueName.Length == 0)
+                {
+                    Fail(HighwayErrors.InvalidArg, "HW.STATS Q: requires a queue name");
+                    return true;
+                }
+
+                AddKey(CreateArgSlice(HighwayKeys.Queue(_queueName)), LockType.Shared, StoreType.Object);
+                AddKey(CreateArgSlice(HighwayKeys.QueueDeadLetter(_queueName)), LockType.Shared, StoreType.Object);
+                AddKey(CreateArgSlice(HighwayKeys.QueueDelayed(_queueName)), LockType.Shared, StoreType.Object);
+
+                var qNodeList = CreateArgSlice(HighwayKeys.QueueNodeList(_queueName));
+                api.GET(qNodeList, out PinnedSpanByte qNodes);
+                _serviceHosts = SplitList(qNodes);
+                AddKey(qNodeList, LockType.Shared, StoreType.Main);
+                foreach (var node in _serviceHosts)
+                    AddKey(CreateArgSlice(HighwayKeys.QueueProcessing(_queueName, node)), LockType.Shared, StoreType.Object);
+
+                return true;
             }
 
             // A name is a service when the discovery index knows it; otherwise
@@ -136,6 +172,7 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             var fields = _name is null
                 ? ServerStats(api)
                 : _isRecorder ? RecorderStats()
+                : _queueName is not null ? QueueStats(api, _queueName)
                 : _isService ? ServiceStats(api, _name) : ChannelStats(api, _name);
 
             WriteFieldArray(ref output, fields);
@@ -144,6 +181,38 @@ internal sealed class HwStatsCommand : HighwayCommandBase
         {
             WriteError(ref output, HighwayErrors.InternalError(ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Queue depth and health (feature 014).
+    ///
+    /// <para>Reported separately from a service so the reply can say which kind it is:
+    /// a queue and a service may share a name, and answering for the wrong one would be
+    /// worse than refusing.</para>
+    /// </summary>
+    private List<(string Name, string Value)> QueueStats<TGarnetApi>(TGarnetApi api, string queue)
+        where TGarnetApi : IGarnetApi
+    {
+        api.ListLength(CreateArgSlice(HighwayKeys.Queue(queue)), out var depth);
+        api.ListLength(CreateArgSlice(HighwayKeys.QueueDeadLetter(queue)), out var deadLettered);
+        api.SortedSetLength(CreateArgSlice(HighwayKeys.QueueDelayed(queue)), out var deferred);
+
+        var inFlight = 0;
+        foreach (var node in _serviceHosts)
+        {
+            api.ListLength(CreateArgSlice(HighwayKeys.QueueProcessing(queue, node)), out var len);
+            inFlight += len;
+        }
+
+        return
+        [
+            ("kind", "queue"),
+            ("depth", depth.ToString()),
+            ("workers", _serviceHosts.Length.ToString()),
+            ("inFlight", inFlight.ToString()),
+            ("deferred", deferred.ToString()),
+            ("deadLettered", deadLettered.ToString()),
+        ];
     }
 
     /// <summary>

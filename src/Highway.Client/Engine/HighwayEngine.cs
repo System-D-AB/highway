@@ -110,6 +110,40 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 wakes.Add(wake);
             }
 
+            if (_catalog.AllQueues.Count > 0)
+                WarnIfQueuesAreNotDurable();
+
+            foreach (var queue in _catalog.AllQueues)
+            {
+                var wake = new LoopWake();
+                var loop = new QueueWorkerLoop(
+                    queue, _connection, executor, _options.NodeName,
+                    _options.WorkerConcurrency, wake,
+                    _loggerFactory.CreateLogger($"Highway.Queue.{queue.Name}"));
+                loopTasks.Add(Task.Run(
+                    () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
+                    CancellationToken.None));
+                wakes.Add(wake);
+
+                // The doorbell is a latency optimisation; the backstop sweep drives
+                // correctness, so a failure to subscribe must not stop the worker.
+                if (_options.DoorbellsEnabled)
+                {
+                    var queueWake = wake;
+                    try
+                    {
+                        await _connection.SubscribeQueueDoorbellAsync(
+                            queue.Name, _ => queueWake.Signal(), ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Could not subscribe to the doorbell for queue '{Queue}'; the backstop sweep still drives it",
+                            queue.Name);
+                    }
+                }
+            }
+
             await watcher.StartAsync(ct).ConfigureAwait(false);
 
             // 3. Register this node's subscriber groups (group = NodeName).
@@ -279,4 +313,23 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         await StopAsync().ConfigureAwait(false);
         _lifecycleLock.Dispose();
     }
+
+    /// <summary>
+    /// Warns once when this node processes queues (feature 014).
+    ///
+    /// <para>A queue whose contents vanish on restart contradicts the point of the concept,
+    /// and <c>new HighwayServerBuilder().Build()</c> is memory-only. Feature 016 makes
+    /// durability the default; until then the one unacceptable option is a silent lie, so
+    /// this says it out loud — once at startup, never per send.</para>
+    ///
+    /// <para>The client cannot see the server's data directory, so this is phrased as a
+    /// reminder rather than a diagnosis. A wrong-but-loud warning beats a right-but-absent
+    /// one when the failure mode is silent data loss.</para>
+    /// </summary>
+    private void WarnIfQueuesAreNotDurable()
+        => _logger.LogWarning(
+            "This node processes {Count} queue(s). A queue is only durable if the broker was started " +
+            "with a data directory — a memory-only server loses queued work on restart. Queues: {Queues}",
+            _catalog.AllQueues.Count,
+            string.Join(", ", _catalog.AllQueues.Select(q => q.Name)));
 }

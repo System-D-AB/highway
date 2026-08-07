@@ -42,6 +42,12 @@ internal interface IHighwayConnection
     Task DeleteReplySlotAsync(string requestId, CancellationToken ct = default);
     Task SubscribeDoorbellAsync(string channel, Action<string> onMessage, CancellationToken ct = default);
 
+    // Queue (feature 014)
+    Task QSendAsync(string queue, string messageId, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
+    Task<(string MessageId, byte[] Payload)?> QClaimAsync(string queue, string nodeId, CancellationToken ct = default);
+    Task QAckAsync(string queue, string nodeId, string messageId, CancellationToken ct = default);
+    Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default);
+
     // Deduplication (feature 013)
     Task<IdempotencyClaim> ClaimIdempotencyAsync(string name, string id, TimeSpan window, CancellationToken ct = default);
     Task CompleteIdempotencyAsync(string name, string id, byte[] response, TimeSpan window, CancellationToken ct = default);
@@ -289,6 +295,64 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     // -------------------------------------------------------------------------
 
     /// <summary>Reads the reply slot; null when absent.</summary>
+    // -------------------------------------------------------------------------
+    // Queue (feature 014)
+    // -------------------------------------------------------------------------
+
+    /// <summary>HW.QSEND &lt;queue&gt; &lt;messageId&gt; &lt;payload&gt; [AT ticks].</summary>
+    public Task QSendAsync(
+        string queue, string messageId, byte[] envelope,
+        DateTimeOffset? deliverAt = null, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            if (deliverAt is { } at)
+            {
+                await _db.ExecuteAsync("HW.QSEND", queue, messageId, envelope, "AT",
+                    at.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
+            }
+            else
+            {
+                await _db.ExecuteAsync("HW.QSEND", queue, messageId, envelope).ConfigureAwait(false);
+            }
+            return true;
+        }, ct);
+
+    /// <summary>HW.QCLAIM &lt;queue&gt; &lt;nodeId&gt; → (messageId, payload), or null when empty.</summary>
+    public Task<(string MessageId, byte[] Payload)?> QClaimAsync(
+        string queue, string nodeId, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            var result = await _db.ExecuteAsync("HW.QCLAIM", queue, nodeId).ConfigureAwait(false);
+            if (result is null || result.IsNull)
+                return default((string, byte[])?);
+
+            var arr = (RedisResult[])result!;
+            return ((string)arr[0]!, (byte[])arr[1]!);
+        }, ct);
+
+    /// <summary>HW.QACK &lt;queue&gt; &lt;nodeId&gt; &lt;messageId&gt;.</summary>
+    public Task QAckAsync(string queue, string nodeId, string messageId, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            await _db.ExecuteAsync("HW.QACK", queue, nodeId, messageId).ConfigureAwait(false);
+            return true;
+        }, ct);
+
+    /// <summary>Subscribes to a queue doorbell — a latency optimisation, never correctness.</summary>
+    public async Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default)
+    {
+        try
+        {
+            await _subscriber.SubscribeAsync(
+                RedisChannel.Literal($"hw:door:q:{queue}"),
+                (_, value) => onMessage(value.ToString() ?? string.Empty)).ConfigureAwait(false);
+        }
+        catch (RedisException ex)
+        {
+            throw Classify(ex);
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Deduplication (feature 013)
     // -------------------------------------------------------------------------
