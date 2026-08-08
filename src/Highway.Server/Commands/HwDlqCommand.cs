@@ -314,6 +314,29 @@ internal sealed class HwDlqCommand : HighwayCommandBase
                 fields.Add(payload.ToArray());
             }
 
+            // Why it died (015). Without these a dead letter says only that something failed
+            // n times, and an operator has to correlate logs across every worker to learn what
+            // threw — which is the problem feature 015 exists to remove.
+            if (Envelope.TryGetFailureBlock(original, out var block, out _))
+            {
+                Envelope.DecodeFailureBlock(block, out var type, out var firstType, out var detail);
+
+                Add("failureType", Encoding.UTF8.GetString(type));
+                if (firstType.Length > 0)
+                    Add("failureFirstType", Encoding.UTF8.GetString(firstType));
+
+                fields.Add("failureDetail"u8.ToArray());
+                fields.Add(detail.ToArray());
+            }
+            else
+            {
+                // Said explicitly rather than left as blank fields. A worker that crashed
+                // before it could report is a different situation from one that reported
+                // nothing useful, and an operator should not have to guess which they have.
+                Add("failure", "not reported - the worker did not report a failure before this " +
+                               "message exhausted its attempts");
+            }
+
             encoded.Add(fields);
         }
 

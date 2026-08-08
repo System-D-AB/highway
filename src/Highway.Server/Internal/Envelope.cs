@@ -400,6 +400,20 @@ internal static class Envelope
     }
 
     /// <summary>
+    /// Copies the failure block from <paramref name="source"/> onto <paramref name="rebuilt"/>,
+    /// or returns <paramref name="rebuilt"/> unchanged when there is none.
+    ///
+    /// <para><b>Call this at every point an entry is re-encoded.</b> An entry is rebuilt from
+    /// its decoded parts in four places — claim (RPC, queue and channel) and the lease sweep's
+    /// requeue — and every one of them drops the trailer, because the trailer is not one of the
+    /// parts. Missing a single site loses the failure history silently, on a path nobody
+    /// watches, which is exactly how this was found: the sweep was wired first and the claim
+    /// was not, so the block survived the requeue and then vanished at the next claim.</para>
+    /// </summary>
+    public static byte[] CarryFailureBlock(ReadOnlySpan<byte> source, byte[] rebuilt)
+        => TryGetFailureBlock(source, out var block, out _) ? WithFailureBlock(rebuilt, block) : rebuilt;
+
+    /// <summary>
     /// Returns <paramref name="entry"/> carrying <paramref name="block"/>, replacing any block
     /// it already had. Attaching to an entry that has none is what makes the trailer additive;
     /// replacing is what makes a second report cheap.

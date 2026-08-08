@@ -94,9 +94,14 @@ internal abstract partial class HighwayCommandBase
             // deployment — and, the queue being FIFO, retried ahead of everything behind it.
             var next = Envelope.NextAttempt(attempts);
 
+            // The failure block (015) rides on the rebuilt entry. Read from the entry the sweep
+            // is ALREADY decoding, so no extra read and no N+1 inside the transaction.
+            var source = span.ToArray();
+
             if (opts.MaxDeliveryAttempts > 0 && next > opts.MaxDeliveryAttempts)
             {
-                var original = encodeQueueEntry(id, payload, next);
+                var original = Envelope.CarryFailureBlock(source, encodeQueueEntry(id, payload, next));
+
                 var dead = DeadLetter.Encode(DateTime.UtcNow.Ticks, next, DeadLetter.MaxAttempts, original);
 
                 api.ListRightPush(dlqKey, CreateArgSlice(dead), out _);
@@ -106,7 +111,11 @@ internal abstract partial class HighwayCommandBase
                 continue;
             }
 
-            var revived = CreateArgSlice(encodeQueueEntry(id, payload, next));
+            // On the requeued entry too. Without this, `firstType` would be lost on the FIRST
+            // redelivery and nothing would report it — the one silent failure mode in this
+            // feature, which is why R4.4 calls it out.
+            var revived = CreateArgSlice(
+                Envelope.CarryFailureBlock(source, encodeQueueEntry(id, payload, next)));
             if (returnToHead)
                 api.ListLeftPush(queueKey, revived, out _);
             else
