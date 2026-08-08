@@ -1,5 +1,10 @@
 # Tasks: Pub/Sub Unification
 
+> **Amended by engineering review, 2026-08-08.** Decision 1A (subscriber failure adopts queue
+> semantics) added T2a and three tests to T15; a task-ordering bug was fixed (T5a must precede
+> the deletions it unblocks — the review caught T7 deleting framings the double-write still
+> used); T0 and T6 gained done-when clauses.
+
 **Deletion is the deliverable.** A task that adds an abstraction to share code between two
 delivery engines has misunderstood the feature. The success condition is that
 `HwReceiveCommand.cs` does not exist and nothing replaced it.
@@ -20,7 +25,9 @@ reject it with `HW_INVALID_ARG`.
 
 *Requirements:* R1.2 (implicitly), design Decision 1
 **Done when:** a test proves **both** paths reject it, and a test proves a name *without* `@`
-is unaffected. Client-side alone is insufficient — the protocol is open and a non-Highway
+is unaffected. The rejection message names the migration ("rename the queue/channel; `@` is
+reserved for group queues as of protocol 4.0") — for an existing deployment this rule is
+retroactively breaking, and the error is where the operator will meet it. Client-side alone is insufficient — the protocol is open and a non-Highway
 client can issue `HW.QSEND` directly. Server-side alone turns a startup mistake into a runtime
 one.
 
@@ -57,6 +64,18 @@ per subscribed group against the derived name.
 application source unchanged, and the end-to-end pub/sub integration tests pass with
 `ChannelConsumerLoop` **not running**.
 
+### - [ ] T2a — `ExecuteSubscribersAsync`: attempt all, then fail (Decision 1A)
+
+The executor stops swallowing: every local handler is attempted, failures are collected, and if
+any threw the delivery fails with an aggregate carrying each handler's exception — which is what
+`FailureReporter` then reports and the DLQ eventually shows.
+
+*Requirements:* R5.4 (new), design Decision 5
+**Done when:** a node with three handlers where one throws still runs the other two, the
+message is not acknowledged, and the eventual dead letter's context names the handler that
+threw. `ChannelResponse`'s doc comment is updated in the same change — `SuccessCalls` no longer
+reaches a caller on this path.
+
 ### - [ ] T3 — Group workers default to concurrency 1
 
 *Requirements:* R5.2
@@ -82,6 +101,15 @@ undiscoverable until someone hits it.
 > Only after Phase 1 is green. Each deletion is a separate commit, because a deletion that
 > breaks something must be bisectable.
 
+### - [ ] T5a — Remove the double-write from `HW.PUBLISH` first
+
+*Requirements:* R2.1
+**Done when:** `HW.PUBLISH` writes only to the derived queues, and the pub/sub tests still pass.
+
+**This must open the phase.** The review caught the ordering bug: T7 deletes the channel
+framings while T1's old write still encodes with them — deleting in the written order breaks
+the build. The scaffolding comes down before the structure it was propping up.
+
 ### - [ ] T5 — Delete `HwReceiveCommand` and `HwRackCommand`
 
 *Requirements:* R2.1, R7.1
@@ -92,8 +120,12 @@ removed from one and not the other fails — which is the point.
 ### - [ ] T6 — Delete `ChannelConsumerLoop`
 
 *Requirements:* R2.1
-**Done when:** the file is gone and `FailureReporter`'s channel branch goes with it. 015's T2
-noted the batch loop was "deliberately not a subclass"; it is now deliberately not present.
+**Done when:** the file is gone and `FailureReporter`'s channel branch goes with it — a branch
+the review found was nearly unreachable anyway, because the executor swallowed exceptions
+before the loop's catch could see them. **`SingleMessageWorkerLoop`'s class remarks are updated
+in the same change**: they currently explain why `ChannelConsumerLoop` is "deliberately not a
+subclass", which becomes a reference to a class that does not exist. Stale doc is the same
+defect as a stale diagram.
 
 ### - [ ] T7 — Delete two entry framings
 
@@ -187,7 +219,13 @@ moved. The second number should be small and every entry in it explainable.
 - `SubscriberGroupProcessesInOrder_ByDefault` — R5.2
 - `QueueNamedLikeAGroup_IsRejected` — T0's collision, from both directions
 - `PreUnificationChannelData_RefusesStartup` — T10
-- `SubscriberFailure_DeadLettersWithContext` — proves 015 was inherited, not reimplemented
+- `SubscriberFailure_DeadLettersWithContext` — proves Decision 1A end to end; **this is a new
+  capability, not an inheritance** — today's pub/sub has never dead-lettered a handler failure
+- `SiblingHandlers_ReRunOnRedelivery` — pins R5.4's sharpest edge: handler A succeeded, handler
+  B threw, the redelivery runs A again. The test *is* the documentation of the trade
+- `IdempotentSubscriber_SuppressesRedeliveredDispatch` — `[Idempotent]` was silently ignored
+  for subscribers; this proves it now works, keyed on `{channel}@{group}` + sequence
+- `PublishStillReportsGroupCount` — `PublishAsync` still returns how many groups received
 
 *Requirements:* R3 (all), R5, R6.3
 

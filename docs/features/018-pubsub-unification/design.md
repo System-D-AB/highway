@@ -144,6 +144,48 @@ benchmark at all, so adding a `COUNT` argument now would optimise against a numb
 exist. If a benchmark later shows it matters, `COUNT` on `HW.QCLAIM` is additive and improves
 **both** verbs.
 
+## Decision 5 — Subscriber failure adopts queue semantics (review decision 1A)
+
+Today, `ServiceExecutor.ExecuteSubscribersAsync` swallows every handler exception
+(`ServiceExecutor.cs:142`) and `ChannelConsumerLoop` acks regardless — a throwing subscriber is
+invisible and a poison event vanishes acked. The unified engine does the opposite, and this
+design **adopts the engine's semantics rather than branching to preserve the accident**:
+
+```
+ExecuteSubscribersAsync, after                      QueueWorkerLoop (unchanged)
+------------------------------                      ---------------------------
+attempt handler 1  -- ok                            throw reaches the loop
+attempt handler 2  -- THROWS (recorded)               -> not acked
+attempt handler 3  -- ok  (siblings still run)        -> lease expires -> redelivered
+        |                                             -> attempts exhaust
+        +- any failures? -> throw aggregate           -> DLQ with 015 context
+```
+
+- **Attempt all, then fail**: one bad handler must not starve its siblings of the attempt, but
+  its failure must fail the delivery, or it is invisible again.
+- **Siblings re-run on redelivery.** Named in R5.4 and pinned by a test. At-least-once already
+  requires idempotent handlers; `[Idempotent]` — newly functional for subscribers, it was
+  ignored before — is the mitigation for handlers that cannot be.
+- **`ChannelResponse.SuccessCalls` loses its consumer**: the queue loop discards the return
+  value, and partial-failure detail now travels in the 015 failure context instead. The type's
+  doc comment changes to say so.
+- **Rejected**: an ack-anyway branch for subscription queues. It preserves today's behaviour at
+  the cost of an `if (subscription)` in the engine's failure path — the exact per-family
+  branching this feature deletes — and keeps pub/sub failures undiagnosable, against 015.
+
+## Two mechanical shape changes, stated so nobody rediscovers them
+
+**The processing list becomes per-node.** Today a group has ONE shared processing list
+(`hw:ch:{ch}:grp:{g}:proc` — no node in the key); the queue engine keeps one per worker
+(`hw:q:{name}:proc:{node}`) and sweeps them via the node set `HW.QCLAIM` maintains. Recovery
+semantics are equivalent; the key shape is not, and the startup scan in T10 must match the old
+shape to catch it.
+
+**Message identity changes type.** A channel entry carries an i64 sequence; a queue entry a
+string id. The fan-out renders the channel sequence as a string, so it stays unique per channel
+and the idempotency key becomes `{channel}@{group}` + seq. Today's pub/sub never consulted the
+dedup window at all, so there is no old behaviour to preserve — only a new one to document.
+
 ## The delivery path, end to end
 
 ```
@@ -210,7 +252,7 @@ class of bug permanently.
 | A group registered mid-publish | Included or not, atomically; never half | The group list is locked in `Prepare` |
 | `@` in a declared queue or channel name | Rejected at scan **and** at command | Decision 1; both, or it is not a guarantee |
 | Pre-018 channel keys present at startup | **Refuse to start**, naming the keys and the remedy | R6.3 — 013's `HW_STORAGE_FORMAT` precedent: refusing beats misparsing, and both beat silence |
-| Subscriber handler throws | Not acknowledged, redelivered, eventually dead-lettered with context | 013 + 015, inherited unchanged |
+| Subscriber handler throws | All siblings attempted, then not acknowledged; redelivered; dead-lettered with context | **Decision 5 — a semantic change (R5.4), not an inheritance.** Today it is swallowed and acked |
 | Group's queue exceeds its bound | Whatever 016 decides — **one** decision now, not two | The point of sequencing this first |
 
 ### The pre-018 data check
