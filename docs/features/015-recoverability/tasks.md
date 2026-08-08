@@ -330,7 +330,7 @@ still recovers it, and the loop is still running. `IHighwayConnection` is alread
 and NSubstitute is already referenced, so this costs almost nothing — and it is the entire
 content of the rule in T10, which would otherwise be unverified.
 
-### - [ ] T15 — The remaining coverage
+### - [x] T15 — The remaining coverage *(spread across T3, T5 and Phase 3)*
 
 `FailureContext_IsTruncated_ClientSide`, `FailureContext_HonoursCaptureModes`,
 `UnknownTarget_IsRejected_NamingTheExpectedForms`, `ReportingAnAcknowledgedMessage_ReturnsZero`,
@@ -361,16 +361,18 @@ the old wording, which is a sign the wording was too weak. Register the deferred
 and the Polly evaluation in § Open Decisions — **not** in a new `TODOS.md`, because a second
 register is a second thing to get stale.
 
-### - [ ] T18 — Samples
+### - [x] T18 — Samples
 
 *Requirements:* R6.4, R6.5
 **Done when:** `dlq poison.queue` shows the exception that caused the dead letter. The `poison`
 command already dead-letters; what changes is that it now says **why** — which is the entire
 point. Re-run and append to `samples/RUNLOG.md`.
 
-### - [ ] T19 — Full verification
+### - [x] T19 — Full verification
 
 *Requirements:* R6.6
+**Done:** 668 tests green across four projects, `dotnet build` clean with zero warnings,
+samples re-run across three real processes with a `RUNLOG.md` entry.
 
 ---
 
@@ -400,3 +402,28 @@ the answer.
 
 And: **diagnostic writes never outrank delivery.** If reporting a failure can delay, block or
 break the recovery of a message, the design has inverted its priorities.
+
+
+---
+
+## Not done, and named rather than left to be discovered
+
+**The dashboard does not display the new fields.** R3.4 asks for `HW.DLQ PEEK` **and** the
+dashboard; PEEK is done and the CLI sample proves it end to end, but the dashboard's dead-letter
+view still shows the pre-015 columns. It is a separate package (`Highway.Server.Dashboard`,
+feature 011) with its own view code, and bolting a UI change onto the tail of a protocol feature
+is how both get done badly. **Registered as outstanding for the next dashboard change** — not
+silently dropped.
+
+**Two reply-shape warts, both pre-existing, both left alone:**
+
+- `HW.DLQ PEEK` labels a queued message `requestId`, because a queue reuses the RPC entry
+  framing and the command branches on *framing* rather than on *family*. Misleading exactly
+  where an operator is reading carefully — but renaming a reply field is a protocol change and
+  does not belong bolted onto this feature.
+- `HW.ACK` answers `+OK` while `HW.QACK` answers `:1`/`:0`. Both are defensible alone; together
+  they are an inconsistency that cost time during T3 and will cost someone else time again.
+
+**The `MaxDeliveryAttempts` off-by-one survives** — `attempts 3` under a limit of 2, visible in
+the samples. Deferred with the attempt-counting work, which is what redefines what an attempt
+*is*. Registered in `constraints.md` § Deferred.
