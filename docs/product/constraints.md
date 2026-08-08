@@ -205,12 +205,20 @@ an error can retry or shed load. One that receives silent success cannot.
 |---|---|
 | Channel backlog | **Removed** (C2.4) |
 | Dead-letter queues | Yes — `MaxDeadLetterEntries` (feature 013) |
+| Delayed and retry sorted sets | Yes — bounded with their queue (feature 013) |
 | **Pub/Sub group queues** | **No — nothing at all** |
-| **Queues (C1)** | Not built yet; must be bounded from the start |
+| **Queues (C1)** | **Built (014) and still unbounded** |
 
 An orphaned group queue — a node decommissioned without unsubscribing — receives a copy of
 every subsequent publish forever. This, not the backlog, is what will actually consume a
-gigabyte. Its remedy is feature 015.
+gigabyte. Bounding it is feature 016; letting a node retire cleanly so the queue never becomes
+an orphan is **feature 017 (node decommissioning)**.
+
+> This entry said "Queues: not built yet" until 2026-08-08, three features after 014 built
+> them, and pointed at feature 015 for the orphan remedy — a number that meant node
+> decommissioning when it was written and means recoverability now. Both corrected. Recorded
+> rather than silently overwritten, because the failure mode is the point: a forward reference
+> by feature *number* rots as soon as the roadmap reorders.
 
 ### C4.5 — Durability is the default, not an option
 
@@ -242,7 +250,33 @@ is independent of every other decision here.
 | **Per-message TTL** | Retention is per queue or channel. |
 | **Characterised throughput** | No benchmark exists; no figure is claimed anywhere. |
 | **Second-accurate scheduled delivery** | Delay is a "not before", driven by consumer polling, not a timer. |
-| **Ordering under backoff** | Redelivery preserves head-of-queue order by default; enabling backoff trades that away. No setting gives both. |
+| **Ordering under backoff** | Redelivery preserves head-of-queue order by default; enabling backoff trades that away. No setting gives both. This trade-off is a C5 row, not a numbered constraint — it is a property Highway declines to promise, not one it keeps. |
+
+---
+
+## C7 — Observing the system never breaks it — feature 002, extended by 015
+
+### C7.1 — A diagnostic write can never delay, block or fail a delivery
+
+**Status: Met** — feature 002 for the flight recorder, feature 015 for failure reporting.
+
+The flight recorder drops rather than blocks when full. `HW.FAIL` is best-effort: if it fails,
+the exception is swallowed and logged **with the original attached**, the worker loop continues,
+and the message is **not** acknowledged — so the lease sweep recovers it exactly as it would
+have. A consumer that dies because its diagnostics died is worse than one with no diagnostics.
+
+Losing the diagnosis is survivable. Losing the thing being diagnosed is not.
+
+### C7.2 — Diagnostic detail obeys the same capture switch as payloads
+
+**Status: Met** — feature 015.
+
+An exception message routinely contains application data, so a name configured `HeadersOnly`
+or `Off` has its failure detail withheld too, governed by feature 002's per-name
+`PayloadCapture` rather than by a second setting nobody would remember to set.
+
+The exception **type** survives every mode: it is metadata, and it is the one field that makes
+a dead letter diagnosable at all.
 
 ---
 
@@ -314,17 +348,20 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C4.1 | Retention 100 days | ❌ Not met — 016 |
 | C4.2 | Size cap 1 GB | ❌ Not met — 016 |
 | C4.3 | Limits are never silent | ❌ Not met — 016 |
-| C4.4 | Every queue-like structure bounded | ❌ Not met — 015, 016 |
+| C4.4 | Every queue-like structure bounded | ❌ Not met — 016 |
 | C4.5 | Durable by default | ❌ Not met — 016 |
 | C4.6 | Bounded over time | ❌ Not met — 016 |
+| C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
+| C7.2 | Diagnostic detail obeys the payload capture switch | ✅ Met (015) |
 | C6.1 | Cannot reach the network unauthenticated by accident | ✅ Met |
 | C6.2 | Credentials never logged | ✅ Met |
 | C6.3 | Auth failures permanent and legible | ✅ Met |
 | C6.4 | TLS available, never required | ✅ Met |
 | C6.5 | The tested path is the secured path | ✅ Met |
 
-**All five unmet constraints are in C4** — retention, storage and durability — which is one
-coherent feature rather than six. Feature 014 delivered C1.
+**All six unmet constraints are in C4** — retention, storage and durability — which is one
+coherent feature rather than six problems. Feature 014 delivered C1; feature 015 completed
+C1.4.
 
 ---
 
