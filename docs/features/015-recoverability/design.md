@@ -1,70 +1,92 @@
-# Design: Recoverability
+# Design: Recoverability — Part 1, Diagnosable Failures
+
+> **Revised after engineering review, 2026-08-08.** Scope reduced to a structural refactor
+> plus failure context; retry tiers deferred. The review also found a **feasibility defect**
+> in the first draft of this design — see [Decision 4](#decision-4-the-failure-block-lives-in-the-entry-not-a-side-key),
+> which supersedes an earlier side-key approach that Garnet's locking model cannot support.
 
 ## Overview
 
-Three tiers between "a handler threw" and "an operator has to look at this", plus the
-failure context that makes the last one useful.
+Two changes, in this order and not simultaneously.
 
 ```
-ProcessAsync throws
-   │
-   ├─ unrecoverable exception?  ──────────────────────────► dead letter  (reason: UNRECOVERABLE)
-   │
-   ├─ immediate retry × N        in-process, no delay, lease still held
-   │      still failing
-   │      ▼
-   ├─ delayed retry × M          leaves the live queue → :retry set → returns after a growing delay
-   │      still failing
-   │      ▼
-   └─ attempts exhausted        ──────────────────────────► dead letter  (reason: MAX_ATTEMPTS)
-                                                             + exception type, message, stack,
-                                                               node, first and last failure time
-```
+STEP A — structural, zero behaviour change
+    SingleMessageWorkerLoop (abstract)
+      ├─ RpcWorkerLoop      claim → handle → reply → ack
+      └─ QueueWorkerLoop    claim → handle →         ack
+         shares: RunAsync, DrainAsync, gate, in-flight, idempotency gate
 
-The tiers exist to keep the dead-letter queue **rare**. Transient faults are common and
-self-healing; if each produced a dead letter, the queue would fill with messages that would
-have succeeded on retry, nobody would watch it, and the one genuinely poisoned message would
-be invisible. That is the whole argument, and it is why "just dead-letter immediately and
-drain it with another worker" was rejected — see below.
+    ChannelConsumerLoop  — batch-shaped, keeps its own shape
+    FailureReporter      — used by all three
+
+    PROOF: the existing 626 tests pass with no test edited.
+
+
+STEP B — behavioural
+    handler throws
+      └─ FailureReporter → HW.FAIL <kind> <target> <node> <id> <json>
+             server: rewrite the processing entry, attaching a failure block
+             (does NOT ack — the lease sweep still owns recovery)
+      └─ lease expires → sweep decodes the entry, block is already there
+             ├─ requeue     → block rides the queue framing too
+             └─ dead letter → block is attached to the dead letter
+      └─ HW.DLQ PEEK shows type, message, stack, node, firstType
+```
 
 ## Decision 1: Exceptions stay the only signal
 
-No result object, no status enum, no boolean. A handler returns → success. It throws →
-failure.
+No result object, no status enum, no boolean. Return → success. Throw → failure.
 
-The alternative — `Task<HandlerResult>` with `Success` / `Retry` / `Reject` — was rejected.
-It looks more expressive and is worse: every handler must now decide a policy question at
-the point of failure, most will get it wrong or copy whatever the last one did, and the
-compiler cannot help. An exception already carries type, message and stack, which is exactly
-what Requirement 2 needs to record. `throw` is also what a handler does when it *does not*
-handle a failure, so the honest path and the lazy path agree.
+`Task<HandlerResult>` with `Success`/`Retry`/`Reject` was rejected: it looks more expressive
+and is worse. Every handler must then answer a policy question at the point it knows least
+about the answer, most will copy whatever the last one did, and the compiler cannot help. An
+exception already carries the type, message and stack that Step B exists to record — and
+`throw` is what a handler does when it *does not* handle a failure, so the honest path and the
+lazy path agree.
 
-One refinement: **`OperationCanceledException` during shutdown is not a failure.** The
-message is abandoned, not rejected, and must not consume an attempt it never really had.
-Highway's worker loops already separate the stop token from the work token for exactly this
-reason, so the distinction is available.
+**`OperationCanceledException` during shutdown is not a failure.** The attempt was abandoned.
+The loops already thread a stop token separately from a work token for exactly this reason;
+the distinction exists and is simply unused today.
 
-## Decision 2: Failure context on the dead letter
+## Decision 2: Refactor first, and only where the shapes actually match
 
-The highest-value part, and mostly plumbing.
+`RpcWorkerLoop` and `QueueWorkerLoop` share `RunAsync`, `DrainAsync`, a semaphore gate, an
+in-flight list, `LoopWake` and the idempotency gate. `QueueWorkerLoop.cs:59` already reaches
+into `RpcWorkerLoop.DefaultIdempotencyWindow`, which is what a missing shared home looks like.
 
-Feature 013's dead-letter framing already anticipated this by carrying a reason code rather
-than a message:
+`ChannelConsumerLoop` is **batch**-shaped: `HW.RECEIVE` returns many messages, and it has no
+gate and no in-flight list. Forcing it into the same base means either losing batching or
+filling the base with `if (batch)` branches — the wrong shape for a third of its callers,
+which is how bad base classes are born.
+
+So: **a base for the two that match, and a narrow helper for the concern all three share.**
 
 ```
-[i64 deadLetteredTicksUtc][u16 attempts][u16 reasonLen][reason][original entry]
+SingleMessageWorkerLoop (abstract)      FailureReporter
+  ├─ RpcWorkerLoop                        used by all three
+  └─ QueueWorkerLoop                      catch → build context → HW.FAIL
 ```
 
-It gains a failure block:
+**Structural and behavioural change are not mixed.** Step A lands alone and is proven by the
+existing suite. If a test needs editing to make it pass, the refactor changed behaviour and is
+wrong. This is 014's T2 discipline, which prevented a fourth copy of a bug that had already
+appeared three times.
+
+## Decision 3: Failure context on the dead letter
+
+Feature 013's dead-letter framing already anticipated this by carrying a reason *code* rather
+than a message. It gains a failure block:
 
 ```
 [i64 deadLetteredTicksUtc][u16 attempts][u16 reasonLen][reason]
 [u16 failureLen][failure json][original entry]
 ```
 
-JSON rather than a fourth binary framing: this field is read by humans and by the dashboard,
-it is variable-shaped, and it is written once per dead letter rather than per delivery — none
-of the reasons the entry framings are binary apply.
+JSON, not a fifth binary framing: this field is read by humans and by the dashboard, it is
+variable-shaped, and it is written once per dead letter rather than per delivery — none of the
+reasons the entry framings are binary apply. Plain `System.Text.Json`, matching the house
+style; no source-generated context exists anywhere in `src/` and one type does not justify
+introducing the pattern.
 
 ```json
 {
@@ -78,173 +100,185 @@ of the reasons the entry framings are binary apply.
 }
 ```
 
-`firstType` is present only when the first failure differed from the last. That single field
-answers the question an operator actually asks — *did this fail the same way every time, or
-did something change?* — without storing every attempt.
+`firstType` appears only when the first failure differed from the last, which answers the
+operator's real question without storing every attempt.
 
-**Bounded**, per Requirement 2 AC6: the stack trace is truncated to a documented size, and
-the message likewise. An unbounded string on a dead letter is the same defect class as an
-unbounded queue, and this feature would be a poor place to reintroduce it.
+**Bounded, and truncated client-side.** Message and stack are capped before transmission, so
+bytes destined to be discarded never cross the wire. An unbounded string on a dead letter is
+the same defect class as an unbounded queue, and this feature would be a poor place to
+reintroduce it.
 
 **Capture modes apply.** An exception message routinely contains application data — the order
-ID above is a mild example, a validation error quoting a payload is not. Feature 002's
-per-name capture modes govern this: under `HeadersOnly`, type and timing are kept and message
-and stack are dropped. The same switch, not a second one.
+ID above is mild; a validation error quoting a payload is not. Feature 002's per-name modes
+govern it: under `HeadersOnly`, type and timing survive and message and stack are dropped. The
+same switch, not a second one.
 
-## Decision 3: Immediate retry holds the lease
+## Decision 4: The failure block lives in the entry, not a side key
 
-Requirement 3 AC3 is the sharp edge. An in-process retry loop runs **while the lease is
-held**. If the loop outlives the lease, the message is redelivered to another worker while
-this one is still retrying it — a genuine duplicate, which `[Idempotent]` would suppress but
-noisily, and which without it is a double side effect.
+**The review's critical finding, and it invalidated the first draft.**
 
-Two options were considered:
+The obvious design is a side key — the client writes `hw:fail:{queue}:{messageId}` and the
+sweep reads it when dead-lettering. **Garnet cannot do that.** Every key touched in `Main`
+must be declared and locked in `Prepare`, and the sweep only discovers *which* messages have
+exhausted their attempts in `Main` — it pops the processing list there. It cannot name the
+keys in advance.
 
-- **Extend the lease while retrying** — forgiving of slow handlers, and requires a heartbeat-during-processing mechanism Highway does not have. That is a new failure mode (what happens when the heartbeat fails but the handler keeps going?) for a tier that is supposed to cost milliseconds.
-- **Hold the lease, and bound the loop so it cannot approach it.**
+This is not theoretical: the same wall was hit twice during 013 and 014
+(`Attempting to use a non-XLocked key in a Transactional context`). Both times the fix was
+that the key was derivable from the command's arguments. **A per-message key is not.**
 
-The second is chosen. The retry budget is bounded by a **deadline**, not just a count: the
-loop stops when either the attempt count is exhausted **or** a documented fraction of the
-lease has elapsed, whichever comes first. A handler slow enough to threaten the lease gets
-zero immediate retries, which is correct — a handler taking minutes is not experiencing a
-transient fault.
+Secondarily, even if it were possible, it would be an N+1 read inside a transaction holding
+exclusive locks on the queue and every processing list.
 
-The deadline is logged when it cuts a retry short, because "why did my three immediate
-retries become one?" is otherwise unanswerable.
+**So `HW.FAIL` rewrites the processing entry.** `hw:q:{queue}:proc:{node}` derives from the
+command's own arguments, so it is lockable in `Prepare` by the ordinary rules. The command
+scans that list for the message ID and rewrites the entry with the failure block attached.
 
-## Decision 4: Delayed retry leaves the live queue
+The consequences are all favourable:
 
-This is the half of "just move it out of the way" that is right.
+| | |
+|---|---|
+| No side keys | nothing to declare that is not already declared |
+| No N+1 in the sweep | the block is already in the entry it is decoding |
+| No orphans, no TTL | context dies with the entry it belongs to |
+| Merge is free | read-modify-write on one entry the command already holds |
 
-A message awaiting a delayed retry is moved into the per-consumer `:retry` sorted set that
-feature 013 built, with a score of when it becomes claimable. It is **not** pushed back onto
-the live queue, because a message that is going to fail again for the next thirty seconds
-should not be at the head of a queue with work behind it that would succeed.
+**The catch, and it would fail silently.** When the lease expires the sweep re-encodes the
+processing entry as a **queue** entry. If the queue framing does not carry the failure block,
+`firstType` is lost on the first redelivery and nobody notices — the dead letter simply shows
+last-failure-only. So the optional failure block rides on **both** framings, and the
+two-worker test in the test plan is the guard.
 
-That is head-of-line blocking, and it is the strongest practical argument for the tier.
+## Decision 5: One generic `HW.FAIL`, not one per family
 
-**Ordering is traded, and this is already Highway's documented position.** A delayed retry
-loses its place. `PubSubBackoffEnabled` makes the same trade and defaults to off for exactly
-this reason (`constraints.md` C3.4). The delayed tier therefore inherits the same
-default-off posture where ordering is the stronger guarantee, and the design must not
-quietly flip it.
-
-## Decision 5: Why not "dead-letter immediately, drain with another worker"
-
-Recorded because it is a reasonable proposal and the reasoning is the feature's spine.
-
-The suggestion: skip retries, put every failure in the dead-letter queue, and have a separate
-worker retry from there. Its appeal is real — one failure path, no retry policy in the hot
-path, and the failing message leaves the live queue immediately.
-
-It was rejected on three grounds:
-
-1. **It destroys the DLQ's signal.** A dead-letter queue is worth watching precisely because entries in it are rare and mean "a human needs to decide". Fill it with deadlocks that would have cleared on the next attempt and it becomes a log nobody reads — at which point the genuinely poisoned message is invisible, which is the failure this whole area exists to prevent.
-2. **It does not remove the retry policy, it relocates it.** The draining worker still has to decide how often and how long to retry, and when to give up. The policy now lives further from the handler that failed, and the message has made an extra round trip through storage to get there.
-3. **It loses ordering information and doubles the write path** for the common case, which is a fault that would have resolved in milliseconds.
-
-**What was kept from it:** the insight that a failing message should leave the live queue
-rather than blocking it. That is Decision 4. The correction is only about *which* structure
-it moves to — a retry set means "needs a moment", a dead-letter list means "needs a human",
-and conflating them removes the distinction that makes either one useful.
-
-## Decision 6: Classification is opt-in and empty by default
-
-```csharp
-[Unrecoverable]
-public sealed class ValidationException : Exception { }
-
-// or, for exception types the application does not own
-services.AddHighway(o => o.Recoverability.TreatAsUnrecoverable<ArgumentException>());
+```
+HW.FAIL SVC <service> <node> <requestId>  <failureJson>
+HW.FAIL Q   <queue>   <node> <messageId>  <failureJson>
+HW.FAIL CH  <channel> <group> <messageId> <failureJson>
 ```
 
-Highway ships **no** default classification. Guessing which of an application's exceptions
-are permanent is exactly the kind of helpfulness that produces a message dead-lettered on its
-first transient blip because someone's retry wrapper happened to throw `ArgumentException`.
+`HW.DLQ` already solved this exact problem with a `SVC | Q | CH` target grammar
+(`HwDlqCommand.cs:41`). Three commands would mean three near-identical parsers and validators,
+a protocol growing by three names instead of one, and an inconsistency with the command that
+set the precedent.
 
-An unrecoverable failure dead-letters immediately with reason `UNRECOVERABLE`, distinguishable
-from `MAX_ATTEMPTS` — because "this can never work" and "this did not work six times" call for
-different responses from whoever is looking.
+**It does not acknowledge.** Reporting is orthogonal to delivery: the message stays in the
+processing list and the lease sweep still owns recovery. Reporting a failure for a message
+that is no longer there — already acked, or moved — returns `0` and does nothing, because a
+worker reporting late is not an error worth failing.
 
-## Decision 7: The attempt count stops conflating three things
+`WriteInteger` is currently copy-pasted in `HwDlqCommand.cs:349` and `HwQAckCommand.cs:95`.
+`HW.FAIL` would be a third caller, so it moves to `HighwayCommandBase` alongside
+`WriteNullArray`, which was moved there for the same reason in 014.
 
-Today one `u16 attempts` field counts lease-driven redeliveries. It now needs to distinguish
-three events that read identically and mean very different things.
-
-`MaxDeliveryAttempts` counts **deliveries**. A message handled by one worker that retried
-three times in-process has been delivered **once** — that is what the word means, and it
-keeps the option's meaning stable as the tiers are added.
-
-Immediate retries are therefore *not* stored in the entry: they happen entirely within one
-delivery and are reported through the recorder and the failure context. Delayed retries
-**are** deliveries and do increment.
-
-**The off-by-one is resolved here** (Requirement 6 AC3). `attempts > MaxDeliveryAttempts`
-permits N+1 deliveries while the option's name says N — visible in the samples as `attempts 3`
-under a limit of 2. It becomes `>=`, so a limit of 5 means five deliveries. This is a
-behaviour change for anyone who has tuned the value and is called out in the changelog rather
-than slipped in; doing it inside this feature is right because this is the feature that
-redefines what an attempt is.
-
-## Options
+## Decision 6: Reporting is best-effort and can never break delivery
 
 ```csharp
-public sealed class RecoverabilityOptions
+catch (Exception original)
 {
-    public int ImmediateRetries { get; set; } = 3;
-    public double ImmediateRetryLeaseFraction { get; set; } = 0.25;
-    public int DelayedRetries { get; set; } = 3;
-    public TimeSpan MaxFailureMessageBytes { get; set; }   // documented cap
-    public bool CaptureStackTrace { get; set; } = true;
+    try
+    {
+        await _failureReporter.ReportAsync(original, ct).ConfigureAwait(false);
+    }
+    catch (Exception reporting)
+    {
+        // Diagnostic writes must never outrank delivery. The message is still not
+        // acknowledged, so the lease sweep recovers it exactly as before — just
+        // without context.
+        _logger.LogWarning(reporting,
+            "Could not report the failure of '{Id}' on '{Name}'; it will be recovered " +
+            "without context. Original failure: {Original}", id, name, original);
+    }
+    // deliberately no ack
 }
 ```
 
-Three immediate retries because this tier targets faults already gone by the next attempt;
-past three, waiting is more likely to help than trying harder. A quarter of the lease as the
-deadline leaves ample margin on the default five-minute lease and makes the tier
-self-disabling for genuinely slow handlers.
+The original exception is **never masked**, the loop is **never terminated**, and delivery
+semantics are unchanged when reporting fails. This is feature 002's rule for the flight
+recorder applied to the same class of concern: *a mechanism that observes the system must
+never be able to break it.*
+
+Retrying the report was rejected — it holds the lease longer for a diagnostic write, and a
+retry loop inside the error path is exactly where 3am debugging goes wrong.
 
 ## Testing
 
+```
+STEP A  refactor            existing 626 tests, unedited          ★★★
+STEP B  ────────────────────────────────────────────────────────────
+handler throws
+  ├─ build context ──┬─ has stack                    T-1  ★★★ E2E
+  │                  ├─ over cap → truncate          T-2  ★★
+  │                  └─ HeadersOnly / Off            T-3  ★★  (PII)
+  ├─ HW.FAIL ────────┬─ valid target                 T-1
+  │                  ├─ unknown target               T-4  ★★
+  │                  ├─ message already acked → :0   T-5  ★★
+  │                  └─ second report → merge        T-6  ★★★ two workers
+  └─ report itself fails                             T-7  ★★★ NSubstitute
+lease sweep ─┬─ requeue → block survives             T-6
+             ├─ dead letter → block attached         T-1
+             └─ no block → "no context", not blanks  T-8  ★★
+HW.DLQ PEEK  → fields surfaced                       T-1
+```
+
 | Test | Proves |
 |---|---|
-| `HandlerThrows_IsRetriedInProcess_BeforeAnyRedelivery` | R3.1 — the fast path exists |
-| `ImmediateRetries_StopAtTheLeaseDeadline` | **R3.3** — the sharp edge; a slow handler cannot outlive its lease |
-| `TransientFailure_SucceedsOnImmediateRetry_WithoutRedelivery` | the case the tier is for |
-| `ExhaustedImmediate_MovesToRetrySet_NotBackToTheQueue` | R4.1, R4.4 — head-of-line |
-| `MessageAwaitingRetry_DoesNotBlockTheQueueBehindIt` | R4.4 stated as an observable property |
-| `DeadLetter_CarriesExceptionTypeMessageAndStack` | **R2.1** — the highest-value item |
-| `DeadLetter_RecordsFirstTypeWhenFailuresDiffered` | R2.3 — same way every time, or not |
-| `FailureContext_IsBounded` | R2.6 |
-| `FailureContext_HonoursCaptureModes` | R2.5 — an exception message is application data |
-| `UnrecoverableException_DeadLettersImmediately_WithItsOwnReason` | R5 |
-| `CancellationDuringShutdown_DoesNotConsumeAnAttempt` | R1.3 |
-| `MaxDeliveryAttempts_MeansExactlyThatManyDeliveries` | R6.3 — closes the off-by-one |
+| `T-1 DeadLetter_CarriesExceptionTypeMessageAndStack` | **the reason to build this.** End-to-end: handler → wire → sweep → DLQ. Mocking any hop hides the failure this feature exists to surface |
+| `T-2 FailureContext_IsTruncated_ClientSide` | R3.6 — oversized stack never crosses the wire |
+| `T-3 FailureContext_HonoursCaptureModes` | R3.5 — an exception message is application data |
+| `T-4 UnknownTarget_IsRejected_NamingTheExpectedForms` | consistent with `HW.DLQ`'s error |
+| `T-5 ReportingAnAcknowledgedMessage_ReturnsZero` | R4.6 — a late report is not an error |
+| **`T-6 FirstType_SurvivesRequeue_AcrossTwoWorkers`** | **R3.3 + R4.4.** `node-a` throws `TimeoutException`, `node-b` throws `InvalidOperationException`; the dead letter keeps both. This is the only version that proves the block survives requeue *and* a different worker — which is why the state is server-side at all. Guards a gap that would otherwise fail **silently** |
+| **`T-7 FailingReport_DoesNotMaskOrKill`** | **R5.** NSubstitute the connection so `HW.FAIL` throws; assert the original exception is logged, the message is not acked, the sweep still recovers it, and the loop is still running |
+| `T-8 DeadLetterWithoutContext_SaysSo` | R3.7 — a crashed worker produces an explicit "no context", not blank fields |
 
-`ImmediateRetries_StopAtTheLeaseDeadline` and `DeadLetter_CarriesExceptionTypeMessageAndStack`
-are the two that justify the feature. The first prevents a duplicate-delivery bug this feature
-would otherwise introduce; the second is the reason to build it at all.
+`T-6` and `T-7` are the two that justify the design. `T-6` guards the only silent failure mode
+in the feature; `T-7` verifies the rule that decision 6 exists to state.
+
+## Failure modes
+
+| Codepath | Realistic failure | Test | Handled | Silent? |
+|---|---|---|---|---|
+| `FailureReporter` → `HW.FAIL` | broker blip mid-report | T-7 | best-effort | no — logged |
+| `HW.FAIL` entry rewrite | message already gone | T-5 | returns `0` | no |
+| **Block dropped on requeue** | **`firstType` lost** | **T-6** | both framings carry it | **would be silent** |
+| Truncation | oversized stack | T-2 | client-side cap | no |
+| Capture modes | PII in message | T-3 | 002 modes | no |
+| Step A refactor | behaviour regression | existing 626 | n/a | no |
+
+**One critical gap**, and it is why T-6 must land *with* the framing change rather than after.
 
 ## Risks
 
-**Immediate retry introduces duplicate side effects where none existed.** Today a handler
-runs once per delivery. It will now run up to four times, and a handler that is not
-idempotent between attempts — one that has already written a row before throwing — behaves
-differently. This is real, is why the count is configurable and can be set to zero, and is
-called out in the release notes rather than left for someone to discover.
+**A fifth entry-framing change, soon after 013's breaking one.** Mitigated by the block being
+**optional and trailing**: an entry without it decodes exactly as it does today, so this is
+additive rather than breaking, unlike 013's attempt count.
 
-**Stack traces on dead letters are an information-disclosure surface.** They can carry
-application data and are served by `HW.DLQ PEEK` and the dashboard. Mitigated by capture
-modes and by the bound, and by making the choice visible in options rather than implicit.
+**Stack traces are an information-disclosure surface.** They can carry application data and
+are served by `HW.DLQ PEEK` and the dashboard. Mitigated by capture modes, the truncation cap,
+and making the choice visible in options rather than implicit.
 
-**Three tiers is more to explain than one.** The mitigation is that the default configuration
-behaves sensibly with no knowledge at all, and the sentence that explains it is short: *retry
-quickly, then slowly, then give up and tell someone.*
+**The refactor touches three loops at once.** Mitigated by it being purely structural and by
+the existing suite being the acceptance criterion — with the rule that no test may be edited
+to accommodate it.
+
+## Parallelization
+
+```
+LANE 1  Step A refactor    SingleMessageWorkerLoop, FailureReporter   → blocks lane 3
+LANE 2  Server side        HW.FAIL, framings, sweep, HW.DLQ           → independent
+LANE 3  Client side        reporter wiring in three loops             → needs 1 and 2
+LANE 4  Docs               protocol, constraints, samples             → needs 2
+
+Order:  1 ∥ 2  →  3  →  4
+Conflict: lanes 1 and 3 both touch the worker loops. Land lane 1 first, alone,
+          with zero test edits.
+```
 
 ## Cross-references
 
-- `docs/features/013-reliable-delivery/design.md` — dead-letter framing, `:retry` and `:delayed` sets
-- `docs/features/014-queue/design.md` — the worker loop this changes
-- `docs/features/002-observability/design.md` — capture modes governing failure context
-- `docs/product/constraints.md` — C1.4, C3.4
-- `samples/RUNLOG.md` finding 9 — the off-by-one closed here
+- `docs/features/013-reliable-delivery/design.md` — dead-letter framing; the `Prepare`-phase locking wall hit twice
+- `docs/features/014-queue/design.md` — T2, the precedent for refactoring before building
+- `docs/features/002-observability/design.md` — capture modes; "must never break the system it observes"
+- `docs/features/004.1-server-remediation/design.md` — the watch-conflict rule governing `Prepare`
+- `docs/product/constraints.md` — C1.4, and § Open Decisions where deferred items are registered
