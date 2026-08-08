@@ -165,8 +165,10 @@ internal sealed class HwDequeueCommand : HighwayCommandBase
 
             // The attempt count travels with the claim. Resetting it here would make the
             // limit unreachable, because every redelivery starts with a fresh claim.
-            var procEntry = Envelope.EncodeRpcProcessingEntry(
-                DateTime.UtcNow.Ticks, requestId, deqPayload, claimedAttempts);
+            var procEntry = Envelope.CarryFailureBlock(
+                popped.ReadOnlySpan,
+                Envelope.EncodeRpcProcessingEntry(
+                    DateTime.UtcNow.Ticks, requestId, deqPayload, claimedAttempts));
             api.ListRightPush(callerProcKey, CreateArgSlice(procEntry), out _);
 
             // Register this node in the nodes set and maintain the main-store node list

@@ -382,8 +382,10 @@ internal sealed class HwReceiveCommand : HighwayCommandBase
 
                 // The attempt count travels with the receive; resetting it here would make
                 // the limit unreachable, because every redelivery starts a fresh receive.
-                var procEntry = Envelope.EncodeGroupProcessingEntry(
-                    DateTime.UtcNow.Ticks, messageId, msgPayload, msgAttempts);
+                var procEntry = Envelope.CarryFailureBlock(
+                    popped.ReadOnlySpan,
+                    Envelope.EncodeGroupProcessingEntry(
+                        DateTime.UtcNow.Ticks, messageId, msgPayload, msgAttempts));
                 api.ListRightPush(groupProcKey, CreateArgSlice(procEntry), out _);
 
                 var msgIdSlice = CreateArgSlice(Encoding.UTF8.GetBytes(messageId.ToString()));

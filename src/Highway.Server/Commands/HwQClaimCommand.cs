@@ -132,8 +132,9 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
 
             // The attempt count travels with the claim; resetting it here would make the
             // limit unreachable, because every redelivery starts a fresh claim.
-            var procEntry = Envelope.EncodeRpcProcessingEntry(
-                DateTime.UtcNow.Ticks, messageId, payload, attempts);
+            var procEntry = Envelope.CarryFailureBlock(
+                popped.ReadOnlySpan,
+                Envelope.EncodeRpcProcessingEntry(DateTime.UtcNow.Ticks, messageId, payload, attempts));
             api.ListRightPush(procKey, CreateArgSlice(procEntry), out _);
 
             // Register this worker so future claims sweep its list too.

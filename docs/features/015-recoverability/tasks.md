@@ -200,11 +200,38 @@ feature.
 only in `Main`, so it cannot declare `hw:fail:{id}` keys in `Prepare` — and Garnet rejects
 touching an undeclared key. That wall was hit twice already, in 013 and 014.
 
-### - [ ] T5 — Sweep attaches the block
+### - [x] T5 — Sweep attaches the block
 
 *Requirements:* R3.1, R3.2
-**Done when:** a dead letter carries type, message, stack, node and timing, read from the entry
-the sweep is already decoding — no extra read, no N+1 inside the transaction.
+**Done:** read from the entry the sweep is already decoding — no extra read, no N+1 inside the
+transaction. `HW.DLQ PEEK` surfaces `failureType`, `failureFirstType` (only when the failure
+changed shape) and `failureDetail`; a dead letter with no report says so explicitly instead of
+showing blanks (R3.7, so T9's PEEK half landed here).
+
+#### The sweep was not the only place the block was dropped
+
+T4 said "both framings" and I wired the two the task named — the sweep's requeue and the dead
+letter. The two-worker test still failed, with the dead letter reporting *no failure recorded*.
+
+An entry is rebuilt from its decoded parts in **four** places, and the trailer is not one of
+the parts, so every one of them drops it:
+
+| site | rebuild |
+|---|---|
+| `HW.DEQUEUE` | queue entry → RPC processing entry |
+| `HW.QCLAIM` | queue entry → RPC processing entry |
+| `HW.RECEIVE` | channel entry → group processing entry |
+| lease sweep | processing entry → queue entry, or → dead letter |
+
+The block survived the requeue and then vanished at the very next claim. Fixed with one
+`Envelope.CarryFailureBlock(source, rebuilt)` used at all four sites rather than four
+hand-written copies — the same reasoning as T1 and 014's T2, and the same failure mode 013
+found living in three independently written requeue paths.
+
+**This is the silent failure R4.4 warned about, and the warning still was not enough.** The
+requirement named the requeue specifically, so the requeue is what I wired. What caught it was
+the two-worker test, which is exactly the test T13 argues for: a one-worker version would have
+passed.
 
 ---
 
@@ -264,7 +291,7 @@ embedded server.
 **Done when:** it passes without mocking any hop. Mocking one would hide exactly the failure
 this feature exists to surface.
 
-### - [ ] T13 — **Two workers, different exceptions**
+### - [x] T13 — **Two workers, different exceptions** (landed with T5, as required)
 
 `FirstType_SurvivesRequeue_AcrossTwoWorkers`: `node-a` throws `TimeoutException`, the lease
 expires, `node-b` throws `InvalidOperationException`, attempts exhaust.
