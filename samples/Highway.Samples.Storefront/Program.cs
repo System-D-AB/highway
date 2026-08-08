@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Highway.Abstractions;
 using Highway.Client;
 using Highway.Samples;
@@ -210,8 +211,38 @@ async Task DlqAsync(string[] parts)
         for (var i = 0; i + 1 < fields.Length; i += 2)
         {
             var name = fields[i].ToString();
-            if (name is "payload") continue;   // the whole envelope; noisy here
-            Console.WriteLine($"    {name,-16} {fields[i + 1]}");
+            if (name is "payload") continue;            // the whole envelope; noisy here
+            if (name is "failureDetail") continue;      // unpacked below, one field per line
+
+            Console.WriteLine($"    {name,-18} {fields[i + 1]}");
+        }
+
+        // Feature 015: WHY it died. Before this, a dead letter said only that something
+        // failed n times and an operator had to go correlating worker logs to find out what.
+        var detail = fields
+            .Select((f, i) => (f, i))
+            .Where(x => x.i % 2 == 0 && x.f.ToString() == "failureDetail")
+            .Select(x => fields[x.i + 1].ToString())
+            .FirstOrDefault();
+
+        if (detail is null) continue;
+
+        using var doc = JsonDocument.Parse(detail);
+        foreach (var prop in doc.RootElement.EnumerateObject())
+        {
+            // The stack is the useful field and the long one. Show the frames that matter.
+            if (prop.Name == "stack")
+            {
+                var frames = (prop.Value.GetString() ?? "")
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                    .Take(3);
+                Console.WriteLine($"    {"stack",-18}");
+                foreach (var frame in frames)
+                    Console.WriteLine($"                       {frame.Trim()}");
+                continue;
+            }
+
+            Console.WriteLine($"    {prop.Name,-18} {prop.Value}");
         }
     }
 }
