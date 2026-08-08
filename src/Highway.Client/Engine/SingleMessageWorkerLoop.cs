@@ -33,6 +33,9 @@ internal abstract class SingleMessageWorkerLoop
     protected readonly string NodeName;
     protected readonly ILogger Logger;
 
+    /// <summary>The single seam through which a handler exception is reported (015 T2).</summary>
+    protected readonly FailureReporter Reporter;
+
     private readonly int _concurrency;
     private readonly SemaphoreSlim _gate;
     private readonly LoopWake _wake;
@@ -65,6 +68,7 @@ internal abstract class SingleMessageWorkerLoop
         Executor = executor;
         NodeName = nodeName;
         Logger = logger;
+        Reporter = new FailureReporter(logger);
         _concurrency = Math.Max(1, concurrency);
         _wake = wake;
         _gate = new SemaphoreSlim(_concurrency, _concurrency);
@@ -80,11 +84,18 @@ internal abstract class SingleMessageWorkerLoop
 
     public LoopWake Wake => _wake;
 
-    /// <summary>The queue or service this loop serves, for logging and diagnostics.</summary>
-    protected abstract string TargetName { get; }
+    /// <summary>Identifies what this loop serves, for logging and for failure reporting.</summary>
+    protected abstract FailureTarget Target { get; }
 
-    /// <summary>"service" or "queue" — the noun used in this loop's log messages.</summary>
-    protected abstract string TargetKind { get; }
+    /// <summary>
+    /// What happens to a message whose handler threw. The two loops answer differently — an
+    /// RPC caller may be waiting on a reply that will never come, a queue message is simply
+    /// redelivered — and that difference is the part an operator reading the log needs.
+    /// </summary>
+    protected abstract string FailureDisposition { get; }
+
+    private string TargetName => Target.Name;
+    private string TargetKind => Target.Kind;
 
     /// <summary>
     /// Takes the next message, or <see langword="null"/> when the source is drained. Called
@@ -94,13 +105,6 @@ internal abstract class SingleMessageWorkerLoop
 
     /// <summary>Handles one claimed message. Exceptions are caught and logged by the base.</summary>
     protected abstract Task ProcessAsync(string id, byte[] payload, CancellationToken workToken);
-
-    /// <summary>
-    /// Logged when <see cref="ProcessAsync"/> throws. The two loops describe the consequence
-    /// differently — an RPC caller may be waiting on a reply, a queue message is simply
-    /// redelivered — and that wording is worth keeping accurate.
-    /// </summary>
-    protected abstract void LogProcessingFailure(Exception ex, string id);
 
     /// <summary>
     /// Two-token contract: <paramref name="stopToken"/> stops claiming new work;
@@ -218,7 +222,10 @@ internal abstract class SingleMessageWorkerLoop
         }
         catch (Exception ex)
         {
-            LogProcessingFailure(ex, id);
+            // Reported with CancellationToken.None: a failure that happens during shutdown is
+            // exactly the one worth recording, so the report must not be cancelled with the work.
+            await Reporter.ReportAsync(Target, id, ex, FailureDisposition, CancellationToken.None)
+                .ConfigureAwait(false);
         }
         finally
         {

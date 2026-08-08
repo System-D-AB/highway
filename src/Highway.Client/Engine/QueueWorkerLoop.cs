@@ -38,20 +38,17 @@ internal sealed class QueueWorkerLoop : SingleMessageWorkerLoop
 
     public string QueueName => _descriptor.Name;
 
-    protected override string TargetName => _descriptor.Name;
-    protected override string TargetKind => "queue";
+    protected override FailureTarget Target => new(FailureFamily.Queue, _descriptor.Name, NodeName);
+
+    // Deliberately not acknowledged: the message returns after its lease expires, and
+    // eventually dead-letters if it can never succeed.
+    protected override string FailureDisposition => "it will be redelivered";
 
     protected override async Task<(string Id, byte[] Payload)?> ClaimAsync(CancellationToken stopToken)
     {
         var claimed = await Connection.QClaimAsync(_descriptor.Name, NodeName, stopToken).ConfigureAwait(false);
         return claimed is null ? null : (claimed.Value.MessageId, claimed.Value.Payload);
     }
-
-    protected override void LogProcessingFailure(Exception ex, string id)
-        // Deliberately not acknowledged: the message returns after its lease expires, and
-        // eventually dead-letters if it can never succeed.
-        => Logger.LogError(ex, "Processing '{MessageId}' on queue '{Queue}' failed; it will be redelivered",
-            id, _descriptor.Name);
 
     protected override async Task ProcessAsync(string messageId, byte[] payload, CancellationToken ct)
     {
