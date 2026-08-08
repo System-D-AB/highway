@@ -297,7 +297,7 @@ a *genuine* failure during shutdown is still recorded — the distinction runs b
 
 Seven of these are ordinary. Two guard things that would otherwise fail silently.
 
-### - [ ] T12 — The end-to-end test
+### - [x] T12 — The end-to-end test
 
 `DeadLetter_CarriesExceptionTypeMessageAndStack` — handler → wire → sweep → DLQ against a real
 embedded server.
@@ -320,7 +320,7 @@ both a requeue and a change of worker — the single silent failure mode in the 
 one-worker version would pass even if the context were cached client-side, which would defeat
 the whole reason the state is server-side.
 
-### - [ ] T14 — **Reporting cannot break delivery**
+### - [x] T14 — **Reporting cannot break delivery**
 
 `FailingReport_DoesNotMaskOrKill`: NSubstitute `IHighwayConnection` so `HW.FAIL` throws.
 
@@ -342,7 +342,7 @@ content of the rule in T10, which would otherwise be unverified.
 
 ## Phase 5 — Conformance
 
-### - [ ] T16 — Protocol document
+### - [x] T16 — Protocol document
 
 `HW.FAIL` in the Command Index, the failure block on two framings, the `DeliveryFailed` event,
 the new dead-letter fields.
@@ -353,7 +353,7 @@ registers the command — that gate has fired four times now.
 
 Note the framing change is **additive**, unlike 013's, so it is a minor version bump.
 
-### - [ ] T17 — Constraints
+### - [x] T17 — Constraints
 
 *Requirements:* R6.3
 **Done when:** C1.4 gains the diagnosis property. A dead letter nobody can diagnose satisfied
