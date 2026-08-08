@@ -27,6 +27,7 @@ internal sealed class ChannelConsumerLoop
     private readonly int _batchSize;
     private readonly ILogger _logger;
     private readonly LoopWake _wake;
+    private readonly FailureReporter _reporter;
 
     public ChannelConsumerLoop(
         ChannelDescriptor descriptor,
@@ -44,6 +45,7 @@ internal sealed class ChannelConsumerLoop
         _batchSize = batchSize;
         _wake = wake;
         _logger = logger;
+        _reporter = new FailureReporter(logger);
     }
 
     public string ChannelName => _descriptor.Name;
@@ -153,8 +155,15 @@ internal sealed class ChannelConsumerLoop
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected dispatch error for message {MessageId} on '{Channel}'; acking",
-                messageId, _descriptor.Name);
+            // Routed through the shared reporter (015 T2) even though this loop is otherwise
+            // batch-shaped: reporting is the one concern all three loops genuinely share, and
+            // a pub/sub failure that nobody can diagnose is the same problem as any other.
+            await _reporter.ReportAsync(
+                new FailureTarget(FailureFamily.Channel, _descriptor.Name, _groupName),
+                messageId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ex,
+                "it is acknowledged anyway, so the group queue never blocks",
+                CancellationToken.None).ConfigureAwait(false);
         }
 
         try

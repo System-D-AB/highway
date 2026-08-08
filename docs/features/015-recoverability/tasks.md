@@ -75,7 +75,7 @@ the in-flight list, `LoopWake`, the idempotency gate. Removes `QueueWorkerLoop`'
 *Requirements:* R2.1, R2.4
 **Done:** `SingleMessageWorkerLoop` holds `RunAsync`, `DrainAsync`, the gate, the in-flight
 list, `LoopWake` and the idempotency window; the two loops supply `ClaimAsync`, `ProcessAsync`,
-a target name and kind, and their own failure wording. 313 + 220 lines became 216 + 175 + 172.
+a target name and kind, and their own failure wording. 313 + 220 lines became 228 + 174 + 117.
 `DefaultIdempotencyWindow` moved to the base, so `QueueWorkerLoop` no longer reaches into
 `RpcWorkerLoop` for it. **All 630 tests pass, none edited.** Build clean, zero warnings.
 
@@ -103,14 +103,31 @@ only one with real consequence, and it is a strict improvement.
 in-flight list, and forcing it into the base means either losing batching or filling the base
 with `if (batch)` branches — the wrong shape for one of three callers.
 
-### - [ ] T2 — `FailureReporter`, wired but inert
+### - [x] T2 — `FailureReporter`, wired but inert
 
 The shared helper, used by all three loops, with no server command behind it yet.
 
 *Requirements:* R2.3
-**Done when:** all three loops route handler exceptions through one place. Still purely
-structural: the reporter does nothing but log, so behaviour is unchanged and Phase 1 remains
-provable by the existing suite.
+**Done:** `FailureReporter` plus `FailureTarget(Family, Name, Scope)` — the `SVC|Q|CH` grammar
+`HW.DLQ` already parses, so T3 needs no second vocabulary. All three loops report through it:
+services and queues via the base's `ProcessAndReleaseAsync`, `ChannelConsumerLoop` from its own
+dispatch catch. It logs and nothing more.
+
+Each loop supplies a **disposition** — what happens to the message now — because that is the
+part the three genuinely disagree on and the part an operator needs: RPC *"it was not
+acknowledged, so lease recovery will redeliver it"*, queue *"it will be redelivered"*, channel
+*"it is acknowledged anyway, so the group queue never blocks"*. Folding those into one sentence
+would have made the log uniform and wrong.
+
+Reports pass `CancellationToken.None`: a handler that fails during shutdown is exactly the one
+worth recording, so the report must not be cancelled along with the work.
+
+Deriving `TargetName`/`TargetKind` from `FailureTarget` removed two abstract members from T1's
+base — the reporter's vocabulary turned out to be the base's vocabulary too.
+
+630 tests pass, none edited. Build clean.
+
+**Phase 1 complete.** T0, T1 and T2 are in.
 
 > **Ship Phase 1 separately.** It removes duplication that would otherwise be triplicated by
 > everything below, and it is provable by tests that already exist.

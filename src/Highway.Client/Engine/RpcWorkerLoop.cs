@@ -32,18 +32,16 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
 
     public string ServiceName => _descriptor.Name;
 
-    protected override string TargetName => _descriptor.Name;
-    protected override string TargetKind => "service";
+    protected override FailureTarget Target => new(FailureFamily.Service, _descriptor.Name, NodeName);
+
+    protected override string FailureDisposition
+        => "it was not acknowledged, so lease recovery will redeliver it";
 
     protected override async Task<(string Id, byte[] Payload)?> ClaimAsync(CancellationToken stopToken)
     {
         var item = await Connection.DequeueAsync(_descriptor.Name, NodeName, stopToken).ConfigureAwait(false);
         return item is null ? null : (item.Value.RequestId, item.Value.Payload);
     }
-
-    protected override void LogProcessingFailure(Exception ex, string id)
-        => Logger.LogError(ex, "Unhandled error processing request '{RequestId}' for service '{Service}'",
-            id, _descriptor.Name);
 
     protected override async Task ProcessAsync(string requestId, byte[] payload, CancellationToken ct)
     {
