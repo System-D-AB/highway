@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 3.0**
+**Current version: 3.1**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 3.1 | 015 | **Diagnosable failures.** Adds `HW.FAIL`, which records the exception that caused a delivery to fail without acknowledging the message, and an optional **failure block** on every entry framing. Adds the `DeliveryFailed` recorder event and new dead-letter fields. Additive: the failure block is a *trailer*, so an entry written without one decodes byte-for-byte as before — unlike 013's attempt count, which changed the framings themselves. No existing command, reply or key changed. |
 | 3.0 | 014 follow-up | **The channel backlog is removed.** A publish with no registered group is delivered to nobody; `HW.SUBSCRIBE` copies nothing and a new group starts empty. `BacklogRetention`, `MaxBacklogEntries`, the `hw:ch:{channel}:backlog` key, its entry framing and the `backlog` field on `HW.STATS` are all gone. **Major**: it removes a documented guarantee. The capability moved rather than vanishing — "hold this until someone can handle it" is `HW.QSEND` and a queue, which is durable by design and has no surprising dependence on when the first subscriber started. Existing backlog data becomes unreachable; delete the data directory. |
 | 2.2 | 012 | **Security.** No command changes. `AUTH` joins the stock dependencies a client must issue against a secured server; the error contract gains a third class (`NOAUTH`, `WRONGPASS`, `NOPERM` — permanent, carrying neither existing marker); a section documents authentication, TLS and the `@dangerous` trap. Additive. |
 | 2.1 | 014 | **The queue.** Adds `HW.QSEND`, `HW.QCLAIM` and `HW.QACK` under a `hw:q:` key space, a `Q` target on `HW.DLQ`, a `Q:name` form on `HW.STATS`, and a `queues` list in the node catalog. Additive — no existing command, reply or key changed. A queue is RPC minus the reply and shares its lease sweep, so dead-lettering, deferred delivery and `[Idempotent]` all apply unchanged. |
@@ -79,6 +80,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.QSEND` | -4 | 2 | Enqueue work for exactly one processor, now or at a future time |
 | `HW.QCLAIM` | 3 | 1 | Claim the next queued message for a worker; promotes deferred work and sweeps expired leases |
 | `HW.QACK` | 4 | 1 | Acknowledge a claimed queued message |
+| `HW.FAIL` | 7 | 3 | Record why a handler failed, without acknowledging the message |
 
 ---
 
@@ -817,6 +819,47 @@ HW.QACK <queue> <nodeId> <messageId>   →   :1 removed   |   :0 not found
 ```
 
 Until this arrives the message remains in the worker's processing list and will be redelivered once its lease expires — that is what makes delivery at least once. Acknowledging an unknown message returns `:0` rather than an error: a worker retrying an acknowledgement is doing the right thing.
+
+### HW.FAIL
+
+```
+HW.FAIL SVC <service> <node>  <requestId>  <type> <detail>   →   :1 recorded   |   :0 not found
+HW.FAIL Q   <queue>   <node>  <messageId>  <type> <detail>
+HW.FAIL CH  <channel> <group> <messageId>  <type> <detail>
+```
+
+Records **why** a delivery failed. Without it a dead letter says only that something failed *n* times, and an operator has to correlate logs across every worker to learn what threw.
+
+| | |
+|---|---|
+| **Target grammar** | The same `SVC` / `Q` / `CH` forms `HW.DLQ` parses. One command serves all three families; three per-family commands would triplicate parsing for no gain. |
+| **`<type>`** | The exception type name. A separate argument, not a field inside `<detail>`, because the server itself needs it to maintain `firstType` — and reading it out of a JSON blob would mean parsing JSON inside a transaction on the failure path. |
+| **`<detail>`** | An opaque blob the server never interprets. Highway's own client sends JSON carrying the message, stack, node and timestamp. |
+| **Idempotency** | Idempotent in effect: a second report for the same message replaces the block rather than appending one. |
+
+**It does not acknowledge.** The message stays in the processing list and the lease sweep recovers it on exactly the schedule it would have. Reporting is orthogonal to delivery: a client that reports a failure has not finished with the message, it has explained itself.
+
+**A message that is no longer in the processing list returns `:0`.** Already acknowledged, already swept, or never claimed — all the same answer. A late report is a race the client cannot avoid, not an error to investigate.
+
+`CH` matches on the numeric message id; a non-integer is refused with `HW_INVALID_ARG`.
+
+#### The failure block
+
+An optional **trailer** on any entry framing:
+
+```
+<entry, framed as documented above>  [block][u32 blockLen][u32 magic 0xFE15FA11]
+
+block := [u16 typeLen][type][u16 firstTypeLen][firstType][u32 detailLen][detail]
+```
+
+Read from the **end**, which is what makes it additive: every framing above ends with "payload is the rest", so there is nowhere to put a length without moving bytes that already exist in storage. An entry written without a block decodes byte-for-byte as it always did.
+
+It rides on **every** framing, not only the processing ones. The lease sweep re-encodes a processing entry as a queue entry when it requeues; if the queue framing could not carry the block, `firstType` would be lost on the first redelivery, silently.
+
+`firstType` is **empty unless the failure changed shape**. It answers *"did this fail the same way every time?"* — a copy of `type` would answer nothing. Once set it is never overwritten.
+
+A payload would have to *end* with the eight trailer bytes to be misread as carrying a block. Payloads are JSON envelopes, whose last byte is `}` (0x7D); the magic's last byte is deliberately not that, and the declared length is bounds-checked as well.
 
 ---
 

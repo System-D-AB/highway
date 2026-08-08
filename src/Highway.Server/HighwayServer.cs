@@ -170,6 +170,11 @@ public sealed class HighwayServer : IHighwayServer
         new("HW.QSEND",      -4, () => new HwQSendCommand(opts, doorbell, recorder)),
         new("HW.QCLAIM",      3, () => new HwQClaimCommand(opts, recorder)),
         new("HW.QACK",        4, () => new HwQAckCommand(opts, recorder)),
+
+        // Recoverability (feature 015). Arity 7 - the name plus six arguments: target kind,
+        // two names, the message id, the exception type, and the detail blob. Every family
+        // takes the same shape, which is what lets one command serve all three.
+        new("HW.FAIL",        7, () => new HwFailCommand(opts, recorder)),
     ];
 
     /// <summary>

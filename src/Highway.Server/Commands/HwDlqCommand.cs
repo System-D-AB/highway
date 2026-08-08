@@ -346,18 +346,6 @@ internal sealed class HwDlqCommand : HighwayCommandBase
     /// Writes a RESP integer. Garnet's procedure base offers simple-string, bulk-string
     /// and array writers but no integer one, so this is the local equivalent.
     /// </summary>
-    private static unsafe void WriteInteger(ref MemoryResult<byte> output, int value)
-    {
-        var len = 1 + CountDigits(value) + (value < 0 ? 1 : 0) + 2;
-        output.MemoryOwner?.Dispose();
-        output.MemoryOwner = MemoryPool<byte>.Shared.Rent(len);
-        output.Length = len;
-        fixed (byte* ptr = output.MemoryOwner.Memory.Span)
-        {
-            var curr = ptr;
-            RespWriteUtils.TryWriteInt32(value, ref curr, ptr + len);
-        }
-    }
 
     private static unsafe void WriteEmptyArray(ref MemoryResult<byte> output)
     {

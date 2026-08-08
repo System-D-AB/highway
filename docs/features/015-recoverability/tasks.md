@@ -136,7 +136,7 @@ base — the reporter's vocabulary turned out to be the base's vocabulary too.
 
 ## Phase 2 — The wire path
 
-### - [ ] T3 — `HW.FAIL`, one generic command
+### - [x] T3 — `HW.FAIL`, one generic command
 
 ```
 HW.FAIL SVC <service> <node> <requestId>  <json>
@@ -145,20 +145,50 @@ HW.FAIL CH  <channel> <group> <messageId> <json>
 ```
 
 *Requirements:* R4.1, R4.2, R4.6
-**Done when:** it rewrites the matching processing entry, **does not acknowledge**, and
-returns `0` for a message that is no longer there. One parser reusing `HW.DLQ`'s `SVC|Q|CH`
-grammar — three per-family commands would triplicate parsing and contradict the command that
-set the precedent.
+**Done:** arity 7 — `<kind> <name> <scope> <id> <type> <detail>`, the same shape for all three
+families, which is what lets one command serve them. It rewrites the matching processing entry
+in place, does **not** acknowledge, and returns `:0` for a message that is no longer there.
+`WriteInteger` moved to `HighwayCommandBase`; `HW.FAIL` would have been its third copy.
 
-Move `WriteInteger` to `HighwayCommandBase` while here; it is already copy-pasted in
-`HwDlqCommand.cs:349` and `HwQAckCommand.cs:95`, and this would be a third copy.
+`<type>` travels as its own argument rather than inside `<detail>` because the server needs it
+to maintain `firstType`, and reading it out of a JSON blob would mean parsing JSON inside a
+Garnet transaction on the failure path.
 
-### - [ ] T4 — The failure block on **both** framings
+10 integration tests against a real embedded server — not unit tests, because the two things
+most likely to be wrong are both invisible to one: whether the processing key is declared in
+`Prepare`, and whether the pop-and-restore preserves the list. Both are covered, including
+that a *miss* does not eat the entries it walked past.
+
+**`HW.FAIL` is documented in `docs/HIGHWAY-PROTOCOL.md` in this same change**, because
+`ProtocolConformanceTests` refused the commit otherwise. That gate has now fired five times.
+Protocol version 3.1 — additive, since the failure block is a trailer.
+
+##### Three wrong assumptions, all mine, all caught by running it
+
+- **Arity counts the command name.** Registered 6 for six arguments; every call answered
+  *wrong number of arguments*. `HW.QACK` is 4 for three arguments and says so.
+- **`HW.ACK` returns `+OK`, not an integer** — it is idempotent by design and does not
+  distinguish found from not-found. `HW.QACK` *does* return `:1`/`:0`. Four tests asserted the
+  wrong shape. The asymmetry is real and pre-existing; the list length is what actually proves
+  a match, so that is what the tests assert now.
+- **`HW.RECEIVE` returns an array of `[id, payload]` pairs**, not a flat array.
+
+None was a defect in the command. Worth recording anyway: the first debugging pass mis-paired
+test names with failure messages through a sloppy regex over the TRX file, which sent me
+looking for a server bug that was never there. A five-line probe printing the actual replies
+settled it immediately — measuring beats inferring, again.
+
+### - [x] T4 (framing) — The failure block on **both** framings
 
 Optional trailing block on the **processing** entry and the **queue** entry.
 
 *Requirements:* R4.3, R4.4
-**Done when:** an entry without the block decodes exactly as today — the block is **additive**,
+**Done (framing half):** the block is a trailer read from the end, so an entry without one
+decodes byte-for-byte as before; all four decoders strip it, so it rides on every framing.
+13 unit tests, including the collision guard — verified by removing the bounds check and
+watching exactly that test fail. The sweep half is T5.
+
+Original acceptance: an entry without the block decodes exactly as today — the block is **additive**,
 not a breaking change like 013's attempt count.
 
 **Both framings, not just the processing one.** The sweep re-encodes a processing entry as a
