@@ -323,6 +323,18 @@ coherent feature rather than six. Feature 014 delivered C1.
 
 ---
 
+## Deferred work
+
+Registered here rather than in a separate `TODOS.md` — a second register is a second thing to
+get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the roadmap.
+
+| Item | Deferred from | Why |
+|---|---|---|
+| **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in `docs/features/015-recoverability/requirements.md` § Deferred |
+| **Polly / `Microsoft.Extensions.Resilience`** | 015 | The .NET built-in for retry pipelines and the obvious "does the framework already do this?" answer. Moot until the tiers return. Highway takes no dependency beyond Garnet and StackExchange.Redis, so it is a real trade rather than a free win |
+| **`MaxDeliveryAttempts` off-by-one** | 013, then 015 | Belongs with the attempt-counting work, because that is what redefines what an attempt *is*. Also listed under Open Decisions above |
+| **`ChannelConsumerLoop` structural unification** | 015 | Batch-shaped; gets the shared `FailureReporter` but keeps its own loop shape. Revisit only if a later feature makes it genuinely resemble the single-message loops |
+
 ## Cross-references
 
 - [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) — the wire contract these guarantees are built on

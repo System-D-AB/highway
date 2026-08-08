@@ -210,7 +210,7 @@ building gigabyte budgets into pub/sub first would be the expensive order.
 
 ### 015 — Recoverability
 
-**Specced** — `docs/features/015-recoverability/`. Three tiers between "a handler threw" and
+**Specced, then reduced by engineering review.** `docs/features/015-recoverability/`. Originally three tiers between "a handler threw" and
 "an operator has to look at this", plus the failure context that makes the last one useful.
 
 A handler signals failure by throwing, and that stays. What is thin is everything after:
@@ -220,8 +220,16 @@ not say why it died.** The exception is discarded where it is caught, so an oper
 `HW.DLQ PEEK` learns something failed six times and must correlate logs across workers to
 find out what.
 
-**Phase 1 alone is worth shipping**: putting the exception type, message and stack on the
-dead letter turns it from a tombstone into a diagnosis, and is mostly plumbing.
+**The review cut it to that Phase 1 plus a refactor**, and corrected the spec: failure context
+is *not* "mostly plumbing". The client holds the exception and the **server** writes the dead
+letter, so it needs a new `HW.FAIL` command and a failure block on two entry framings. A
+side-key design was drafted and found unimplementable — the lease sweep discovers which
+messages exhaust their attempts only in `Main`, so it cannot declare per-message keys in
+`Prepare`, and Garnet rejects touching an undeclared key.
+
+The refactor lands first and alone: `RpcWorkerLoop` and `QueueWorkerLoop` are near-identical
+and would otherwise have had retry logic added to them separately — the same shape as the
+defect 013 found in three independently written requeue paths.
 
 *Why retry at all rather than dead-lettering immediately?* Because the dead-letter queue's
 value is that it is **rare**. Transient faults are common and self-healing; if each produced
