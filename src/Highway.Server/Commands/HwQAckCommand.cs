@@ -92,18 +92,6 @@ internal sealed class HwQAckCommand : HighwayCommandBase
         }
     }
 
-    private static unsafe void WriteInteger(ref MemoryResult<byte> output, int value)
-    {
-        const int len = 4; // :N\r\n
-        output.MemoryOwner?.Dispose();
-        output.MemoryOwner = MemoryPool<byte>.Shared.Rent(len);
-        output.Length = len;
-        fixed (byte* ptr = output.MemoryOwner.Memory.Span)
-        {
-            var curr = ptr;
-            RespWriteUtils.TryWriteInt32(value, ref curr, ptr + len);
-        }
-    }
 
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
         => _recorder.Record(

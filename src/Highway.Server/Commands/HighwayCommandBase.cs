@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using Garnet.common;
 using Garnet.server;
@@ -176,5 +177,23 @@ internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
 
         WriteError(ref output, _error);
         return true;
+    }
+
+    /// <summary>
+    /// Writes a RESP integer reply. Lived as a private copy in <c>HwDlqCommand</c> and
+    /// <c>HwQAckCommand</c> until <c>HW.FAIL</c> would have made it a third (015 T3).
+    /// </summary>
+    protected static unsafe void WriteInteger(ref MemoryResult<byte> output, int value)
+    {
+        const int len = 4; // :N
+
+        output.MemoryOwner?.Dispose();
+        output.MemoryOwner = MemoryPool<byte>.Shared.Rent(len);
+        output.Length = len;
+        fixed (byte* ptr = output.MemoryOwner.Memory.Span)
+        {
+            var curr = ptr;
+            RespWriteUtils.TryWriteInt32(value, ref curr, ptr + len);
+        }
     }
 }

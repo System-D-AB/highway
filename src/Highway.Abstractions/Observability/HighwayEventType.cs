@@ -82,4 +82,11 @@ public enum HighwayEventType
     /// dead-letter list. <c>Count</c> carries the attempt count.
     /// </summary>
     QueueDeadLettered = 16,
+
+    /// <summary>
+    /// <c>HW.FAIL</c> - a handler threw and said so (feature 015). Recorded for every attempt,
+    /// not only the last, so "failed five times then recovered" is visible in the replay rather
+    /// than invisible. <c>ErrorCode</c> carries the exception type.
+    /// </summary>
+    DeliveryFailed = 17,
 }
