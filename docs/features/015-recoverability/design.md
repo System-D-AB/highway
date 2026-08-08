@@ -48,6 +48,21 @@ lazy path agree.
 The loops already thread a stop token separately from a work token for exactly this reason;
 the distinction exists and is simply unused today.
 
+## Decision 2a: The loops must agree before they can be unified
+
+**Found while starting the refactor.** `RpcWorkerLoop` claims a message and *then* waits for a
+concurrency slot; `QueueWorkerLoop` waits for a slot and *then* claims.
+
+Under saturation, RPC therefore holds **claimed** messages — lease running — while blocked
+locally waiting for a slot. Exceed the lease and the message is redelivered elsewhere while
+this node still intends to process it. Load alone produces a duplicate.
+
+The queue's ordering is correct. RPC's is a latent defect predating this feature, and it must
+be fixed **before** the refactor (T0), not inside it: a shared base has to pick one ordering,
+and picking either silently changes the other loop — which the existing suite would probably
+miss, since it only appears under saturation. A refactor whose acceptance criterion is "no
+behaviour change" cannot also carry a concurrency fix.
+
 ## Decision 2: Refactor first, and only where the shapes actually match
 
 `RpcWorkerLoop` and `QueueWorkerLoop` share `RunAsync`, `DrainAsync`, a semaphore gate, an
