@@ -269,6 +269,21 @@ internal sealed class FlightRecorder : IDisposable
             return new NameBuffer(key, capacity, retention, capture);
         }, _options);
 
+    /// <summary>
+    /// The effective capture mode for <paramref name="name"/> — the per-name override if there
+    /// is one, otherwise the default.
+    ///
+    /// <para>Exposed so <c>HW.FAIL</c> can honour the <b>same</b> switch (015 R3.5). An
+    /// exception message routinely contains application data, so a name whose payloads are
+    /// withheld must not have that data arrive through the failure path instead. A second
+    /// setting would be a second thing to get wrong.</para>
+    /// </summary>
+    public PayloadCapture CaptureFor(string name)
+    {
+        _options.Overrides.TryGetValue(name, out var over);
+        return over?.Capture ?? _options.DefaultCapture;
+    }
+
     public void Dispose() => _sweeper?.Dispose();
 }
 

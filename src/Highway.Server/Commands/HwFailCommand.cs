@@ -208,7 +208,16 @@ internal sealed class HwFailCommand : HighwayCommandBase
                     : prevType;                                   // it just changed - record where it started
         }
 
-        return Envelope.EncodeFailureBlock(_typeBytes, firstType, _detailBytes);
+        // Feature 002's capture mode governs the detail, because an exception message
+        // routinely contains application data and a name whose payloads are withheld must not
+        // have that data arrive through the failure path instead (R3.5). The TYPE survives
+        // either way: it is metadata, and it is the field that makes a dead letter
+        // diagnosable at all.
+        var detail = _recorder.CaptureFor(_name) == PayloadCapture.Full
+            ? _detailBytes
+            : [];
+
+        return Envelope.EncodeFailureBlock(_typeBytes, firstType, detail);
     }
 
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)

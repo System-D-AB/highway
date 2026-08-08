@@ -68,7 +68,7 @@ internal abstract class SingleMessageWorkerLoop
         Executor = executor;
         NodeName = nodeName;
         Logger = logger;
-        Reporter = new FailureReporter(logger);
+        Reporter = new FailureReporter(connection, logger);
         _concurrency = Math.Max(1, concurrency);
         _wake = wake;
         _gate = new SemaphoreSlim(_concurrency, _concurrency);
