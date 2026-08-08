@@ -823,3 +823,39 @@ The decision stands. Build Highway on Garnet.
 
 - `docs/features/004-server-hw-commands/research.md` — full verified extensibility report: registration, command shapes, the publish path, list/TTL primitives, reply writing, AOF behavior, hosting options
 - `docs/features/004.1-server-remediation/research.md` — transaction semantics behind the remediation: error classification, watch conflicts, zero-key transaction spike, `SetAdd` added-count
+
+---
+
+# Part 5 — Addendum: what features 012–016 changed (2026-08-08)
+
+This document records what was believed at the time it was written, and is corrected by
+addendum rather than edited — its value is that it explains why decisions were made. Two of
+its conclusions have since been overtaken.
+
+## The channel backlog is gone
+
+Part 4 §4 notes that `SetAdd`'s added-member count "gates idempotent re-subscribe backlog
+copying (feature 004.1)". That mechanism no longer exists. A publish with no registered
+subscriber group is now delivered to **nobody**, and `HW.SUBSCRIBE` copies nothing.
+
+The backlog existed because nothing else could hold a message until someone could handle it.
+Feature 014 added a queue — `SendAsync` / `[Queue]` / `IProcess<T>` — which does that
+durably and without the backlog's surprising rule, where a late subscriber received an
+arbitrary prefix of history determined by when the *first* subscriber happened to start.
+
+## Garnet has more to offer than Part 3 assumed, and some of it is a trap
+
+Feature 012's spikes measured Garnet's authentication surface directly rather than reading
+its documentation, and found three things worth recording:
+
+- **Per-name ACL rules work for custom commands.** `+hw.call` and `-hw.replay` are valid, so per-command roles are possible. They were specced and then descoped, because the deployment model that actually matters is one shared credential for a team.
+- **Highway's commands are in Garnet's `@dangerous` category, not `@admin`.** `+@all -@dangerous` — a common hardening idiom — connects fine and then refuses every `HW.*` command.
+- **A `nopass` default user is a total authentication bypass.** Any username with any password authenticates as the `+@all` default user. This is `nopass` behaving as defined, and it is a trap directly across the path of anything that generates an ACL file.
+
+Full detail in `docs/features/012-introduce-security/design.md`.
+
+## Where the authority now lives
+
+Part 3's architectural conclusions stand. For **what Highway currently guarantees**, and
+which of those guarantees the code actually keeps, the authority is
+[`constraints.md`](constraints.md) — numbered, with an implementation status on every line.
