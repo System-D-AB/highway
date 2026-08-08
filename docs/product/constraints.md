@@ -61,13 +61,29 @@ Bounded only by C4.1 and C4.2.
 `SendAsync` succeeds whether or not any worker exists. The message waits. This is the
 capability whose absence made people misuse `PublishAsync`.
 
-### C1.4 — A message that cannot be processed stops being retried
+### C1.4 — A message that cannot be processed stops being retried, **and says why**
 
-**Status: Met by the underlying machinery** — feature 013.
+**Status: Met** — feature 013 for the stopping, feature 015 for the why.
 
 `MaxDeliveryAttempts` bounds redelivery; exhaustion moves the message to a dead-letter list
 atomically. `HW.DLQ PEEK / REQUEUE / PURGE` operate on it. The queue inherits this on day one
 rather than needing it built.
+
+A dead letter carries the **exception type, message, stack, node and time** of the failure that
+killed it, plus `firstType` when the failure changed shape between attempts. `HW.FAIL` records
+each failure as the handler throws; the block rides on the entry through every requeue and
+re-claim. A dead letter produced with no report — a worker that died before it could send one —
+says so explicitly rather than showing blanks.
+
+> **The wording changed in 015, and that is the point.** The old constraint was satisfied by a
+> dead letter nobody could diagnose: it stopped being retried, which was all it claimed. An
+> operator still had to correlate logs across every worker to learn what threw. When a
+> constraint can be met by something obviously inadequate, the constraint was too weak, and the
+> honest fix is to change the constraint rather than quietly do more than it asks.
+
+Failure detail honours feature 002's per-name `PayloadCapture`, because an exception message
+routinely contains application data. The **type** survives every mode: it is metadata, and it
+is the one field that makes a dead letter diagnosable at all.
 
 ### C1.5 — A send can be deferred
 
@@ -285,7 +301,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C1.1 | Sent message processed at least once | ✅ Met |
 | C1.2 | Survives until processed | ✅ Met |
 | C1.3 | Sending needs no running consumer | ✅ Met |
-| C1.4 | Unprocessable messages stop being retried | ✅ Machinery met (013) |
+| C1.4 | Unprocessable messages stop being retried, and say why | ✅ Met (013 + 015) |
 | C1.5 | Sends can be deferred | ✅ Machinery met (013) |
 | C2.1 | At-least-once per registered group | ✅ Met |
 | C2.2 | Acknowledged means gone | ✅ Met |
