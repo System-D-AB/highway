@@ -208,7 +208,30 @@ queue is RPC minus the reply. It also inherits feature 013 wholesale — delayed
 **Build this before 016.** Several retention constraints move from pub/sub to queues, and
 building gigabyte budgets into pub/sub first would be the expensive order.
 
-### 015 — Node Decommissioning
+### 015 — Recoverability
+
+**Specced** — `docs/features/015-recoverability/`. Three tiers between "a handler threw" and
+"an operator has to look at this", plus the failure context that makes the last one useful.
+
+A handler signals failure by throwing, and that stays. What is thin is everything after:
+Highway has no in-process retry (so a deadlock costs a five-minute lease), no delayed tier,
+no way to declare an exception unrecoverable — and, most importantly, **a dead letter does
+not say why it died.** The exception is discarded where it is caught, so an operator running
+`HW.DLQ PEEK` learns something failed six times and must correlate logs across workers to
+find out what.
+
+**Phase 1 alone is worth shipping**: putting the exception type, message and stack on the
+dead letter turns it from a tombstone into a diagnosis, and is mostly plumbing.
+
+*Why retry at all rather than dead-lettering immediately?* Because the dead-letter queue's
+value is that it is **rare**. Transient faults are common and self-healing; if each produced
+a dead letter the queue fills with noise, nobody watches it, and the genuinely poisoned
+message becomes invisible. The related instinct — get the failure out of the live queue so it
+cannot block what is behind it — is right and is kept, as the delayed tier. It belongs in a
+**retry** structure, not the DLQ: a retry set means "needs a moment", a dead-letter list
+means "needs a human", and conflating them removes the distinction that makes either useful.
+
+### 017 — Node Decommissioning
 
 A node that is never coming back can say so, and an operator can say it on the node's
 behalf. Closes C1.5's unbounded growth.
