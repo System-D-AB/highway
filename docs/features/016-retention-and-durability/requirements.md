@@ -1,5 +1,10 @@
 # Feature: Retention, Storage and Durability
 
+> **Depends on feature 018 (pub/sub unification), which runs first.** Requirement 3's
+> "pub/sub group queues are bounded" stops being a separate job when a group's queue *becomes*
+> a queue: one bound covers both verbs. Read R3.1 and the C4.4 references below as already
+> accounting for that — they are written against a two-engine Highway that 018 removes.
+
 ## Introduction
 
 `docs/product/constraints.md` reports **five unmet constraints, and all five are here.**
