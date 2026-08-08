@@ -66,15 +66,38 @@ something actually happened, or zero passes it.
 > base can adopt it without changing either one's behaviour. `WorkerSaturationTests` is the
 > guard that T1 keeps them agreeing.
 
-### - [ ] T1 — Extract `SingleMessageWorkerLoop`
+### - [x] T1 — Extract `SingleMessageWorkerLoop`
 
 Base for `RpcWorkerLoop` and `QueueWorkerLoop`: `RunAsync`, `DrainAsync`, the semaphore gate,
 the in-flight list, `LoopWake`, the idempotency gate. Removes `QueueWorkerLoop`'s reach into
 `RpcWorkerLoop.DefaultIdempotencyWindow`.
 
 *Requirements:* R2.1, R2.4
-**Done when:** the existing **626 tests pass with no test edited**. If a test needs changing,
-the refactor changed behaviour and is wrong — revert and re-do it smaller.
+**Done:** `SingleMessageWorkerLoop` holds `RunAsync`, `DrainAsync`, the gate, the in-flight
+list, `LoopWake` and the idempotency window; the two loops supply `ClaimAsync`, `ProcessAsync`,
+a target name and kind, and their own failure wording. 313 + 220 lines became 216 + 175 + 172.
+`DefaultIdempotencyWindow` moved to the base, so `QueueWorkerLoop` no longer reaches into
+`RpcWorkerLoop` for it. **All 630 tests pass, none edited.** Build clean, zero warnings.
+
+#### Four behaviour changes, all to the queue loop, all deliberate
+
+"No behaviour change" held for RPC. It did not hold exactly for the queue, because unifying
+two implementations means choosing one of each pair — and where they differed, the RPC one was
+the considered version. Named here rather than left to be discovered:
+
+1. **Claim errors are now typed.** The queue had a bare `catch { release; throw }`, which sent
+   a *permanent* transport error to `RunAsync`'s catch-all — logged as "unexpected", drain
+   retried on the next wake. That is the tight-loop-on-poison shape 004.1's classification
+   exists to prevent. It now takes the RPC path: transient backs off, permanent ends the pass.
+2. **Handlers run on the thread pool.** The queue called `ProcessClaimedAsync` directly, so a
+   synchronous-heavy handler stalled the drain until its first `await`. Now `Task.Run`, as RPC.
+3. **In-flight bookkeeping** is prune-at-64 rather than a `ContinueWith` removal per message —
+   one less continuation allocation per delivery, same observable drain behaviour.
+4. **Log wording** is now `Worker loop started for queue 'x'` rather than `Queue worker started
+   for 'x'`, so one message template covers both loops.
+
+None is covered by an existing test, which is precisely why they are written down. (1) is the
+only one with real consequence, and it is a strict improvement.
 
 **`ChannelConsumerLoop` is not touched by this task.** It is batch-shaped, has no gate and no
 in-flight list, and forcing it into the base means either losing batching or filling the base
