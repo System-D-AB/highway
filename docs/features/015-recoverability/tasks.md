@@ -11,42 +11,54 @@ refactor is proven correct.
 
 ## Phase 0 — Harmonise the claim/gate ordering (behavioural, precedes the refactor)
 
-> **Found while starting T1, 2026-08-08.** The two loops T1 was to unify do not agree on
-> when they claim work, and the difference is not cosmetic.
+> **Found while starting T1, 2026-08-08; disproved the same day.** The two loops do not agree
+> on when they claim work. The difference turned out to be cosmetic after all — the record of
+> how that was established is kept below, because the wrong inference is instructive.
 
-### - [ ] T0 — Make RPC wait for a slot before claiming
+### - [x] T0 — Saturation test. **The predicted defect does not exist.**
 
 ```
 RpcWorkerLoop     DequeueAsync (claim)  ->  _gate.WaitAsync  ->  spawn
 QueueWorkerLoop   _gate.WaitAsync       ->  QClaimAsync      ->  spawn
 ```
 
-`RpcWorkerLoop` claims a message and **then** waits for a concurrency slot. Under saturation
-that means messages sit **claimed** — lease running, clock ticking — while the worker is
-blocked locally. If the wait exceeds `Lease`, the message is redelivered to another node while
-this one still intends to process it: a duplicate, produced by nothing more than load.
+The ordering difference above is real. The conclusion drawn from it — that RPC over-claims
+under saturation, holding leases on messages it cannot start — **was wrong**, and the test
+written to prove it says so.
 
-`QueueWorkerLoop` (written in 014) waits first and never claims more than it can immediately
-start. **That is the correct ordering**; RPC's is a latent defect that predates this feature.
+`tests/Highway.Integration.Tests/WorkerSaturationTests.cs` parks handlers on a `SemaphoreSlim`
+so the gate is saturated deliberately rather than by timing luck, then reads the processing
+list — the claim ledger — directly. With `WorkerConcurrency = 1` and four messages queued,
+**RPC holds exactly one claim.** It does not over-claim.
 
-*Requirements:* none — this is a pre-existing defect, not a 015 requirement.
-**Done when:** `RpcWorkerLoop` acquires the gate before dequeuing, and a **saturation test**
-proves it: fill the concurrency gate with slow handlers, assert no message is claimed that
-cannot be started. Write the test first and watch it fail against the current ordering — a
-concurrency fix that has never been seen to fail is untested code.
+The first version of this test asserted `<= 1` and passed; that assertion is vacuous, because a
+mistyped key name also reads 0. Tightened to `== 1` it still passed for RPC — which is the real
+result — while the queue read 0, for a reason that has not been established. Both now assert
+the upper bound *and* that a handler actually ran, so neither can pass by measuring nothing.
 
-**This is a behaviour change and lands on its own.** It cannot be folded into T1: the whole
-value of T1 is that it changes nothing, and a refactor carrying a concurrency fix inside it is
-unreviewable.
+**Why the reasoning failed:** the ordering was read off the two files and the consequence
+inferred, without ever being observed. That is the same mistake this task's own instruction was
+written to prevent — *a concurrency fix that has never been seen to fail is untested code* —
+and it applies equally to a concurrency *defect* that has never been seen to happen.
+
+*Requirements:* none.
+**Done:** the tests exist and pass; **no production code was changed**, because there was
+nothing to fix. The tests are kept: the property (never hold more claims than slots) is worth
+pinning regardless of which loop implements it how, and T1 must not break it.
+
+**Open, and deliberately not chased here:** the queue loop reads 0 claims while a handler is
+demonstrably running. Either the message is acknowledged earlier than assumed or the key is not
+what it appears to be. It is not evidence of over-claiming — the direction this task cared
+about — so it is recorded rather than guessed at.
 
 ---
 
 ## Phase 1 — Structural (no behaviour change)
 
-> **T1 depends on T0.** Until both loops agree on claim/gate ordering, a shared base must pick
-> one — and picking either changes the other loop's behaviour, violating T1's own acceptance
-> criterion. Worse, the existing suite would very likely **not** catch it, because the
-> difference only manifests under concurrency saturation. Unify only after they agree.
+> **T1's relationship to T0 has changed.** T0 assumed the two orderings differed in behaviour
+> and that a shared base would therefore have to change one of them. They do not differ in the
+> way predicted, so T1 is free to pick either ordering — but it must keep `WorkerSaturationTests`
+> green, which is now the guard that the choice is harmless.
 
 ### - [ ] T1 — Extract `SingleMessageWorkerLoop`
 
@@ -247,13 +259,13 @@ point. Re-run and append to `samples/RUNLOG.md`.
 ## Parallelization
 
 ```
-LANE 0  T0          RPC claim/gate ordering     → blocks lane 1
+LANE 0  T0    DONE  saturation test; no fix needed
 LANE 1  T1, T2      worker loops                → blocks lane 3
 LANE 2  T3, T4, T5  server: command, framings, sweep   → independent
 LANE 3  T6-T11      client: context, capture, wiring   → needs 1 and 2
 LANE 4  T16-T18     docs and samples                   → needs 2
 
-Order:  0  →  1 ∥ 2  →  3  →  4
+Order:  1 ∥ 2  →  3  →  4     (T0 no longer blocks anything)
 Conflict: lanes 1 and 3 both touch the worker loops.
           Land lane 1 first, alone, with zero test edits.
 ```
