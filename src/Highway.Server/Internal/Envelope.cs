@@ -126,6 +126,10 @@ internal static class Envelope
     {
         RequireCurrentFormat(data, "RPC entry");
 
+        // An entry may carry a failure block (015). It is a trailer, so it must come off
+        // before "payload is the rest" is true again.
+        data = StripFailureBlock(data);
+
         if (data.Length < RpcHeader)
             throw new InvalidDataException(
                 $"RPC entry too short ({data.Length} bytes); minimum is {RpcHeader}.");
@@ -178,6 +182,10 @@ internal static class Envelope
     {
         RequireCurrentFormat(data, "RPC processing entry");
 
+        // An entry may carry a failure block (015). It is a trailer, so it must come off
+        // before "payload is the rest" is true again.
+        data = StripFailureBlock(data);
+
         if (data.Length < RpcProcHeader)
             throw new InvalidDataException(
                 $"RPC processing entry too short ({data.Length} bytes); minimum is {RpcProcHeader}.");
@@ -218,6 +226,10 @@ internal static class Envelope
         out ushort attempts)
     {
         RequireCurrentFormat(data, "Channel entry");
+
+        // An entry may carry a failure block (015). It is a trailer, so it must come off
+        // before "payload is the rest" is true again.
+        data = StripFailureBlock(data);
 
         if (data.Length < ChannelHeader)
             throw new InvalidDataException(
@@ -261,6 +273,10 @@ internal static class Envelope
     {
         RequireCurrentFormat(data, "Group processing entry");
 
+        // An entry may carry a failure block (015). It is a trailer, so it must come off
+        // before "payload is the rest" is true again.
+        data = StripFailureBlock(data);
+
         if (data.Length < GroupProcHeader)
             throw new InvalidDataException(
                 $"Group processing entry too short ({data.Length} bytes); minimum is {GroupProcHeader}.");
@@ -269,6 +285,134 @@ internal static class Envelope
         attempts     = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(9));
         messageId    = BinaryPrimitives.ReadInt64BigEndian(data.Slice(11));
         payload      = data.Slice(GroupProcHeader);
+    }
+
+    // -------------------------------------------------------------------------
+    // Failure block (015): an OPTIONAL trailer on any entry above.
+    //
+    //   <entry as framed above> [block][u32 blockLen][u32 magic]
+    //   block := [u16 typeLen][type][u16 firstTypeLen][firstType][u32 detailLen][detail]
+    //
+    // A trailer, not a header, and not a new field in any framing. Every framing
+    // above ends with "payload is the rest", so there is nowhere to put a length
+    // without moving bytes that already exist in storage. Reading it from the END
+    // keeps an entry without a block decoding byte-for-byte as it does today,
+    // which is the difference between this and 013's breaking attempt count.
+    //
+    // Collision: a payload would have to END with the 8 trailer bytes to be
+    // misread. Payloads are JSON envelopes, so their last byte is '}' (0x7D);
+    // the magic's last byte is deliberately not that. The declared length is
+    // bounds-checked too, so a coincidence has to survive both.
+    // -------------------------------------------------------------------------
+
+    /// <summary>Marks the last four bytes of an entry that carries a failure block.</summary>
+    public const uint FailureMagic = 0xFE15FA11;
+
+    private const int FailureTrailer = 4 + 4;   // [u32 blockLen][u32 magic]
+    private const int FailureBlockHeader = 2 + 2 + 4;
+
+    /// <summary>
+    /// Removes the failure trailer, if present, so the remaining span is the entry exactly
+    /// as it would have been framed without one. Called at the head of every decode.
+    /// </summary>
+    public static ReadOnlySpan<byte> StripFailureBlock(ReadOnlySpan<byte> entry)
+        => TryGetFailureBlock(entry, out _, out var withoutBlock) ? withoutBlock : entry;
+
+    /// <summary>
+    /// Reads the failure block, if this entry has one. <paramref name="withoutBlock"/> is the
+    /// entry with the block and trailer removed.
+    /// </summary>
+    public static bool TryGetFailureBlock(
+        ReadOnlySpan<byte> entry,
+        out ReadOnlySpan<byte> block,
+        out ReadOnlySpan<byte> withoutBlock)
+    {
+        block = default;
+        withoutBlock = entry;
+
+        if (entry.Length < FailureTrailer)
+            return false;
+
+        if (BinaryPrimitives.ReadUInt32BigEndian(entry.Slice(entry.Length - 4)) != FailureMagic)
+            return false;
+
+        var blockLen = BinaryPrimitives.ReadUInt32BigEndian(entry.Slice(entry.Length - 8));
+
+        // Bounds check, not an assumption: the magic may be a coincidence in payload bytes,
+        // and a length that does not fit proves it was.
+        if (blockLen > (uint)(entry.Length - FailureTrailer))
+            return false;
+
+        var start = entry.Length - FailureTrailer - (int)blockLen;
+        block = entry.Slice(start, (int)blockLen);
+        withoutBlock = entry.Slice(0, start);
+        return true;
+    }
+
+    /// <summary>
+    /// Builds a failure block. <paramref name="firstType"/> is empty when the failure has
+    /// never changed shape — the field exists to answer "did this fail the same way every
+    /// time?", so storing a copy of <paramref name="type"/> would answer nothing.
+    /// </summary>
+    public static byte[] EncodeFailureBlock(
+        ReadOnlySpan<byte> type,
+        ReadOnlySpan<byte> firstType,
+        ReadOnlySpan<byte> detail)
+    {
+        if (type.Length > ushort.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(type));
+        if (firstType.Length > ushort.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(firstType));
+
+        var buf = new byte[FailureBlockHeader + type.Length + firstType.Length + detail.Length];
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(0), (ushort)type.Length);
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(2), (ushort)firstType.Length);
+        BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(4), (uint)detail.Length);
+        type.CopyTo(buf.AsSpan(FailureBlockHeader));
+        firstType.CopyTo(buf.AsSpan(FailureBlockHeader + type.Length));
+        detail.CopyTo(buf.AsSpan(FailureBlockHeader + type.Length + firstType.Length));
+        return buf;
+    }
+
+    /// <summary>Decodes a failure block in place (zero allocation).</summary>
+    public static void DecodeFailureBlock(
+        ReadOnlySpan<byte> block,
+        out ReadOnlySpan<byte> type,
+        out ReadOnlySpan<byte> firstType,
+        out ReadOnlySpan<byte> detail)
+    {
+        if (block.Length < FailureBlockHeader)
+            throw new InvalidDataException(
+                $"Failure block too short ({block.Length} bytes); minimum is {FailureBlockHeader}.");
+
+        int typeLen   = BinaryPrimitives.ReadUInt16BigEndian(block.Slice(0));
+        int firstLen  = BinaryPrimitives.ReadUInt16BigEndian(block.Slice(2));
+        var detailLen = BinaryPrimitives.ReadUInt32BigEndian(block.Slice(4));
+
+        var total = (long)FailureBlockHeader + typeLen + firstLen + detailLen;
+        if (block.Length < total)
+            throw new InvalidDataException(
+                $"Failure block truncated: declared {total} bytes but only {block.Length} present.");
+
+        type      = block.Slice(FailureBlockHeader, typeLen);
+        firstType = block.Slice(FailureBlockHeader + typeLen, firstLen);
+        detail    = block.Slice(FailureBlockHeader + typeLen + firstLen, (int)detailLen);
+    }
+
+    /// <summary>
+    /// Returns <paramref name="entry"/> carrying <paramref name="block"/>, replacing any block
+    /// it already had. Attaching to an entry that has none is what makes the trailer additive;
+    /// replacing is what makes a second report cheap.
+    /// </summary>
+    public static byte[] WithFailureBlock(ReadOnlySpan<byte> entry, ReadOnlySpan<byte> block)
+    {
+        var bare = StripFailureBlock(entry);
+        var buf = new byte[bare.Length + block.Length + FailureTrailer];
+        bare.CopyTo(buf);
+        block.CopyTo(buf.AsSpan(bare.Length));
+        BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(bare.Length + block.Length), (uint)block.Length);
+        BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(bare.Length + block.Length + 4), FailureMagic);
+        return buf;
     }
 
     // -------------------------------------------------------------------------
