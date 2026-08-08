@@ -59,15 +59,17 @@ public sealed class SlowQueueProcessor : IProcess<SlowQueueMessage>
 /// redelivered elsewhere while this node still intends to process it — a duplicate produced
 /// by load alone, with no failure involved.</para>
 ///
-/// <para><b>These tests were written to prove a defect that does not exist.</b> The two loops
-/// order their gate and their claim differently — <c>RpcWorkerLoop</c> dequeues then waits,
-/// <c>QueueWorkerLoop</c> waits then claims — and that was read as RPC over-claiming under
-/// saturation. It does not: the RPC test observes exactly one claim with one slot. The
-/// difference in ordering is real but does not produce the predicted behaviour, and the reason
-/// has not been established.</para>
+/// <para><b>The defect, measured.</b> <c>RpcWorkerLoop</c> claimed a message and <i>then</i>
+/// waited for a slot; with one slot and four messages queued it held <b>2</b> claims. It now
+/// takes the slot first, as <c>QueueWorkerLoop</c> always did, and holds 1.</para>
 ///
-/// <para>The tests are kept because the property is worth pinning regardless of which loop
-/// implements it how, and because any future unification of the loops must not break it.</para>
+/// <para><b>Why the assertions look paranoid.</b> An earlier version asserted <c>&lt;= 1</c>
+/// and passed against the defective code — a mistyped key name reads 0 and satisfies an
+/// upper bound just as well. Worse, both handlers park on <b>static</b> semaphores (they are
+/// reached through DI) and <c>Dispose</c> releases permits on both, so without the constructor
+/// reset whichever test ran first handed the other one a handler that never parked. A handler
+/// that never parks cannot saturate a gate. Hence: exact counts, and an explicit assertion
+/// that a handler ran at all.</para>
 ///
 /// <para>Observability note: the processing list is the claim ledger. Its length is exactly
 /// "how many messages this node has taken responsibility for", so asserting on it measures the
