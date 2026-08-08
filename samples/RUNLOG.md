@@ -304,3 +304,57 @@ Verified over a second local network interface (`192.1.2.103`), not a second
 physical machine. That exercises the real socket path, `--bind 0.0.0.0`, and
 non-loopback routing, but not a physical network hop, NAT, or a firewall between
 hosts. Recorded as partial rather than claimed as complete.
+
+---
+
+## Run 4 — 2026-08-08, feature 015 (diagnosable failures)
+
+Broker with `--lease-seconds 2 --max-attempts 2`, order service, storefront driven
+over stdin. Scenario: `poison` → wait → `dlq poison.queue`.
+
+**Before 015** this printed `attempts 3` and `reason MAX_ATTEMPTS`, and nothing else.
+An operator learned that something had failed and had to go correlating worker logs
+across every node to find out what. It now prints:
+
+```
+  2 dead letter(s) on 'poison.queue':
+    deadLetteredAt     2026-08-08T11:30:19.7344660Z
+    attempts           3
+    reason             MAX_ATTEMPTS
+    requestId          afded0db226a4090ba08ed3d086e6c68
+    failureType        System.InvalidOperationException
+    message            This processor always fails: demonstrating dead letters
+    node               order-service-1
+    at                 2026-08-08T11:30:17.6887904+00:00
+    stack
+                       at ...AlwaysFailsProcessor.ProcessAsync(...) in Services.cs:line 112
+                       at ...ServiceExecutor.ExecuteProcessorAsync(...) in ServiceExecutor.cs:line 41
+```
+
+That is the whole point of the feature, demonstrated across three real processes:
+the exception crossed from the worker that threw it, through `HW.FAIL`, through a
+lease expiry and requeue, into the dead letter.
+
+### Findings
+
+**12. The off-by-one is still visible, and still deferred.** `attempts 3` under
+`--max-attempts 2`. Unchanged from finding 9; `attempts > MaxDeliveryAttempts`
+permits N+1. Registered in `constraints.md` § Deferred with the attempt-counting
+work, because that is what redefines what an attempt *is*.
+
+**13. A queued message is labelled `requestId`.** `HW.DLQ PEEK` calls it that for
+queues as well as services, because a queue reuses the RPC entry framing and the
+command branches on framing rather than on family. Cosmetic, pre-existing since 014,
+and misleading in exactly the place an operator is reading carefully. Not fixed here:
+renaming a reply field is a protocol change and does not belong bolted onto 015.
+
+**14. `ExecuteProcessorAsync` appears twice in the stack.** An async state-machine
+artefact, not a real double call. Harmless, and worth knowing before someone reads it
+as a bug.
+
+**A real failure caught before this run, not by it.** The failure block was being
+dropped at every re-claim — `HW.DEQUEUE`, `HW.QCLAIM` and `HW.RECEIVE` all rebuild an
+entry from its decoded parts, and the trailer is not one of the parts. The sweep was
+wired first and the claim was not, so the context survived the requeue and then
+vanished. The two-worker integration test caught it; this sample run would have shown
+`failure: not reported` and looked merely disappointing rather than broken.
