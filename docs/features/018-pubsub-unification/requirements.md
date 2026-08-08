@@ -1,5 +1,13 @@
 # Feature: Pub/Sub Unification — One Delivery Engine, Two Verbs
 
+> **Reviewed by engineering review, 2026-08-08; decisions persisted with explicit approval.**
+> The review disproved one of this document's own claims in code: R3.7 originally asserted
+> that dead-lettering and `[Idempotent]` "keep working" for pub/sub. Neither was true —
+> today's executor swallows every subscriber exception and acks anyway, so pub/sub has
+> **never** dead-lettered on handler failure, and `[Idempotent]` was silently ignored for
+> subscribers. Decision **1A** below makes both real, as a *named change* rather than a
+> false continuity.
+
 > **Roadmap position: before 016.** The number is creation order; the ordering that matters is
 > that this **deletes the group queues 016 was going to bound**. Running retention first means
 > building byte budgets and eviction for a structure that is about to disappear, then deleting
@@ -91,7 +99,7 @@ retract `product.md`'s MSMQ positioning, where reliable publish-subscribe is the
 4. **C2.4** — not a store for messages nobody has subscribed to. Preserved: no group, no queue, no copy
 5. **C2.5** — not a replayable log. Preserved
 6. **Competing consumers within a group.** Two instances of the same subscriber share the group's work rather than each getting a copy — the same competition the queue already provides, and the same behaviour pub/sub has today
-7. `[Idempotent]`, dead-lettering, `HW.DLQ REQUEUE` and deferred publish all keep working, because they are the queue's and the queue is what runs now
+7. `HW.DLQ REQUEUE` and deferred publish keep working, because they are the queue's and the queue is what runs now. **Dead-lettering on handler failure and `[Idempotent]` for subscribers are *new capabilities*, not preserved ones** — see R5.4. The original wording claimed continuity that the review disproved in code (`ServiceExecutor.cs:142` swallows, `ChannelConsumerLoop` acks anyway, no idempotency gate)
 
 ### Requirement 4: The Client Surface Does Not Move
 
@@ -104,7 +112,7 @@ retract `product.md`'s MSMQ positioning, where reliable publish-subscribe is the
 3. An application that compiles today compiles afterwards, with no source edit
 4. The three verbs stay three verbs. A developer must not have to learn that publish is "really" a send — that is an implementation fact, and leaking it would trade the product's simplicity for the maintainer's convenience
 
-### Requirement 5: Three Semantic Changes, Stated Rather Than Discovered
+### Requirement 5: Four Semantic Changes, Stated Rather Than Discovered
 
 **User Story:** As someone upgrading, I want the behaviour changes named, not left for me to find in production.
 
@@ -115,7 +123,18 @@ These are the parts a line count does not show. Each is a real difference.
 1. **Batch consumption is lost.** `HW.RECEIVE` returns many messages per round trip; `HW.QCLAIM` returns one. For a high-fan-out channel this is more round trips. **No speculative batching is added** — see Open Decisions 2. Whatever is decided must be measured, not assumed
 2. **Subscriber ordering must be preserved by default.** `ChannelConsumerLoop` dispatches sequentially; `QueueWorkerLoop` has a concurrency gate. Group workers therefore default to **concurrency 1**, preserving today's per-group ordering. A developer may raise it deliberately and trade ordering away — the same explicit trade `PubSubBackoffEnabled` already makes
 3. **Deferred publish resolves its groups at publish time**, not at promotion time. `PublishAsync(msg, delay)` fans out immediately into each group's queue with a deferred delivery time. A group registering *during* the delay does not receive it. This matches C2.1's wording ("registered at publish time") and C2.4, and it is simpler than a channel-level delayed set that must re-resolve groups on promotion
-4. Every one of these appears in `docs/HIGHWAY-PROTOCOL.md`'s changelog and in `constraints.md`, not only in this file
+4. **Subscriber failure adopts queue semantics** *(review decision 1A)*. Today a throwing
+   `ISubscribe<T>` handler is swallowed and the message acked — invisible, never dead-lettered.
+   After: the throw propagates, the message is **not** acknowledged, it is redelivered and
+   eventually dead-letters **with 015's failure context**. Corollaries, all deliberate:
+   - A node with several handlers for one channel attempts **all** of them, then fails the
+     delivery if any threw — so a redelivery **re-runs siblings that already succeeded**.
+     At-least-once already demands idempotent handlers; this makes that demand visible
+   - `[Idempotent]` becomes functional for subscribers — it was silently ignored before
+   - A poison event now surfaces in the DLQ instead of vanishing acked. The alternative
+     (ack-anyway) was rejected because it plants an `if (subscription)` branch in the one
+     engine's failure path — the per-family branching this feature exists to delete
+5. Every one of these appears in `docs/HIGHWAY-PROTOCOL.md`'s changelog and in `constraints.md`, not only in this file
 
 ### Requirement 6: A Breaking Change, Handled Honestly
 
