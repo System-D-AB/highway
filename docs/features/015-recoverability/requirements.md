@@ -151,7 +151,8 @@ After immediate retries, move the message out of the live queue into feature 013
 sorted set with a growing delay. **The message leaves the live queue rather than being pushed
 back onto it**, so it cannot block work behind it that would succeed — head-of-line blocking
 is the strongest practical argument for this tier. Ordering is traded, which is the same trade
-`PubSubBackoffEnabled` already makes explicit (`constraints.md` C3.4).
+`PubSubBackoffEnabled` already makes explicit (`constraints.md` § C5, "Ordering under
+backoff" — it is a declined promise, not a numbered constraint).
 
 ### Exception classification
 
@@ -208,5 +209,5 @@ somewhere less convenient, after an extra round trip through storage.
 - `docs/features/013-reliable-delivery/design.md` — the dead-letter framing this extends
 - `docs/features/014-queue/design.md` — `IProcess<T>` and the loops this refactors; T2 is the precedent for refactoring first
 - `docs/features/002-observability/design.md` — capture modes, and the "must never break the system it observes" rule
-- `docs/product/constraints.md` — C1.4, C3.4, and § Open Decisions where the deferred items are registered
+- `docs/product/constraints.md` — C1.4 (diagnosis), C7 (diagnostics never break delivery), § C5 for the ordering trade-off, and § Deferred where the retry tiers are registered
 - `samples/RUNLOG.md` finding 9 — the off-by-one, deferred with the attempt-counting work
