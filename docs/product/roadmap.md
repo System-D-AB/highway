@@ -239,6 +239,32 @@ cannot block what is behind it — is right and is kept, as the delayed tier. It
 **retry** structure, not the DLQ: a retry set means "needs a moment", a dead-letter list
 means "needs a human", and conflating them removes the distinction that makes either useful.
 
+### 018 — Pub/Sub Unification  ← **next**
+
+**Specced** — `docs/features/018-pubsub-unification/`. Highway has three verbs and **two**
+delivery engines. The queue (014) and pub/sub (004) each implement claim, lease, redelivery,
+attempt counting, dead-lettering and deferred delivery independently — 1,234 lines against 470,
+with `HW.RECEIVE` alone (481) larger than the entire queue.
+
+A durable subscription stops *resembling* a queue and becomes one: `PublishAsync` fans out into
+one queue per registered group, and subscribers use the same commands and the same worker loop
+as `[Queue]`. Roughly **944 lines deleted**; commands 18 → 16; entry framings **4 → 2**.
+
+**Pub/Sub keeps every guarantee.** Removing durability was considered and rejected — without it
+an event is lost whenever a subscriber is mid-deploy, and the only remedy makes the publisher
+know its subscribers, which destroys the decoupling pub/sub exists for.
+
+**Why this is the tax being paid.** 013 found one bug in three requeue paths. 014 T2 had to
+extract the shared lease sweep to stop a fourth copy. 015 dropped the failure block at three
+re-encode sites, one of them `HW.RECEIVE`. Four consecutive features, including 016 below.
+
+**Runs before 016**, because it deletes the group queues 016 was going to bound. Retention
+first would mean building byte budgets and eviction for a structure about to disappear.
+
+Major protocol break (4.0): two commands and two framings removed, and existing channel data
+becomes unreachable — the broker refuses to start against it rather than serving an empty
+channel.
+
 ### 017 — Node Decommissioning
 
 A node that is never coming back can say so, and an operator can say it on the node's
@@ -250,6 +276,10 @@ behalf. Closes C1.5's unbounded growth.
 - Returns what it destroyed, so an irreversible operation appears in a log
 
 ### 016 — Retention, Storage and Durability
+
+> **Runs after 018.** Several of the structures below stop existing when pub/sub unifies onto
+> the queue — in particular C4.4's unbounded group queues. Building byte budgets for them first
+> would be work thrown away.
 
 **Specced** — `docs/features/016-retention-and-durability/requirements.md`. Closes all five
 remaining unmet constraints (C4.1–C4.6). One coherent piece of work rather than five
