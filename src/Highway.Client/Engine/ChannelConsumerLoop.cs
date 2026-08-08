@@ -45,7 +45,7 @@ internal sealed class ChannelConsumerLoop
         _batchSize = batchSize;
         _wake = wake;
         _logger = logger;
-        _reporter = new FailureReporter(logger);
+        _reporter = new FailureReporter(connection, logger);
     }
 
     public string ChannelName => _descriptor.Name;

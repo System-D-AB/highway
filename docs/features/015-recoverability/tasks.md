@@ -237,44 +237,59 @@ passed.
 
 ## Phase 3 — Capture, bounds and surfacing
 
-### - [ ] T6 — Build the context, truncated client-side
+### - [x] T6 — Build the context, truncated client-side
 
 *Requirements:* R3.6
-**Done when:** an oversized stack is capped **before the wire**, so bytes that will be
-discarded are never transmitted.
+**Done:** `FailureReporter.BuildDetail` writes `{message, node, at, stack?, inner?}`. Message
+capped at 2,000 chars, stack at 8,000, each marked `… [truncated]` so a cut field never reads
+as a complete one. Truncation keeps the **front** — the top frames say where it threw.
 
-### - [ ] T7 — Capture modes
+`inner` carries the inner exception's **type only**. "TimeoutException wrapping an
+IOException" is the sentence an operator needs; the full chain is the application's own
+logging's job, and serialising it would put unbounded nesting on the failure path.
+
+### - [x] T7 — Capture modes
 
 *Requirements:* R3.5
-**Done when:** `HeadersOnly` keeps type and timing and drops message and stack. An exception
-message routinely contains application data, so feature 002's switch governs it — not a second
-one.
+**Done — server-side, which is where the switch already lives.** `PayloadCapture` is a
+*per-name server* setting; the client has no view of it, so a client-side implementation would
+have needed a second copy of the configuration. `HW.FAIL` calls `FlightRecorder.CaptureFor`
+and drops the detail unless the mode is `Full`.
 
-### - [ ] T8 — Merge, and `firstType`
+The **type always survives**, under every mode. It is metadata rather than application data,
+and it is the single field that makes a dead letter diagnosable at all — withholding it would
+defeat the feature to protect something the type does not contain.
+
+### - [x] T8 — Merge, and `firstType` *(landed inside T3)*
 
 *Requirements:* R3.3, R4.5
-**Done when:** a second report replaces the last failure and preserves `firstType` when the
-first differed.
+**Done:** `HwFailCommand.BuildBlock` — `firstType` is set once, never overwritten, and only
+when the type actually changed. Covered end to end by T13.
 
-### - [ ] T9 — `HW.DLQ PEEK` and the recorder
+### - [x] T9 — `HW.DLQ PEEK` and the recorder *(PEEK landed with T5, recorder with T3)*
 
 *Requirements:* R3.4, R3.7, R4.7
-**Done when:** the fields are surfaced; a dead letter with no context says so **explicitly**
-rather than showing blanks; and `HW.FAIL` records a `DeliveryFailed` event so "failed five
-times then recovered" is visible.
+**Done:** `failureType`, `failureFirstType` (only when it changed) and `failureDetail`;
+an explicit `failure: not reported…` when there is no block; `DeliveryFailed = 17` recorded by
+`HW.FAIL` with the exception type as `ErrorCode`. **Dashboard display is not done** — see
+below.
 
-### - [ ] T10 — Best-effort reporting
+### - [x] T10 — Best-effort reporting
 
 *Requirements:* R5 (all)
-**Done when:** a failing `HW.FAIL` is swallowed and logged **with the original exception
-attached**, the loop survives, and the message is still recovered by the sweep. Diagnostic
-writes must never outrank delivery — the same rule feature 002 states for the recorder.
+**Done:** the reporting exception is swallowed and logged at warning inside an
+`AggregateException` with the original attached — losing the diagnosis is survivable, losing
+the thing being diagnosed is not. The message is never acknowledged either way, so the sweep
+recovers it exactly as before. Covered by `AFailingReport_IsSwallowedAndDoesNotMaskTheOriginal`
+(T14), which is the whole content of R5 and would otherwise be unverified prose.
 
-### - [ ] T11 — Cancellation is not failure
+### - [x] T11 — Cancellation is not failure
 
 *Requirements:* R1.3
-**Done when:** shutdown mid-handler does not report a failure or consume an attempt. The loops
-already separate the stop token from the work token; the distinction is simply unused.
+**Done structurally:** `SingleMessageWorkerLoop.ProcessAndReleaseAsync` catches
+`OperationCanceledException` **before** the reporter, so a shutdown mid-handler cannot reach
+`HW.FAIL`. Same in `ChannelConsumerLoop`. Reports themselves pass `CancellationToken.None`, so
+a *genuine* failure during shutdown is still recorded — the distinction runs both ways.
 
 ---
 
