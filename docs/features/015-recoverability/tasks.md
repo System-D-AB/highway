@@ -11,54 +11,60 @@ refactor is proven correct.
 
 ## Phase 0 — Harmonise the claim/gate ordering (behavioural, precedes the refactor)
 
-> **Found while starting T1, 2026-08-08; disproved the same day.** The two loops do not agree
-> on when they claim work. The difference turned out to be cosmetic after all — the record of
-> how that was established is kept below, because the wrong inference is instructive.
+> **Found while starting T1, 2026-08-08.** The two loops T1 was to unify did not agree on when
+> they claim work, and the difference was not cosmetic.
 
-### - [x] T0 — Saturation test. **The predicted defect does not exist.**
+### - [x] T0 — Make RPC wait for a slot before claiming
 
 ```
-RpcWorkerLoop     DequeueAsync (claim)  ->  _gate.WaitAsync  ->  spawn
-QueueWorkerLoop   _gate.WaitAsync       ->  QClaimAsync      ->  spawn
+before   RpcWorkerLoop     DequeueAsync (claim)  ->  _gate.WaitAsync  ->  spawn
+after    RpcWorkerLoop     _gate.WaitAsync       ->  DequeueAsync     ->  spawn
+         QueueWorkerLoop   _gate.WaitAsync       ->  QClaimAsync      ->  spawn   (unchanged)
 ```
 
-The ordering difference above is real. The conclusion drawn from it — that RPC over-claims
-under saturation, holding leases on messages it cannot start — **was wrong**, and the test
-written to prove it says so.
+`HW.DEQUEUE` starts the lease. A message claimed while the gate is full therefore has its
+clock running on a node that cannot begin it, and if the wait outlives `Lease` the server
+redelivers it elsewhere while this node still intends to process it — a duplicate produced by
+load alone, with no failure involved.
 
-`tests/Highway.Integration.Tests/WorkerSaturationTests.cs` parks handlers on a `SemaphoreSlim`
-so the gate is saturated deliberately rather than by timing luck, then reads the processing
-list — the claim ledger — directly. With `WorkerConcurrency = 1` and four messages queued,
-**RPC holds exactly one claim.** It does not over-claim.
+**Measured, not inferred.** `WorkerSaturationTests` parks handlers on a `SemaphoreSlim` so the
+gate is saturated deliberately, then reads the processing list — the claim ledger — directly.
+With `WorkerConcurrency = 1` and four messages queued, RPC held **2** claims before the fix and
+**1** after. The queue loop held 1 throughout.
 
-The first version of this test asserted `<= 1` and passed; that assertion is vacuous, because a
-mistyped key name also reads 0. Tightened to `== 1` it still passed for RPC — which is the real
-result — while the queue read 0, for a reason that has not been established. Both now assert
-the upper bound *and* that a handler actually ran, so neither can pass by measuring nothing.
+*Requirements:* none — a pre-existing defect, not a 015 requirement.
+**Done:** the gate precedes the claim; every early return and every exception path releases the
+slot, or the loop starves itself. The test was seen failing at 2 first.
 
-**Why the reasoning failed:** the ordering was read off the two files and the consequence
-inferred, without ever being observed. That is the same mistake this task's own instruction was
-written to prevent — *a concurrency fix that has never been seen to fail is untested code* —
-and it applies equally to a concurrency *defect* that has never been seen to happen.
+#### The test lied twice before it was isolated
 
-*Requirements:* none.
-**Done:** the tests exist and pass; **no production code was changed**, because there was
-nothing to fix. The tests are kept: the property (never hold more claims than slots) is worth
-pinning regardless of which loop implements it how, and T1 must not break it.
+Worth recording, because it nearly buried a real defect.
 
-**Open, and deliberately not chased here:** the queue loop reads 0 claims while a handler is
-demonstrably running. Either the message is acknowledged earlier than assumed or the key is not
-what it appears to be. It is not evidence of over-claiming — the direction this task cared
-about — so it is recorded rather than guessed at.
+Both handlers park on **static** semaphores — they are reached through DI, so per-test
+instances are not available — and `Dispose` releases 64 permits on both so a parked handler
+cannot wedge shutdown. Whichever test ran first therefore handed the other one a handler that
+**never parked**, and a handler that never parks cannot saturate a gate.
+
+That produced two false readings in sequence:
+
+| assertion | reading | what it meant |
+|---|---|---|
+| `<= 1` | both pass | vacuous — a mistyped key also reads 0 |
+| `== 1` | RPC 1, queue 0 | contaminated — read as "the defect does not exist" |
+| `== 1`, permits drained | RPC **2**, queue 1 | the defect, measured |
+
+The middle row was written up as a disproof and committed as one. It was wrong. The lesson is
+narrower than "be careful": **shared mutable test state must be reset in the constructor, not
+only cleaned up in `Dispose`**, and an upper-bound assertion needs a companion assertion that
+something actually happened, or zero passes it.
 
 ---
 
 ## Phase 1 — Structural (no behaviour change)
 
-> **T1's relationship to T0 has changed.** T0 assumed the two orderings differed in behaviour
-> and that a shared base would therefore have to change one of them. They do not differ in the
-> way predicted, so T1 is free to pick either ordering — but it must keep `WorkerSaturationTests`
-> green, which is now the guard that the choice is harmless.
+> **T1 depends on T0, which is done.** The loops now agree on claim/gate ordering, so a shared
+> base can adopt it without changing either one's behaviour. `WorkerSaturationTests` is the
+> guard that T1 keeps them agreeing.
 
 ### - [ ] T1 — Extract `SingleMessageWorkerLoop`
 
@@ -259,13 +265,13 @@ point. Re-run and append to `samples/RUNLOG.md`.
 ## Parallelization
 
 ```
-LANE 0  T0    DONE  saturation test; no fix needed
+LANE 0  T0    DONE  RPC claim/gate ordering
 LANE 1  T1, T2      worker loops                → blocks lane 3
 LANE 2  T3, T4, T5  server: command, framings, sweep   → independent
 LANE 3  T6-T11      client: context, capture, wiring   → needs 1 and 2
 LANE 4  T16-T18     docs and samples                   → needs 2
 
-Order:  1 ∥ 2  →  3  →  4     (T0 no longer blocks anything)
+Order:  0  →  1 ∥ 2  →  3  →  4
 Conflict: lanes 1 and 3 both touch the worker loops.
           Land lane 1 first, alone, with zero test edits.
 ```
