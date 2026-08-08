@@ -101,7 +101,7 @@ Nodes register their catalog once and then prove liveness cheaply. The server ma
 - `HW.HEARTBEAT <nodeId>` — liveness only; replies `+REGISTER` when the server holds no record, making a wiped registry self-healing
 - `HW.HEARTBEAT <nodeId> BYE` — graceful departure, runs the full teardown immediately
 - `HW.DISCOVER <service>` — live nodes hosting a service, with the age of each one's last beat
-- `HW.STATS [service|channel]` — queue depth, hosts, in-flight, subscriber groups, backlog
+- `HW.STATS [service|channel]` — queue depth, hosts, in-flight, subscriber groups
 - Stale-node pruning: unacknowledged RPC work requeued, worker sets and registry cleaned — **subscriber groups deliberately untouched**
 - Optional fast-fail (off by default) with a short-TTL discovery cache
 
@@ -240,7 +240,6 @@ the shape of the feature, so the design is not written until they are settled.
 - **Backpressure instead of silent loss** — refuse the publish rather than drop the oldest
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
-- Chunked backlog copy — a prerequisite, not a nicety: the current copy materialises the entire backlog under an exclusive lock
 
 
 The next theme is **not** breadth. It is making the delivery Highway already
