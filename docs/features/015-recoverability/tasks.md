@@ -9,7 +9,44 @@ refactor is proven correct.
 
 ---
 
+## Phase 0 — Harmonise the claim/gate ordering (behavioural, precedes the refactor)
+
+> **Found while starting T1, 2026-08-08.** The two loops T1 was to unify do not agree on
+> when they claim work, and the difference is not cosmetic.
+
+### - [ ] T0 — Make RPC wait for a slot before claiming
+
+```
+RpcWorkerLoop     DequeueAsync (claim)  ->  _gate.WaitAsync  ->  spawn
+QueueWorkerLoop   _gate.WaitAsync       ->  QClaimAsync      ->  spawn
+```
+
+`RpcWorkerLoop` claims a message and **then** waits for a concurrency slot. Under saturation
+that means messages sit **claimed** — lease running, clock ticking — while the worker is
+blocked locally. If the wait exceeds `Lease`, the message is redelivered to another node while
+this one still intends to process it: a duplicate, produced by nothing more than load.
+
+`QueueWorkerLoop` (written in 014) waits first and never claims more than it can immediately
+start. **That is the correct ordering**; RPC's is a latent defect that predates this feature.
+
+*Requirements:* none — this is a pre-existing defect, not a 015 requirement.
+**Done when:** `RpcWorkerLoop` acquires the gate before dequeuing, and a **saturation test**
+proves it: fill the concurrency gate with slow handlers, assert no message is claimed that
+cannot be started. Write the test first and watch it fail against the current ordering — a
+concurrency fix that has never been seen to fail is untested code.
+
+**This is a behaviour change and lands on its own.** It cannot be folded into T1: the whole
+value of T1 is that it changes nothing, and a refactor carrying a concurrency fix inside it is
+unreviewable.
+
+---
+
 ## Phase 1 — Structural (no behaviour change)
+
+> **T1 depends on T0.** Until both loops agree on claim/gate ordering, a shared base must pick
+> one — and picking either changes the other loop's behaviour, violating T1's own acceptance
+> criterion. Worse, the existing suite would very likely **not** catch it, because the
+> difference only manifests under concurrency saturation. Unify only after they agree.
 
 ### - [ ] T1 — Extract `SingleMessageWorkerLoop`
 
@@ -210,12 +247,13 @@ point. Re-run and append to `samples/RUNLOG.md`.
 ## Parallelization
 
 ```
+LANE 0  T0          RPC claim/gate ordering     → blocks lane 1
 LANE 1  T1, T2      worker loops                → blocks lane 3
 LANE 2  T3, T4, T5  server: command, framings, sweep   → independent
 LANE 3  T6-T11      client: context, capture, wiring   → needs 1 and 2
 LANE 4  T16-T18     docs and samples                   → needs 2
 
-Order:  1 ∥ 2  →  3  →  4
+Order:  0  →  1 ∥ 2  →  3  →  4
 Conflict: lanes 1 and 3 both touch the worker loops.
           Land lane 1 first, alone, with zero test edits.
 ```
