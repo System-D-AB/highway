@@ -125,6 +125,14 @@ internal sealed class RpcWorkerLoop
     {
         while (!stopToken.IsCancellationRequested)
         {
+            // Take the concurrency slot BEFORE claiming. HW.DEQUEUE starts the lease, so a
+            // message claimed while the gate is full is a message whose clock is running on
+            // a node that cannot begin it - and if the wait outlives the lease, the server
+            // redelivers it elsewhere while this node still intends to process it. That is a
+            // duplicate produced by load alone, with no failure involved. QueueWorkerLoop
+            // has always ordered it this way.
+            await _gate.WaitAsync(stopToken).ConfigureAwait(false);
+
             (string RequestId, byte[] Payload)? item;
             try
             {
@@ -134,6 +142,7 @@ internal sealed class RpcWorkerLoop
             {
                 // Bounded retries already exhausted in the connection. Back off, then
                 // let the next wake retry. This is the retryable class only.
+                _gate.Release();
                 _logger.LogWarning(ex, "Transient abort dequeuing '{Service}'; will retry on next wake", _descriptor.Name);
                 await Task.Delay(100, stopToken).ConfigureAwait(false);
                 return;
@@ -141,18 +150,27 @@ internal sealed class RpcWorkerLoop
             catch (HighwayTransportException ex)
             {
                 // Permanent failure: log and drop this drain pass. Never retry in a tight loop.
+                _gate.Release();
                 _logger.LogError(ex, "Permanent error dequeuing '{Service}'; ending drain pass", _descriptor.Name);
                 return;
             }
+            catch
+            {
+                // Any other failure must not leak the slot, or the loop starves itself.
+                _gate.Release();
+                throw;
+            }
 
             if (item is null)
+            {
+                _gate.Release();
                 return; // queue drained to nil
+            }
 
             var (requestId, payload) = item.Value;
 
-            // Bound in-flight processing; process on the thread pool so a
-            // synchronous-heavy handler cannot stall the drain.
-            await _gate.WaitAsync(stopToken).ConfigureAwait(false);
+            // Process on the thread pool so a synchronous-heavy handler cannot stall the
+            // drain. The slot is already held and is released by ProcessAndReleaseAsync.
             var task = Task.Run(() => ProcessAndReleaseAsync(requestId, payload, workToken), CancellationToken.None);
             lock (_inflight)
             {

@@ -82,6 +82,14 @@ public class WorkerSaturationTests : IDisposable
     {
         SlowService.Entered = 0;
         SlowQueueProcessor.Entered = 0;
+
+        // Drain leftover permits. Dispose releases 64 on BOTH semaphores so a parked
+        // handler cannot wedge shutdown, and the handlers are reached through DI so the
+        // gates must be static. Without this reset, whichever test runs first hands the
+        // other one a handler that never parks - and a test that cannot saturate the gate
+        // is not measuring saturation.
+        while (SlowService.Release.Wait(0)) { }
+        while (SlowQueueProcessor.Release.Wait(0)) { }
     }
 
     public void Dispose()
@@ -131,9 +139,9 @@ public class WorkerSaturationTests : IDisposable
         // vacuous: something was claimed and processed. The property under test is the upper
         // bound.
         Volatile.Read(ref SlowService.Entered).Should().BeGreaterThan(0);
-        claimed.Should().BeLessThanOrEqualTo(1,
-            "one concurrency slot means at most one claim - more is a message whose lease is " +
-            "running while the node cannot start it");
+        claimed.Should().Be(1,
+            "one concurrency slot means exactly one claim - more is a message whose lease is " +
+            "running while the node cannot start it, and zero means nothing was saturated");
     }
 
     [Fact]
@@ -157,7 +165,7 @@ public class WorkerSaturationTests : IDisposable
         var claimed = (long)(await db.ExecuteAsync("LLEN", "hw:q:sat.queue:proc:sat-q-host"));
 
         Volatile.Read(ref SlowQueueProcessor.Entered).Should().BeGreaterThan(0);
-        claimed.Should().BeLessThanOrEqualTo(1,
+        claimed.Should().Be(1,
             "the queue loop waits for a slot before claiming - this guards against a future " +
             "refactor harmonising the two loops the wrong way");
     }
