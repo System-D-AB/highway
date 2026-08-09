@@ -33,6 +33,32 @@ public sealed class HighwayServerOptions
     public string? DataDir { get; set; }
 
     /// <summary>
+    /// Run in memory only: no data directory, no AOF, nothing survives the process.
+    ///
+    /// <para>Set by <c>HighwayServerBuilder.Ephemeral()</c>. Since feature 016 a broker is
+    /// <b>durable by default</b>, so memory-only is something a caller now asks for by name
+    /// rather than something they get by saying nothing.</para>
+    /// </summary>
+    public bool Ephemeral { get; set; }
+
+    /// <summary>The port used when none is configured. The default data directory is suffixed when the port differs.</summary>
+    public const int DefaultPort = 6500;
+
+    /// <summary>
+    /// Size at which Garnet checkpoints and truncates the append-only log, in bytes.
+    /// Default: 512 MB. Zero disables it, and the log then grows until the disk does not.
+    ///
+    /// <para><b>Why this exists (016 R6).</b> Highway has always set a checkpoint directory and
+    /// never turned checkpoint-on-AOF-size on, so a broker that ran for a year replayed a
+    /// year of log to start. Restart time should be bounded by the checkpoint interval, not by
+    /// total history.</para>
+    ///
+    /// <para>This is a limit on the <i>broker's</i> storage, not on producers: reaching it
+    /// checkpoints and truncates rather than refusing anything.</para>
+    /// </summary>
+    public long AofSizeLimitBytes { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>
     /// Lease duration for RPC processing entries. After this period, a pending
     /// entry is considered abandoned and returned to the queue by the next
     /// <c>HW.DEQUEUE</c> call. <see cref="TimeSpan.Zero"/> disables lazy requeue.

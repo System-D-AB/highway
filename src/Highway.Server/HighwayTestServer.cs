@@ -71,8 +71,9 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
 
         _opts = new HighwayServerOptions
         {
-            Port    = Port,
-            DataDir = null,   // memory-only unless the delegate sets a data dir
+            Port      = Port,
+            DataDir   = null,
+            Ephemeral = true,   // 016: durable is the default now, so a test says otherwise
         };
 
         // Authenticated by default (feature 012). This is what makes the loopback

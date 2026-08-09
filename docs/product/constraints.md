@@ -224,21 +224,43 @@ an orphan is **feature 017 (node decommissioning)**.
 
 ### C4.5 — Durability is the default, not an option
 
-**Status: Not met.** Feature 016 (specced) — **the most urgent of the five**, because every C1 and C2 guarantee is false without it.
+**Status: Met** — feature 016.
 
-`new HighwayServerBuilder().Build()` is memory-only: no data directory, no AOF, everything
-lost on restart. Every guarantee in C1 and C2 is false in that configuration.
+`new HighwayServerBuilder().Build()` creates a data directory beside the executable, enables
+AOF and storage tiering, and recovers on start. A queued message, a published message with a
+registered offline group, and an unclaimed RPC request all survive a restart — proven by a test
+that was **watched failing** against memory-only first, because a durability test that has never
+failed proves the harness restarted, not that the data survived.
+
+Memory-only is now asked for by name: `Ephemeral()`. A location that cannot be written **throws
+at `Build()`**, naming the path and both ways out, rather than degrading silently — silent
+degradation would be worse after this feature than before it, because the guarantee is now
+documented as true.
 
 ### C4.6 — Storage growth is bounded over time, not just in the moment
 
-**Status: Not met.** Feature 016 (specced) — independent of every other decision there, and worth doing even if the rest is descoped.
+**Status: Not met.** Feature 016 attempted it and **measured that it does not work**.
 
-Highway enables AOF and sets a checkpoint directory but sets no `AofSizeLimit` and leaves
-`CompactionFrequencySecs` at `0`. The log grows without limit and restart recovery replays all
-of it. At the retention target in C4.1 this becomes the binding operational constraint, and it
-is independent of every other decision here.
+`AofSizeLimitBytes` (512 MB default) is wired to Garnet's `AofSizeLimit` and its background
+enforcement task does run — checkpoints appear where none did before. The append-only log is
+nevertheless **never truncated on disk**:
 
----
+| identical traffic | AOF on disk |
+|---|---|
+| 2,000 messages | 8.9 MB |
+| 4,000 messages | 17.8 MB |
+
+Linear in total history, which is exactly what this constraint exists to prevent. A broker that
+has run for a year still holds a year of log.
+
+The test is kept and **skipped**, carrying the measurement, so the gap stays visible.
+`docs/features/016-retention-and-durability/tasks.md` T6 records what was learned — including
+that two earlier versions of that test were vacuous, one measuring the wrong directory
+entirely. Next step is investigation (Garnet compaction settings), not another attempt at the
+same setting.
+
+Recovery *time* may still be bounded by checkpointing even while disk use is not. That is
+**unmeasured and not claimed**.
 
 ## C5 — What Highway does not guarantee
 
@@ -351,8 +373,8 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C4.2 | Size cap 1 GB | ❌ Not met — 016 |
 | C4.3 | Limits are never silent | ❌ Not met — 016 |
 | C4.4 | Every queue-like structure bounded | ❌ Not met — 016 |
-| C4.5 | Durable by default | ❌ Not met — 016 |
-| C4.6 | Bounded over time | ❌ Not met — 016 |
+| C4.5 | Durable by default | ✅ **Met** (016) |
+| C4.6 | Bounded over time | ❌ Not met — measured broken (016) |
 | C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
 | C7.2 | Diagnostic detail obeys the payload capture switch | ✅ Met (015) |
 | C6.1 | Cannot reach the network unauthenticated by accident | ✅ Met |
@@ -361,7 +383,8 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C6.4 | TLS available, never required | ✅ Met |
 | C6.5 | The tested path is the secured path | ✅ Met |
 
-**All six unmet constraints are in C4** — retention, storage and durability — which is one
+**Five unmet constraints remain, all in C4.** C4.5 — the one that made the others conditional —
+is met: a zero-configuration broker is now durable. **All six unmet constraints are in C4** — retention, storage and durability — which is one
 coherent feature rather than six problems. Feature 014 delivered C1; feature 015 completed
 C1.4; feature 018 unified the two delivery engines.
 
