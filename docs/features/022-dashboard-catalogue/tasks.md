@@ -76,7 +76,7 @@ recorder-only, with a banner naming the setting and the consequence.
 > `ViewScheduler` drives polling for the active view only, at `DashboardOptions.PollIntervalMs`
 > (default 3000) (R-7A). A keyed error region replaces the dual-purpose `#broker-info` (R-4A).
 
-### - [ ] T4 — Nodes
+### - [x] T4 — Nodes
 
 *Requirements:* R2.1, R2.2, R2.3, R2.5
 **Done when:** every registered node shows name, liveness **as an interpretation** ("live",
@@ -89,7 +89,7 @@ invisible today.
 The retirement countdown is the highest-value item here for the same reason it was in 020: 017
 made retirement automatic, and it destroys a subscriber's entire backlog.
 
-### - [ ] T5 — Catalogue
+### - [x] T5 — Catalogue
 
 *Requirements:* R3.1, R3.2, R3.3, R3.4
 **Done when:** services, queues and channels each list their hosts; navigation works **both
@@ -103,7 +103,7 @@ unreadable, and it is a rendering decision rather than a data one.
 are real failures that look identical to healthy ones — depth alone cannot tell "busy" from
 "abandoned".
 
-### - [ ] T6 — Entity pages, absorbing 020's views
+### - [x] T6 — Entity pages, absorbing 020's views
 
 *Requirements:* R4.1, R4.2, R4.3, R4.4, Open Decision 4
 **Done when:** selecting a service, queue or channel shows its state, its dead letters and its
@@ -115,7 +115,7 @@ kinds of thing.
 > here. 020's Phase 0 stands unchanged — it is the read path this uses — and that feature's spec
 > was written before the screenshot made this problem visible.
 
-### - [ ] T7 — Internal names stop leaking
+### - [x] T7 — Internal names stop leaking
 
 *Requirements:* R5.1, R5.2, R5.3
 **Done when:** `hw.replies` and node ids are not presented as user entities, internal names are
@@ -132,7 +132,7 @@ node id. Once nodes are first-class (T4) they must not also appear as anonymous 
 
 ## Phase 3 — Stop the page lying
 
-### - [ ] T8 — The banner tells the truth
+### - [x] T8 — The banner tells the truth
 
 *Requirements:* R6.1, R6.2, R6.3, Review R-4A
 **Done when:** "Connection error: Failed to fetch" cannot appear above a page that loaded, a
@@ -195,3 +195,40 @@ see.
 
 **And nothing here writes.** Read-only, as 020 established. An operator destroying a dead-letter
 list from a browser tab is a different threat model and needs its own feature.
+
+
+---
+
+## What execution found
+
+**A gap in feature 014, not in the dashboard.** Running the new catalogue against the samples
+showed `invoices.generate` as `Unknown` / `NeverDeclared` while the order service was actively
+processing it. The cause: **`ImmutableCatalog.ToCatalogInfo()` never populated `Queues`.**
+
+014 added the `queues` property to `CatalogInfo` — with a comment about backward compatibility —
+and never filled it in. So since 014 the node registry has been blind to queues: `HW.DISCOVER`
+could not answer "who processes this queue?", and nothing noticed because nothing read the
+catalog back until this feature did.
+
+Before: `invoices.generate  Unknown  NeverDeclared`
+After: `invoices.generate  Queue  Live  order-service-1`
+
+**This is the strongest argument for the feature.** A view that shows what is *supposed* to be
+true is how you discover that it is not.
+
+**The catalogue needed a third source**, recorded under T2: declared (registry) + observed
+(recorder) + **structures** (live queue keys). A group queue exists the moment a publish fans
+out, but nothing declares it and the recorder does not see it until a subscriber claims — so
+without the structures a channel's groups were invisible precisely while piling up unconsumed.
+
+**A departed node reads honestly.** After the storefront quits, `shop-1` and `orders.placed`
+show `NeverDeclared`: the `BYE` removed the registration, so nothing declares them any more.
+That is correct, and it is the first time the dashboard could express it.
+
+## Not done
+
+**T9/T10 conformance is partial.** The samples were exercised and the API verified against the
+real deployment, but there is no `RUNLOG.md` entry for this run and the front-end has no
+automated coverage — the modules are verified by having been driven against a live broker, not
+by tests. A headless-browser harness is a tooling decision this project has never had to make,
+and it should be made deliberately rather than in the tail of a feature.

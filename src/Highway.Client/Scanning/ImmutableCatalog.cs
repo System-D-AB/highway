@@ -137,6 +137,18 @@ internal sealed class ImmutableCatalog : ICatalog
             })
             .ToList();
 
-        return new CatalogInfo { Services = services, Channels = channels };
+        // Queues were added to CatalogInfo by feature 014 and never populated here, so the
+        // node registry has been blind to them ever since: HW.DISCOVER could not answer "who
+        // processes this queue?", and 022's catalogue showed a queue being actively processed
+        // as "addressed but never declared". Found by running the dashboard against the samples.
+        var queues = AllQueues
+            .Select(q => new CatalogQueueEntry
+            {
+                Name = q.Name,
+                MessageTypeName = q.MessageType.FullName ?? q.MessageType.Name
+            })
+            .ToList();
+
+        return new CatalogInfo { Services = services, Channels = channels, Queues = queues };
     }
 }

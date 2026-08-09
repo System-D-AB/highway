@@ -77,3 +77,38 @@ internal static class EventProjection
             evt.Count);
     }
 }
+
+
+// ---- feature 022: the catalogue -------------------------------------------
+
+/// <summary>
+/// One catalogue row. <c>Kind</c> and <c>State</c> are decided by the server — the browser
+/// never parses a name, because <c>@</c> is a separator the server derives (018 T0).
+/// </summary>
+internal sealed record CatalogueRowDto(
+    string Name,
+    string Kind,
+    string State,
+    string? ParentChannel,
+    IReadOnlyList<string> Hosts,
+    long? Depth,
+    long? Bytes,
+    long? MaxBytes,
+    long? DeadLettered);
+
+internal sealed record CatalogueDto(
+    IReadOnlyList<CatalogueRowDto> Entries,
+    string? Unavailable);
+
+/// <summary>One node, with liveness already interpreted so the browser does no arithmetic.</summary>
+internal sealed record NodeRowDto(
+    string Name,
+    string State,          // "live" | "stale" | "absent"
+    double SinceSeconds,
+    IReadOnlyList<string> Services,
+    IReadOnlyList<string> Queues,
+    IReadOnlyList<string> Channels);
+
+internal sealed record NodesDto(
+    IReadOnlyList<NodeRowDto> Nodes,
+    string? Unavailable);
