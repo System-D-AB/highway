@@ -38,8 +38,9 @@ internal sealed class HwUnsubscribeCommand : HighwayCommandBase
 
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(_channel)), LockType.Exclusive, StoreType.Main);
-        AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_channel, _group)), LockType.Exclusive, StoreType.Object);
-        AddKey(CreateArgSlice(HighwayKeys.GroupProcessing(_channel, _group)), LockType.Exclusive, StoreType.Object);
+        // Lock the derived queue key so it can be cleaned up.
+        var derivedName = $"{_channel}@{_group}";
+        AddKey(CreateArgSlice(HighwayKeys.Queue(derivedName)), LockType.Exclusive, StoreType.Object);
         return true;
     }
 
@@ -50,13 +51,14 @@ internal sealed class HwUnsubscribeCommand : HighwayCommandBase
         try
         {
             var groupsKey    = CreateArgSlice(HighwayKeys.ChannelGroups(_channel));
-            var groupQueueKey = CreateArgSlice(HighwayKeys.GroupQueue(_channel, _group));
-            var groupProcKey  = CreateArgSlice(HighwayKeys.GroupProcessing(_channel, _group));
             var groupSlice    = CreateArgSlice(Encoding.UTF8.GetBytes(_group));
 
             api.SetRemove(groupsKey, groupSlice, out _);
-            api.DELETE(groupQueueKey);
-            api.DELETE(groupProcKey);
+
+            // Delete the derived queue key.
+            var derivedName = $"{_channel}@{_group}";
+            var derivedQueueKey = CreateArgSlice(HighwayKeys.Queue(derivedName));
+            api.DELETE(derivedQueueKey);
 
             // Maintain main-store group list
             var grpListKey = CreateArgSlice(HighwayKeys.ChannelGroupList(_channel));

@@ -13,7 +13,7 @@ saying so is the point of the document.
 same feature. If a constraint turns out to be wrong, change the constraint and record why —
 do not quietly let the code diverge.
 
-Last reviewed: 2026-08-08 (feature 014).
+Last reviewed: 2026-08-08 (feature 018).
 
 ---
 
@@ -100,9 +100,9 @@ driven by worker polling rather than a timer — see C5.
 
 **Status: Met.**
 
-Fan-out across groups, atomic — all groups or none. Each group has its own queue, lease,
-acknowledgement, attempt counter and dead-letter list. One group failing has no effect on
-another.
+Fan-out across groups, atomic — all groups or none. Each group has its own **queue** (named
+`{channel}@{group}`) with the same lease, acknowledgement, attempt counter and dead-letter
+list as any other queue. One group failing has no effect on another.
 
 **"Delivered" is per group, never "delivered to anyone".** First-acknowledgement-wins would
 let a fast subscriber deny a slow one the message, which is not fan-out.
@@ -111,7 +111,7 @@ let a fast subscriber deny a slow one the message, which is not fan-out.
 
 **Status: Met.**
 
-A message leaves a group's queue when that group acknowledges it. Storage tracks
+A message leaves a group's queue when that group acknowledges it via `HW.QACK`. Storage tracks
 **undelivered** work, which in a healthy system is near zero.
 
 ### C2.3 — A subscriber that is down receives what it missed
@@ -121,6 +121,10 @@ A message leaves a group's queue when that group acknowledges it. Storage tracks
 A subscriber group outlives the process that created it. `HW.HEARTBEAT BYE` — sent
 automatically on graceful shutdown — deliberately does not remove it. A node down for a week
 returns to find its messages waiting. Verified across real processes in the sample run.
+
+**This is now true because its queue holds the work.** The group's derived queue
+(`hw:q:{channel}@{group}:q`) is the same durable structure as any other queue —
+no separate "pub/sub retention" mechanism is needed.
 
 ### C2.4 — Pub/Sub is **not** a store for messages nobody has subscribed to
 
@@ -206,19 +210,17 @@ an error can retry or shed load. One that receives silent success cannot.
 | Channel backlog | **Removed** (C2.4) |
 | Dead-letter queues | Yes — `MaxDeadLetterEntries` (feature 013) |
 | Delayed and retry sorted sets | Yes — bounded with their queue (feature 013) |
-| **Pub/Sub group queues** | **No — nothing at all** |
-| **Queues (C1)** | **Built (014) and still unbounded** |
+| **Queues (C1) and subscriber group queues** | **Built (014/018) and still unbounded** |
 
 An orphaned group queue — a node decommissioned without unsubscribing — receives a copy of
 every subsequent publish forever. This, not the backlog, is what will actually consume a
 gigabyte. Bounding it is feature 016; letting a node retire cleanly so the queue never becomes
 an orphan is **feature 017 (node decommissioning)**.
 
-> This entry said "Queues: not built yet" until 2026-08-08, three features after 014 built
-> them, and pointed at feature 015 for the orphan remedy — a number that meant node
-> decommissioning when it was written and means recoverability now. Both corrected. Recorded
-> rather than silently overwritten, because the failure mode is the point: a forward reference
-> by feature *number* rots as soon as the roadmap reorders.
+> Feature 018 unified group queues onto the queue engine. C4.4's former row
+> "Pub/Sub group queues — no bound at all" is now redundant: a group queue **is**
+> a queue, bounded (or not) by the same mechanism as every other queue. One
+> decision, not two.
 
 ### C4.5 — Durability is the default, not an option
 
@@ -361,7 +363,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 
 **All six unmet constraints are in C4** — retention, storage and durability — which is one
 coherent feature rather than six problems. Feature 014 delivered C1; feature 015 completed
-C1.4.
+C1.4; feature 018 unified the two delivery engines.
 
 ---
 
@@ -386,7 +388,6 @@ get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the
 | **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in `docs/features/015-recoverability/requirements.md` § Deferred |
 | **Polly / `Microsoft.Extensions.Resilience`** | 015 | The .NET built-in for retry pipelines and the obvious "does the framework already do this?" answer. Moot until the tiers return. Highway takes no dependency beyond Garnet and StackExchange.Redis, so it is a real trade rather than a free win |
 | **`MaxDeliveryAttempts` off-by-one** | 013, then 015 | Belongs with the attempt-counting work, because that is what redefines what an attempt *is*. Also listed under Open Decisions above |
-| **`ChannelConsumerLoop` structural unification** | 015 | Batch-shaped; gets the shared `FailureReporter` but keeps its own loop shape. Revisit only if a later feature makes it genuinely resemble the single-message loops |
 
 ## Cross-references
 

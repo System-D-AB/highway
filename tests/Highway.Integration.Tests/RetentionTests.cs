@@ -63,8 +63,8 @@ public class RetentionTests
         // Subscribing afterwards starts empty — the message was not kept for anyone.
         db.Execute("HW.SUBSCRIBE", "retention.ch", "late-group");
 
-        var received = db.Execute("HW.RECEIVE", "retention.ch", "late-group");
-        (received.IsNull || ((RedisResult[])received!).Length == 0)
+        var received = db.Execute("HW.QCLAIM", "retention.ch@late-group", "node-1");
+        received.IsNull
             .Should().BeTrue("a publish with no registered group reaches nobody");
     }
 }

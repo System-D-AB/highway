@@ -7,7 +7,7 @@ namespace Highway.Integration.Tests;
 
 /// <summary>
 /// Integration tests for the Pub/Sub command flow:
-/// HW.SUBSCRIBE → HW.PUBLISH → HW.RECEIVE → HW.RACK
+/// HW.SUBSCRIBE → HW.PUBLISH → HW.QCLAIM → HW.QACK (on derived queue {channel}@{group})
 /// </summary>
 public class PubSubFlowTests : IDisposable
 {
@@ -53,10 +53,11 @@ public class PubSubFlowTests : IDisposable
     }
 
     [Fact]
-    public void HwReceive_ReturnsPublishedMessages()
+    public void HwQClaim_ReturnsPublishedMessages()
     {
         const string channel = "news.feed";
         const string group = "reader-group";
+        var derivedQueue = $"{channel}@{group}";
 
         _db.Execute("HW.SUBSCRIBE", channel, group);
 
@@ -64,16 +65,17 @@ public class PubSubFlowTests : IDisposable
         _db.Execute("HW.PUBLISH", channel, "message-2");
         _db.Execute("HW.PUBLISH", channel, "message-3");
 
-        var result = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-
-        result.Should().HaveCount(3);
-
-        var messages = result.Select(r =>
+        // Claim messages one at a time via the derived queue
+        var messages = new List<(string id, string payload)>();
+        for (var i = 0; i < 3; i++)
         {
-            var pair = (RedisResult[])r!;
-            return (id: (string)pair[0]!, payload: (string)pair[1]!);
-        }).ToList();
+            var result = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
+            result.IsNull.Should().BeFalse();
+            var arr = (RedisResult[])result!;
+            messages.Add(((string)arr[0]!, (string)arr[1]!));
+        }
 
+        messages.Should().HaveCount(3);
         messages[0].payload.Should().Be("message-1");
         messages[1].payload.Should().Be("message-2");
         messages[2].payload.Should().Be("message-3");
@@ -85,26 +87,26 @@ public class PubSubFlowTests : IDisposable
     }
 
     [Fact]
-    public void HwRack_RemovesFromProcessing()
+    public void HwQAck_RemovesFromProcessing()
     {
         const string channel = "ack.test";
         const string group = "ack-group";
+        var derivedQueue = $"{channel}@{group}";
 
         _db.Execute("HW.SUBSCRIBE", channel, group);
         _db.Execute("HW.PUBLISH", channel, "payload-x");
 
-        // Receive the message (moves to processing)
-        var received = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-        received.Should().HaveCount(1);
-        var msgId = (string)((RedisResult[])received[0]!)[0]!;
+        // Claim the message (moves to processing)
+        var claimed = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
+        claimed.IsNull.Should().BeFalse();
+        var msgId = (string)((RedisResult[])claimed!)[0]!;
 
-        // RACK it
-        var rackResult = _db.Execute("HW.RACK", channel, group, msgId);
-        rackResult.ToString().Should().Be("OK");
+        // QACK it
+        _db.Execute("HW.QACK", derivedQueue, "node-1", msgId);
 
-        // Second receive should return empty (nothing pending)
-        var secondReceive = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-        secondReceive.Should().BeEmpty();
+        // Second claim should return nil (nothing pending)
+        var secondClaim = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
+        secondClaim.IsNull.Should().BeTrue();
     }
 
 
@@ -118,25 +120,25 @@ public class PubSubFlowTests : IDisposable
 
         _db.Execute("HW.PUBLISH", channel, "shared-message");
 
-        // Each group gets the message independently
-        var resultX = (RedisResult[])_db.Execute("HW.RECEIVE", channel, "group-x", "COUNT", "10")!;
-        var resultY = (RedisResult[])_db.Execute("HW.RECEIVE", channel, "group-y", "COUNT", "10")!;
+        // Each group gets the message independently via derived queues
+        var resultX = _db.Execute("HW.QCLAIM", $"{channel}@group-x", "node-1");
+        var resultY = _db.Execute("HW.QCLAIM", $"{channel}@group-y", "node-1");
 
-        resultX.Should().HaveCount(1);
-        resultY.Should().HaveCount(1);
+        resultX.IsNull.Should().BeFalse();
+        resultY.IsNull.Should().BeFalse();
 
-        var payloadX = (string)((RedisResult[])resultX[0]!)[1]!;
-        var payloadY = (string)((RedisResult[])resultY[0]!)[1]!;
+        var payloadX = (string)((RedisResult[])resultX!)[1]!;
+        var payloadY = (string)((RedisResult[])resultY!)[1]!;
         payloadX.Should().Be("shared-message");
         payloadY.Should().Be("shared-message");
 
-        // RACK from group-x doesn't affect group-y
-        var msgIdX = (string)((RedisResult[])resultX[0]!)[0]!;
-        _db.Execute("HW.RACK", channel, "group-x", msgIdX);
+        // QACK from group-x doesn't affect group-y
+        var msgIdX = (string)((RedisResult[])resultX!)[0]!;
+        _db.Execute("HW.QACK", $"{channel}@group-x", "node-1", msgIdX);
 
-        // group-y still has nothing new to receive (already received), but processing list has the entry
-        var resultYAgain = (RedisResult[])_db.Execute("HW.RECEIVE", channel, "group-y", "COUNT", "10")!;
-        resultYAgain.Should().BeEmpty(); // no new messages, original is in processing
+        // group-y's message is still in its processing list (already claimed)
+        var resultYAgain = _db.Execute("HW.QCLAIM", $"{channel}@group-y", "node-1");
+        resultYAgain.IsNull.Should().BeTrue(); // no new messages; original is in processing
     }
 
     [Fact]
@@ -144,6 +146,7 @@ public class PubSubFlowTests : IDisposable
     {
         const string channel = "unsub.channel";
         const string group = "temp-group";
+        var derivedQueue = $"{channel}@{group}";
 
         // Subscribe and publish
         _db.Execute("HW.SUBSCRIBE", channel, group);
@@ -156,8 +159,8 @@ public class PubSubFlowTests : IDisposable
         // Re-subscribe — should NOT see the old message (state was cleared)
         _db.Execute("HW.SUBSCRIBE", channel, group);
 
-        var result = (RedisResult[])_db.Execute("HW.RECEIVE", channel, group, "COUNT", "10")!;
-        result.Should().BeEmpty();
+        var result = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
+        result.IsNull.Should().BeTrue();
     }
 
     // -------------------------------------------------------------------------

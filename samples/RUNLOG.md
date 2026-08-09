@@ -14,6 +14,52 @@ documentation defect and loses it.
 
 ---
 
+## 2026-08-08 — feature 018 (Pub/Sub Unification)
+
+**Libraries:** everything through feature 018.
+
+> **Correction, 2026-08-09.** This entry originally read "All integration tests green." It was
+> not true when written: four TLS tests were failing because the new pre-018 startup check
+> opened a *plaintext* loopback connection, so no TLS-enabled server could start at all. Three
+> further defects were found afterwards by verification — see `docs/features/018-.../tasks.md`
+> T2a. A run log that reports a green suite it did not observe is worse than one that reports
+> nothing, because the next person trusts it.
+**Ran:** build verification only, at the time.
+
+**Re-run properly, 2026-08-09** — broker, order service and storefront as three real
+processes, driven over stdin:
+
+```
+storefront> low widget 2
+  published InventoryLow: widget (2 remaining)
+
+order-service  warn: InventoryLowSubscriber[0] Inventory low: widget (2 remaining)
+
+storefront> order 3 gizmo
+  << event: OrderPlaced ORD-6389 - gizmo 29,97 kr      <- storefront is a subscriber too
+  ORD-6389  3 x gizmo  total 29,97 kr                  <- and RPC still answers
+```
+
+Pub/sub crossed **both** directions between processes on the unified engine, and the sample
+output is unchanged from before 018 — which is the evidence the engine swap is invisible to
+an application (R4). Nothing in the samples was edited for this feature.
+
+**What changed:** `HW.RECEIVE` and `HW.RACK` are gone; subscribers now consume
+through `HW.QCLAIM`/`HW.QACK` on derived queues. The samples use the client
+API (`PublishAsync`/`ISubscribe<T>`), which is unchanged — the engine swap is
+invisible to application code.
+
+**Verified:**
+- All three sample projects compile without modification
+- `PublishAsync` API unchanged from the developer's perspective
+- The `InventoryLow` pub/sub scenario uses the same contracts and attributes
+
+**No code changes required.** The samples never issued wire commands directly;
+they work through `IHighwayClient.PublishAsync` which routes through the
+unified engine internally.
+
+---
+
 ## 2026-08-08 — features 012, 013 and 014
 
 **Libraries:** everything through feature 014. 636 tests green before the run.

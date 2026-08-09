@@ -105,12 +105,12 @@ internal sealed class HwPublishCommand : HighwayCommandBase
         AddKey(CreateArgSlice(HighwayKeys.ChannelSeq(_channel)), LockType.Exclusive, StoreType.Main);
         AddKey(grpListKey, LockType.Exclusive, StoreType.Main);
 
-        // Name-only derivation, so no Prepare-phase read and therefore no watch
-        // conflict (004.1).
-        AddKey(CreateArgSlice(HighwayKeys.ChannelDelayed(_channel)), LockType.Exclusive, StoreType.Object);
-
         foreach (var group in _groups)
-            AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_channel, group)), LockType.Exclusive, StoreType.Object);
+        {
+            var derivedName = $"{_channel}@{group}";
+            AddKey(CreateArgSlice(HighwayKeys.Queue(derivedName)), LockType.Exclusive, StoreType.Object);
+            AddKey(CreateArgSlice(HighwayKeys.QueueDelayed(derivedName)), LockType.Exclusive, StoreType.Object);
+        }
 
         return true;
     }
@@ -125,21 +125,24 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             var seqKey = CreateArgSlice(HighwayKeys.ChannelSeq(_channel));
             api.Increment(seqKey, out _messageId);
 
+            // The string form of the sequence counter is the message ID for the queue path.
+            var messageIdStr = _messageId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var messageIdBytes = Encoding.UTF8.GetBytes(messageIdStr);
+
             if (_deliverAtTicks > DateTime.UtcNow.Ticks)
             {
-                // Delayed: hold the message whole rather than fanning it out now. Groups
-                // are resolved at promotion time, so a group that subscribes during the
-                // delay still receives it — a delayed publish behaves like a publish that
-                // happens later, which is the only reading of "delay" that is not
-                // surprising.
-                var delayedKey = CreateArgSlice(HighwayKeys.ChannelDelayed(_channel));
-                var entry = Envelope.EncodeChannelEntry(_messageId, _payloadBytes);
-
-                api.SortedSetAdd(
-                    delayedKey,
-                    CreateArgSlice(Encoding.ASCII.GetBytes(_deliverAtTicks.ToString())),
-                    CreateArgSlice(entry),
-                    out _);
+                // Fan out into each group's derived queue delayed set.
+                var rpcEntry = Envelope.EncodeRpcEntry(messageIdBytes, _payloadBytes);
+                foreach (var group in _groups)
+                {
+                    var derivedName = $"{_channel}@{group}";
+                    var derivedDelayedKey = CreateArgSlice(HighwayKeys.QueueDelayed(derivedName));
+                    api.SortedSetAdd(
+                        derivedDelayedKey,
+                        CreateArgSlice(Encoding.ASCII.GetBytes(_deliverAtTicks.ToString())),
+                        CreateArgSlice(rpcEntry),
+                        out _);
+                }
 
                 // Zero groups notified now. The reply counts delivery, and nothing has
                 // been delivered yet.
@@ -149,24 +152,19 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             {
                 // Nobody is subscribed, so the message is delivered to nobody. That is what
                 // "publish" means (feature 014 follow-up).
-                //
-                // Highway used to hold these in a per-channel backlog that a future
-                // subscriber inherited, which produced a surprising rule: a group
-                // registering later received an arbitrary prefix of history, determined by
-                // when the *first* subscriber happened to start. It existed because nothing
-                // else could hold a message until someone could handle it. SendAsync now
-                // can, and that is what a queue is for.
                 WriteInt64(ref output, 0L);
             }
             else
             {
-                // Fan out to all group queues
-                var channelEntry = Envelope.EncodeChannelEntry(_messageId, _payloadBytes);
+                // Fan out to derived queue keys using RPC framing.
+                var rpcEntry = Envelope.EncodeRpcEntry(messageIdBytes, _payloadBytes);
                 foreach (var group in _groups)
                 {
-                    var groupQueueKey = CreateArgSlice(HighwayKeys.GroupQueue(_channel, group));
-                    api.ListRightPush(groupQueueKey, CreateArgSlice(channelEntry), out _);
+                    var derivedName = $"{_channel}@{group}";
+                    var derivedQueueKey = CreateArgSlice(HighwayKeys.Queue(derivedName));
+                    api.ListRightPush(derivedQueueKey, CreateArgSlice(rpcEntry), out _);
                 }
+
                 WriteInt64(ref output, _groups.Length);
             }
         }
@@ -190,7 +188,7 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
         // A delayed message is in nobody's queue yet, so ringing would wake every
         // consumer to find nothing. Promotion happens on the consumer's own backstop
-        // poll instead — see HW.RECEIVE.
+        // poll instead — see HW.RECEIVE / HW.QCLAIM.
         if (_deliverAtTicks > DateTime.UtcNow.Ticks) return;
 
         var msgIdBytes = Encoding.UTF8.GetBytes(_messageId.ToString());
@@ -198,7 +196,10 @@ internal sealed class HwPublishCommand : HighwayCommandBase
         // _channel is non-null past the guard: the only way it stays unset is
         // TryReadIdentifier failing, which calls Fail() and so returns above.
         foreach (var group in _groups)
-            _doorbell.Ring(HighwayKeys.GroupDoorbell(_channel!, group), msgIdBytes);
+        {
+            var derivedName = $"{_channel}@{group}";
+            _doorbell.Ring(HighwayKeys.QueueDoorbell(derivedName), msgIdBytes);
+        }
     }
 
 

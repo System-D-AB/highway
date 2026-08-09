@@ -17,10 +17,10 @@ namespace Highway.Client.Engine;
 /// wait outlives the lease the server redelivers it elsewhere. Putting the ordering here
 /// means a third loop cannot get it wrong.</para>
 ///
-/// <para><b><see cref="ChannelConsumerLoop"/> is deliberately not a subclass.</b> It is
-/// batch-shaped — <c>HW.RECEIVE</c> returns many messages and it has no gate and no in-flight
-/// list. Forcing it in would mean either losing batching or filling this class with
-/// <c>if (batch)</c> branches, which is the wrong shape for one of three callers.</para>
+/// <para><b>Covers all worker loops.</b> <see cref="RpcWorkerLoop"/>,
+/// <see cref="QueueWorkerLoop"/> and <see cref="SubscriptionWorkerLoop"/> all derive from
+/// this class. They share the concurrency gate, the claim ordering, and the failure-reporting
+/// seam; only <b>what</b> they claim and <b>what</b> they do with it differs.</para>
 ///
 /// <para>Retry policy (004.1): the connection already retries the transient class with
 /// bounded backoff. A surfaced permanent error is logged and the drain pass ends — never

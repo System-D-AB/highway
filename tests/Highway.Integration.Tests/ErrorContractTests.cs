@@ -64,10 +64,6 @@ public class ErrorContractTests : IDisposable
     [InlineData("HW.UNSUBSCRIBE", "", "grp", null)]
     [InlineData("HW.UNSUBSCRIBE", "ch", "", null)]
     [InlineData("HW.PUBLISH", "", "payload", null)]
-    [InlineData("HW.RECEIVE", "", "grp", null)]
-    [InlineData("HW.RECEIVE", "ch", "", null)]
-    [InlineData("HW.RACK", "", "grp", "1")]
-    [InlineData("HW.RACK", "ch", "", "1")]
     public void BlankIdentifier_EveryPosition_HwInvalidArg(string command, string arg1, string arg2, string? arg3)
     {
         var message = ErrorOf(() =>
@@ -165,55 +161,6 @@ public class ErrorContractTests : IDisposable
     }
 
     // -------------------------------------------------------------------------
-    // HW_INVALID_COUNT — every invalid COUNT variant on HW.RECEIVE
-    // -------------------------------------------------------------------------
-
-    [Theory]
-    [InlineData("abc")]     // non-numeric
-    [InlineData("12x")]     // non-numeric
-    [InlineData("0")]       // zero
-    [InlineData("-5")]      // negative
-    [InlineData("99999999999999999999")] // overflow
-    [InlineData("501")]     // above ReceiveMaxCount (default 500)
-    public void InvalidCount_HwInvalidCount(string count)
-    {
-        var message = ErrorOf(() => _db.Execute("HW.RECEIVE", "ch", "grp", "COUNT", count));
-        message.Should().StartWith("ERR HW_INVALID_COUNT");
-    }
-
-    [Fact]
-    public void InvalidCount_BareForm_AlsoRejected()
-    {
-        var message = ErrorOf(() => _db.Execute("HW.RECEIVE", "ch", "grp", "-1"));
-        message.Should().StartWith("ERR HW_INVALID_COUNT");
-    }
-
-    [Fact]
-    public void ValidCount_WithKeyword_StillWorks()
-    {
-        _db.Execute("HW.SUBSCRIBE", "count.ch", "grp");
-        _db.Execute("HW.PUBLISH", "count.ch", "m");
-
-        var result = (RedisResult[])_db.Execute("HW.RECEIVE", "count.ch", "grp", "COUNT", "10")!;
-        result.Should().HaveCount(1);
-    }
-
-    // -------------------------------------------------------------------------
-    // HW.RACK messageId validation
-    // -------------------------------------------------------------------------
-
-    [Theory]
-    [InlineData("abc")]
-    [InlineData("-3")]
-    [InlineData("0")]
-    [InlineData("99999999999999999999")]
-    public void Rack_InvalidMessageId_HwInvalidArg(string messageId)
-    {
-        var message = ErrorOf(() => _db.Execute("HW.RACK", "ch", "grp", messageId));
-        message.Should().StartWith("ERR HW_INVALID_ARG");
-    }
-
-    // -------------------------------------------------------------------------
     // Arity errors still come from Garnet itself (Requirement 2 AC5)
     // -------------------------------------------------------------------------
 
@@ -248,9 +195,6 @@ public class ErrorContractTests : IDisposable
         {
             ErrorOf(() => _db.Execute("HW.CALL", "", "req", "p")),
             ErrorOf(() => _db.Execute("HW.CALL", "svc", "req", new string('x', 100))),
-            ErrorOf(() => _db.Execute("HW.RECEIVE", "ch", "grp", "COUNT", "0")),
-            ErrorOf(() => _db.Execute("HW.RECEIVE", "ch", "grp", "COUNT", "-1")),
-            ErrorOf(() => _db.Execute("HW.RACK", "ch", "grp", "abc")),
             ErrorOf(() => _db.Execute("HW.SUBSCRIBE", new string('a', 257), "grp")),
             ErrorOf(() => _db.Execute("HW.DEQUEUE", "svc", "n\node")),
         };
@@ -283,8 +227,8 @@ public class ErrorContractTests : IDisposable
 
         ErrorOf(() => _db.Execute("HW.PUBLISH", "clean.ch", new string('x', 100)));
 
-        var result = (RedisResult[])_db.Execute("HW.RECEIVE", "clean.ch", "grp", "COUNT", "10")!;
-        result.Should().BeEmpty("rejected publishes must not fan out");
+        var result = _db.Execute("HW.QCLAIM", "clean.ch@grp", "node-1");
+        result.IsNull.Should().BeTrue("rejected publishes must not fan out");
     }
 
     [Fact]

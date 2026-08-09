@@ -58,8 +58,6 @@ public class FailureBlockTests
     [Theory]
     [InlineData("rpc")]
     [InlineData("rpcproc")]
-    [InlineData("channel")]
-    [InlineData("groupproc")]
     public void EveryFramingCarriesTheBlockWithoutLosingItsPayload(string framing)
     {
         var block = Envelope.EncodeFailureBlock(Utf8("InvalidOperationException"), Utf8("TimeoutException"), Utf8("detail"));
@@ -67,9 +65,7 @@ public class FailureBlockTests
         byte[] bare = framing switch
         {
             "rpc"       => Envelope.EncodeRpcEntry(Utf8("id"), JsonPayload, 1),
-            "rpcproc"   => Envelope.EncodeRpcProcessingEntry(7L, Utf8("id"), JsonPayload, 1),
-            "channel"   => Envelope.EncodeChannelEntry(55L, JsonPayload, 1),
-            _           => Envelope.EncodeGroupProcessingEntry(7L, 55L, JsonPayload, 1),
+            _           => Envelope.EncodeRpcProcessingEntry(7L, Utf8("id"), JsonPayload, 1),
         };
 
         var withBlock = Envelope.WithFailureBlock(bare, block);
@@ -78,9 +74,7 @@ public class FailureBlockTests
         switch (framing)
         {
             case "rpc":     Envelope.DecodeRpcEntry(withBlock, out _, out payload, out _); break;
-            case "rpcproc": Envelope.DecodeRpcProcessingEntry(withBlock, out _, out _, out payload, out _); break;
-            case "channel": Envelope.DecodeChannelEntry(withBlock, out _, out payload, out _); break;
-            default:        Envelope.DecodeGroupProcessingEntry(withBlock, out _, out _, out payload, out _); break;
+            default:        Envelope.DecodeRpcProcessingEntry(withBlock, out _, out _, out payload, out _); break;
         }
 
         payload.ToArray().Should().Equal(JsonPayload,

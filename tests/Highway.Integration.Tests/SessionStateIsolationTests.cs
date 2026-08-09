@@ -108,9 +108,13 @@ public class SessionStateIsolationTests
 
         db.Execute("HW.SUBSCRIBE", "ch", "grp");
         db.Execute("HW.PUBLISH", "ch", "m1");
-        db.Execute("HW.RECEIVE", "ch", "grp", "COUNT", "10");
-        db.Execute("HW.RECEIVE", "ch", "grp", "COUNT", "10");
-        db.Execute("HW.RECEIVE", "ch", "grp", "COUNT", "10");
+        // Claim and ack the message via the derived queue
+        var claimed = db.Execute("HW.QCLAIM", "ch@grp", "node-1");
+        var msgId = (string)((RedisResult[])claimed!)[0]!;
+        db.Execute("HW.QACK", "ch@grp", "node-1", msgId);
+        // Next claim returns nil
+        db.Execute("HW.QCLAIM", "ch@grp", "node-1");
+        db.Execute("HW.QCLAIM", "ch@grp", "node-1");
 
         var received = ((RedisResult[])db.Execute("HW.REPLAY", "ch")!)
             .Select(e =>
@@ -120,8 +124,8 @@ public class SessionStateIsolationTests
                     if ((string)flat[i]! == "eventType") return (string)flat[i + 1]!;
                 return "?";
             })
-            .Count(t => t == "MessagesReceived");
+            .Count(t => t == "Published");
 
-        received.Should().Be(1, "only the batch that actually returned messages is an event");
+        received.Should().Be(1, "only the publish that actually delivered is recorded");
     }
 }

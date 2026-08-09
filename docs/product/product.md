@@ -2,7 +2,7 @@
 
 > ## Implementation status
 >
-> *As of 2026-08-08, after features 001–014.* This document states the product's
+> *As of 2026-08-08, after features 001–018.* This document states the product's
 > **intent**. Most of it is now built; some describes capability that does not
 > exist yet. Neither is wrong, but they should not be confused.
 >
@@ -11,10 +11,12 @@
 > | Programming model (**three verbs**, class shapes, assembly scanning) | **Shipped** — G1, G3, G4 |
 > | RPC and durable Pub/Sub, at-least-once both paths | **Shipped** — G2 |
 > | **Queue — `SendAsync`, `[Queue]`, `IProcess<T>`** | **Shipped** — feature 014 |
+> | **Pub/Sub Unification — one engine, two verbs** | **Shipped** — feature 018. `HW.RECEIVE`/`HW.RACK` removed; subscribers consume via queue commands |
 > | `HW.*` protocol, Highway.Server as a Garnet extension | **Shipped** — G6 |
 > | Timeouts, competing consumers, structured errors, DI scoping | **Shipped** — G7 |
 > | Heartbeat, service registry, `HW.DISCOVER` / `HW.STATS` | **Shipped** |
 > | **Dead letters, delayed delivery, `[Idempotent]`** | **Shipped** — feature 013 |
+> | **Diagnosable failures — `HW.FAIL`, failure context** | **Shipped** — feature 015 |
 > | **Authentication and TLS** | **Shipped** — feature 012. Not required on loopback, required off it; TLS opt-in always |
 > | Embedded Control Panel / web dashboard | **Partially built** — flight recorder view delivered in feature 011. Server settings and catalog views are deferred |
 > | Flight recorder, `HW.REPLAY`, activity emission | **Shipped** — G8. The recorder is **volatile** (in-process, lost on restart); Highway emits `Activity` and takes no OpenTelemetry dependency, so the application wires its own pipeline |
@@ -259,9 +261,12 @@ framing, so `redis-cli` and SE.Redis `Execute()` work unmodified.
 |---|---|
 | **RPC** | `HW.CALL`, `HW.REPLY`, `HW.DEQUEUE`, `HW.ACK` |
 | **Queue** | `HW.QSEND`, `HW.QCLAIM`, `HW.QACK` |
-| **Pub/Sub** | `HW.PUBLISH`, `HW.SUBSCRIBE`, `HW.UNSUBSCRIBE`, `HW.RECEIVE`, `HW.RACK` |
+| **Pub/Sub** | `HW.PUBLISH`, `HW.SUBSCRIBE`, `HW.UNSUBSCRIBE` |
 | **Registry** | `HW.HEARTBEAT`, `HW.DISCOVER`, `HW.STATS` |
-| **Operations** | `HW.REPLAY`, `HW.DLQ` |
+| **Operations** | `HW.REPLAY`, `HW.DLQ`, `HW.FAIL` |
+
+Three verbs, one engine underneath. Subscribers consume through the same queue commands
+(`HW.QCLAIM`/`HW.QACK`) as queue processors — on a derived queue named `{channel}@{group}`.
 
 **No count is stated here on purpose.** An earlier version said "twelve", and by the time
 anyone read it there were seventeen — the same drift this section already warns about, in

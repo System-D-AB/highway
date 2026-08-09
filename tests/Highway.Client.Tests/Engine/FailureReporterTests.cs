@@ -145,7 +145,7 @@ public class FailureReporterTests
             "42", new TimeoutException("t"), "acked anyway");
 
         await connection.Received(1).FailAsync(
-            "CH", "orders.shipped", "billing", "42", "System.TimeoutException",
+            "Q", "orders.shipped", "billing", "42", "System.TimeoutException",
             Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
     }
 
@@ -156,7 +156,7 @@ public class FailureReporterTests
         // a test would be the tail wagging the dog.
         new FailureTarget(FailureFamily.Service, "n", "s").WireKind.Should().Be("SVC");
         new FailureTarget(FailureFamily.Queue, "n", "s").WireKind.Should().Be("Q");
-        new FailureTarget(FailureFamily.Channel, "n", "s").WireKind.Should().Be("CH");
+        new FailureTarget(FailureFamily.Channel, "n", "s").WireKind.Should().Be("Q");
     }
 
     /// <summary>Captures log entries; NullLogger cannot be asserted against.</summary>

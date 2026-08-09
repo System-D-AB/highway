@@ -71,6 +71,9 @@ internal static class HighwayOptionsValidator
             if (b < 0x20 || b == 0x7F)
                 throw new InvalidOperationException(
                     $"HighwayOptions.NodeName '{nodeName}' contains a control character; the server rejects such identifiers.");
+            if (b == (byte)'@')
+                throw new InvalidOperationException(
+                    $"HighwayOptions.NodeName '{nodeName}' contains '@' which is reserved for internal group-queue routing (feature 018).");
         }
     }
 }

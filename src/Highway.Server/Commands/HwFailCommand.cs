@@ -1,4 +1,3 @@
-using System.Globalization;
 using Garnet.common;
 using System.Text;
 using Garnet.server;
@@ -15,7 +14,6 @@ namespace Highway.Server.Commands;
 /// <code>
 /// HW.FAIL SVC &lt;service&gt; &lt;node&gt;  &lt;requestId&gt; &lt;type&gt; &lt;detail&gt;
 /// HW.FAIL Q   &lt;queue&gt;   &lt;node&gt;  &lt;messageId&gt; &lt;type&gt; &lt;detail&gt;
-/// HW.FAIL CH  &lt;channel&gt; &lt;group&gt; &lt;messageId&gt; &lt;type&gt; &lt;detail&gt;
 /// </code>
 ///
 /// <para><b>One command, not three.</b> The target grammar is the one <c>HW.DLQ</c> already
@@ -38,7 +36,6 @@ internal sealed class HwFailCommand : HighwayCommandBase
 {
     private const string TargetService = "SVC";
     private const string TargetQueue = "Q";
-    private const string TargetChannel = "CH";
 
     private readonly HighwayServerOptions _opts;
     private readonly FlightRecorder _recorder;
@@ -51,10 +48,6 @@ internal sealed class HwFailCommand : HighwayCommandBase
     private byte[] _typeBytes = [];
     private byte[] _detailBytes = [];
 
-    /// <summary>Group processing entries key on a numeric messageId; the other two on raw bytes.</summary>
-    private bool _isChannel;
-    private long _channelMessageId;
-
     public HwFailCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
         _opts = opts;
@@ -66,8 +59,6 @@ internal sealed class HwFailCommand : HighwayCommandBase
         _idBytes = [];
         _typeBytes = [];
         _detailBytes = [];
-        _isChannel = false;
-        _channelMessageId = 0;
     }
 
     protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
@@ -91,32 +82,19 @@ internal sealed class HwFailCommand : HighwayCommandBase
                 break;
 
             case TargetQueue:
-                if (!TryReadIdentifier(ref procInput, ref idx, "queue", _opts.MaxIdentifierBytes, out _name)) return true;
+                if (!TryReadDerivedIdentifier(ref procInput, ref idx, "queue", _opts.MaxIdentifierBytes, out _name)) return true;
                 if (!TryReadIdentifier(ref procInput, ref idx, "node", _opts.MaxIdentifierBytes, out _scope)) return true;
                 _procKey = HighwayKeys.QueueProcessing(_name, _scope);
                 break;
 
-            case TargetChannel:
-                if (!TryReadIdentifier(ref procInput, ref idx, "channel", _opts.MaxIdentifierBytes, out _name)) return true;
-                if (!TryReadIdentifier(ref procInput, ref idx, "group", _opts.MaxIdentifierBytes, out _scope)) return true;
-                _procKey = HighwayKeys.GroupProcessing(_name, _scope);
-                _isChannel = true;
-                break;
-
             default:
                 Fail(HighwayErrors.InvalidArg,
-                    $"unknown target '{kind}'; expected SVC <service> <node>, Q <queue> <node> or CH <channel> <group>");
+                    $"unknown target '{kind}'; accepted forms are SVC <service> <node> or Q <queue> <node>");
                 return true;
         }
 
         if (!TryReadIdentifier(ref procInput, ref idx, "id", _opts.MaxIdentifierBytes, out _id, out _idBytes))
             return true;
-
-        if (_isChannel && !long.TryParse(_id, NumberStyles.Integer, CultureInfo.InvariantCulture, out _channelMessageId))
-        {
-            Fail(HighwayErrors.InvalidArg, $"messageId '{_id}' is not an integer");
-            return true;
-        }
 
         var typeArg = GetNextArg(ref procInput, ref idx);
         _typeBytes = typeArg.ReadOnlySpan.ToArray();
@@ -178,9 +156,6 @@ internal sealed class HwFailCommand : HighwayCommandBase
 
     private bool Matches(ReadOnlySpan<byte> entry)
     {
-        if (_isChannel)
-            return Envelope.GetMessageId(entry) == _channelMessageId;
-
         Envelope.DecodeRpcProcessingEntry(entry, out _, out var id, out _, out _);
         return id.SequenceEqual(_idBytes);
     }

@@ -134,8 +134,13 @@ public class NodeExpiryTests
         db.Execute("HW.PUBLISH", "orders.placed", "msg-after");
 
         // The node comes back and drains everything addressed to it.
-        var received = (RedisResult[])db.Execute("HW.RECEIVE", "orders.placed", "sub-1", "COUNT", "10")!;
-        var payloads = received.Select(r => (string)((RedisResult[])r!)[1]!).ToArray();
+        var payloads = new List<string>();
+        for (var i = 0; i < 10; i++)
+        {
+            var claimed = db.Execute("HW.QCLAIM", "orders.placed@sub-1", "sub-1");
+            if (claimed.IsNull) break;
+            payloads.Add((string)((RedisResult[])claimed!)[1]!);
+        }
 
         payloads.Should().Equal(["msg-before", "msg-after"],
             "pruning a dead node must never delete its subscriber group — pub/sub messages are " +

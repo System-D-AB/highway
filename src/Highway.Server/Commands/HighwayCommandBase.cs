@@ -113,8 +113,7 @@ internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
         if (!Identifier.IsValid(raw, maxBytes))
         {
             value = null!;
-            return Fail(HighwayErrors.InvalidArg,
-                $"{name} is blank, contains a control character, or exceeds {maxBytes} bytes");
+            return Fail(HighwayErrors.InvalidArg, IdentifierErrorDetail(raw, name, maxBytes));
         }
 
         value = Encoding.UTF8.GetString(raw);
@@ -137,12 +136,48 @@ internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
         {
             value = null!;
             rawBytes = [];
-            return Fail(HighwayErrors.InvalidArg,
-                $"{name} is blank, contains a control character, or exceeds {maxBytes} bytes");
+            return Fail(HighwayErrors.InvalidArg, IdentifierErrorDetail(raw, name, maxBytes));
         }
 
         value = Encoding.UTF8.GetString(raw);
         rawBytes = raw.ToArray();
+        return true;
+    }
+
+    /// <summary>
+    /// Produces the specific rejection reason so the operator sees whether the problem
+    /// is a control character, the reserved <c>@</c>, a blank, or a length violation.
+    /// </summary>
+    private static string IdentifierErrorDetail(ReadOnlySpan<byte> raw, string name, int maxBytes)
+    {
+        if (raw.IsEmpty)
+            return $"{name} is blank";
+        if (Identifier.ContainsAtSign(raw))
+            return $"{name} contains '@' which is reserved for internal group-queue routing (feature 018)";
+        return $"{name} is blank, contains a control character, or exceeds {maxBytes} bytes";
+    }
+
+    /// <summary>
+    /// Reads an identifier that may contain <c>@</c> (feature 018). Used by consumption
+    /// commands (<c>HW.QCLAIM</c>, <c>HW.QACK</c>, <c>HW.DLQ</c>, <c>HW.FAIL</c>) that
+    /// operate on both user-declared queues and derived group queues
+    /// (<c>{channel}@{group}</c>).
+    /// </summary>
+    protected bool TryReadDerivedIdentifier(
+        ref CustomProcedureInput input, ref int idx, string name, int maxBytes, out string value)
+    {
+        var arg = GetNextArg(ref input, ref idx);
+        var raw = arg.ReadOnlySpan;
+
+        if (!Identifier.IsValidAllowingAt(raw, maxBytes))
+        {
+            value = null!;
+            return Fail(HighwayErrors.InvalidArg,
+                raw.IsEmpty ? $"{name} is blank"
+                    : $"{name} is blank, contains a control character, or exceeds {maxBytes} bytes");
+        }
+
+        value = Encoding.UTF8.GetString(raw);
         return true;
     }
 
@@ -185,7 +220,8 @@ internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
     /// </summary>
     protected static unsafe void WriteInteger(ref MemoryResult<byte> output, int value)
     {
-        const int len = 4; // :N
+        const int len = 4; // :N
+
 
         output.MemoryOwner?.Dispose();
         output.MemoryOwner = MemoryPool<byte>.Shared.Rent(len);

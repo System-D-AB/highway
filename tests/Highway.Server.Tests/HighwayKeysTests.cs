@@ -40,24 +40,12 @@ public class HighwayKeysTests
         => HighwayKeys.ChannelSeq("events").Should().Be("hw:ch:events:seq");
 
     [Fact]
-    public void GroupQueue_ProducesCorrectKey()
-        => HighwayKeys.GroupQueue("events", "grp-a").Should().Be("hw:ch:events:grp:grp-a:q");
-
-    [Fact]
-    public void GroupProcessing_ProducesCorrectKey()
-        => HighwayKeys.GroupProcessing("events", "grp-a").Should().Be("hw:ch:events:grp:grp-a:proc");
-
-    [Fact]
     public void ServiceDoorbell_ProducesCorrectKey()
         => HighwayKeys.ServiceDoorbell("orders").Should().Be("hw:door:svc:orders");
 
     [Fact]
     public void ReplyDoorbell_IsCorrect()
         => HighwayKeys.ReplyDoorbell.Should().Be("hw:door:rep");
-
-    [Fact]
-    public void GroupDoorbell_ProducesCorrectKey()
-        => HighwayKeys.GroupDoorbell("events", "grp-a").Should().Be("hw:door:ch:events:grp:grp-a");
 
     // -------------------------------------------------------------------------
     // UTF-8 byte[] overloads match the string counterparts
@@ -75,11 +63,6 @@ public class HighwayKeysTests
     public void ReplyDoorbellBytes_MatchesConstant()
         => Encoding.UTF8.GetString(HighwayKeys.ReplyDoorbellBytes)
            .Should().Be(HighwayKeys.ReplyDoorbell);
-
-    [Fact]
-    public void GroupDoorbellBytes_MatchStringVersion()
-        => Encoding.UTF8.GetString(HighwayKeys.GroupDoorbellBytes("ch", "grp"))
-           .Should().Be(HighwayKeys.GroupDoorbell("ch", "grp"));
 
     // -------------------------------------------------------------------------
     // Registry keys (feature 006)

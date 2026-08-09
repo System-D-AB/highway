@@ -145,8 +145,9 @@ internal sealed class HwStatsCommand : HighwayCommandBase
 
                 foreach (var group in _channelGroups)
                 {
-                    AddKey(CreateArgSlice(HighwayKeys.GroupQueue(_name, group)), LockType.Shared, StoreType.Object);
-                    AddKey(CreateArgSlice(HighwayKeys.GroupDeadLetter(_name, group)), LockType.Shared, StoreType.Object);
+                    var derivedName = $"{_name}@{group}";
+                    AddKey(CreateArgSlice(HighwayKeys.Queue(derivedName)), LockType.Shared, StoreType.Object);
+                    AddKey(CreateArgSlice(HighwayKeys.QueueDeadLetter(derivedName)), LockType.Shared, StoreType.Object);
                 }
             }
 
@@ -310,10 +311,11 @@ internal sealed class HwStatsCommand : HighwayCommandBase
         var deadLettered = 0;
         foreach (var group in _channelGroups)
         {
-            api.ListLength(CreateArgSlice(HighwayKeys.GroupQueue(channel, group)), out var len);
+            var derivedName = $"{channel}@{group}";
+            api.ListLength(CreateArgSlice(HighwayKeys.Queue(derivedName)), out var len);
             pending += len;
 
-            api.ListLength(CreateArgSlice(HighwayKeys.GroupDeadLetter(channel, group)), out var dead);
+            api.ListLength(CreateArgSlice(HighwayKeys.QueueDeadLetter(derivedName)), out var dead);
             deadLettered += dead;
         }
 

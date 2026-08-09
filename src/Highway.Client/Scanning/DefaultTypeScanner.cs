@@ -60,6 +60,7 @@ internal sealed class DefaultTypeScanner : ITypeScanner
             var attribute = type.GetCustomAttribute<QueueAttribute>()
                             ?? throw new QueueAttributeMissingException(type);
 
+            RejectReservedCharacter("Queue", attribute.Name);
             contracts[type] = attribute.Name;
         }
 
@@ -85,6 +86,8 @@ internal sealed class DefaultTypeScanner : ITypeScanner
 
             var attribute = messageType.GetCustomAttribute<QueueAttribute>()
                             ?? throw new QueueAttributeMissingException(messageType);
+
+            RejectReservedCharacter("Queue", attribute.Name);
 
             if (byMessageType.TryGetValue(messageType, out var existing))
                 throw new DuplicateQueueProcessorException(messageType, existing.ProcessorType, type);
@@ -150,7 +153,10 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                 continue;
 
             if (typeof(IPublish).IsAssignableFrom(type))
+            {
+                RejectReservedCharacter("Channel", attribute.Name);
                 contracts[type] = attribute.Name;
+            }
         }
 
         return contracts;
@@ -231,6 +237,8 @@ internal sealed class DefaultTypeScanner : ITypeScanner
             if (channelAttr is null)
                 throw new ChannelAttributeMissingException(messageType);
 
+            RejectReservedCharacter("Channel", channelAttr.Name);
+
             // Read lifetime
             var lifetimeAttr = type.GetCustomAttribute<ServiceLifetimeAttribute>();
             var lifetime = lifetimeAttr?.Lifetime ?? HighwayServiceLifetime.Scoped;
@@ -283,5 +291,15 @@ internal sealed class DefaultTypeScanner : ITypeScanner
     {
         var expectedInterface = typeof(IReturn<>).MakeGenericType(responseType);
         return expectedInterface.IsAssignableFrom(requestType);
+    }
+
+    /// <summary>
+    /// Rejects a name containing the <c>@</c> character at startup, before any traffic
+    /// can derive a colliding queue key (feature 018).
+    /// </summary>
+    private static void RejectReservedCharacter(string attributeName, string name)
+    {
+        if (name.Contains('@'))
+            throw new ReservedCharacterException(attributeName, name, '@');
     }
 }

@@ -11,8 +11,6 @@ namespace Highway.Server.Internal;
 /// <code>
 /// RPC queue entry:          [u8 0xFF][u16 attempts][u16 requestIdLen][requestId][payload]
 /// RPC processing entry:     [u8 0xFF][i64 claimTicksUtc][u16 attempts][u16 requestIdLen][requestId][payload]
-/// Channel entry:            [u8 0xFF][u16 attempts][i64 messageId][payload]
-/// Group processing entry:   [u8 0xFF][i64 receiveTicksUtc][u16 attempts][i64 messageId][payload]
 /// </code>
 ///
 /// <para><b>The attempt count</b> (feature 013) is what bounds redelivery. It is
@@ -202,92 +200,6 @@ internal static class Envelope
     }
 
     // -------------------------------------------------------------------------
-    // Channel entry:  [u8 ver][u16 attempts][i64 messageId][payload]
-    // -------------------------------------------------------------------------
-
-    private const int ChannelHeader = 1 + 2 + 8;
-
-    /// <summary>Encodes a channel (pub/sub delivery) entry.</summary>
-    public static byte[] EncodeChannelEntry(long messageId, ReadOnlySpan<byte> payload, ushort attempts = 0)
-    {
-        var buf = new byte[ChannelHeader + payload.Length];
-        buf[0] = FormatVersion;
-        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(1), attempts);
-        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(3), messageId);
-        payload.CopyTo(buf.AsSpan(ChannelHeader));
-        return buf;
-    }
-
-    /// <summary>Decodes a channel entry in place (zero allocation).</summary>
-    public static void DecodeChannelEntry(
-        ReadOnlySpan<byte> data,
-        out long messageId,
-        out ReadOnlySpan<byte> payload,
-        out ushort attempts)
-    {
-        RequireCurrentFormat(data, "Channel entry");
-
-        // An entry may carry a failure block (015). It is a trailer, so it must come off
-        // before "payload is the rest" is true again.
-        data = StripFailureBlock(data);
-
-        if (data.Length < ChannelHeader)
-            throw new InvalidDataException(
-                $"Channel entry too short ({data.Length} bytes); minimum is {ChannelHeader}.");
-
-        attempts  = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(1));
-        messageId = BinaryPrimitives.ReadInt64BigEndian(data.Slice(3));
-        payload   = data.Slice(ChannelHeader);
-    }
-
-    // -------------------------------------------------------------------------
-    // Group processing entry:
-    //   [u8 ver][i64 receiveTicksUtc][u16 attempts][i64 messageId][payload]
-    // -------------------------------------------------------------------------
-
-    private const int GroupProcHeader = 1 + 8 + 2 + 8;
-
-    /// <summary>Encodes a group processing entry.</summary>
-    public static byte[] EncodeGroupProcessingEntry(
-        long receiveTicks,
-        long messageId,
-        ReadOnlySpan<byte> payload,
-        ushort attempts = 0)
-    {
-        var buf = new byte[GroupProcHeader + payload.Length];
-        buf[0] = FormatVersion;
-        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1), receiveTicks);
-        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(9), attempts);
-        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(11), messageId);
-        payload.CopyTo(buf.AsSpan(GroupProcHeader));
-        return buf;
-    }
-
-    /// <summary>Decodes a group processing entry in place (zero allocation).</summary>
-    public static void DecodeGroupProcessingEntry(
-        ReadOnlySpan<byte> data,
-        out long receiveTicks,
-        out long messageId,
-        out ReadOnlySpan<byte> payload,
-        out ushort attempts)
-    {
-        RequireCurrentFormat(data, "Group processing entry");
-
-        // An entry may carry a failure block (015). It is a trailer, so it must come off
-        // before "payload is the rest" is true again.
-        data = StripFailureBlock(data);
-
-        if (data.Length < GroupProcHeader)
-            throw new InvalidDataException(
-                $"Group processing entry too short ({data.Length} bytes); minimum is {GroupProcHeader}.");
-
-        receiveTicks = BinaryPrimitives.ReadInt64BigEndian(data.Slice(1));
-        attempts     = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(9));
-        messageId    = BinaryPrimitives.ReadInt64BigEndian(data.Slice(11));
-        payload      = data.Slice(GroupProcHeader);
-    }
-
-    // -------------------------------------------------------------------------
     // Failure block (015): an OPTIONAL trailer on any entry above.
     //
     //   <entry as framed above> [block][u32 blockLen][u32 magic]
@@ -442,16 +354,5 @@ internal static class Envelope
     {
         DecodeRpcProcessingEntry(processingEntry, out _, out var requestId, out _, out _);
         return requestId;
-    }
-
-    /// <summary>
-    /// Extracts the messageId from a group <em>processing</em> entry
-    /// (the one in <c>hw:ch:{channel}:grp:{group}:proc</c>) without allocating.
-    /// Used by <c>HW.RACK</c> for processing-list scan-and-remove.
-    /// </summary>
-    public static long GetMessageId(ReadOnlySpan<byte> processingEntry)
-    {
-        DecodeGroupProcessingEntry(processingEntry, out _, out var messageId, out _, out _);
-        return messageId;
     }
 }

@@ -21,6 +21,9 @@
          Tsavorite.core types (PinnedSpanByte) at compile time. -->
     <ProjectReference Include="..\..\libs\garnet\libs\server\Garnet.server.csproj" />
     <ProjectReference Include="..\..\libs\garnet\libs\storage\Tsavorite\cs\src\core\Tsavorite.core.csproj" />
+    <!-- Used at startup only: the pre-018 data check (T10) scans for old channel keys
+         by connecting to ourselves via SE.Redis. One SCAN that matches nothing on a clean broker. -->
+    <PackageReference Include="StackExchange.Redis" />
   </ItemGroup>
 
 </Project>

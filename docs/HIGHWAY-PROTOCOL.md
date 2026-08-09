@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 3.1**
+**Current version: 4.0**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.0 | 018 | **Pub/Sub Unification.** Removes `HW.RECEIVE` and `HW.RACK` — subscribers now consume through `HW.QCLAIM`/`HW.QACK` on derived queues named `{channel}@{group}`. Removes two entry framings (channel entry, group processing entry); `Envelope` is down to two. `HW.FAIL` and `HW.DLQ` lose the `CH` target — a group **is** a queue, targeted as `Q`. The `hw:ch:{channel}:grp:{group}:*` key space, `hw:ch:{channel}:delayed`, and the `hw:door:ch:{channel}:grp:{group}` doorbells are all gone. `@` is reserved in identifiers. **Three semantic changes (R5):** (1) batch consumption is lost — one claim per round trip replaces `HW.RECEIVE`'s batch; (2) subscriber ordering is preserved by default (concurrency 1 per group); (3) deferred publish resolves groups at **publish time**, not promotion time — a group registering during the delay does not receive the message. **Major**: removes two commands, two framings, one key space; existing channel data becomes unreachable. A broker started against pre-018 data refuses with a diagnostic message. |
 | 3.1 | 015 | **Diagnosable failures.** Adds `HW.FAIL`, which records the exception that caused a delivery to fail without acknowledging the message, and an optional **failure block** on every entry framing. Adds the `DeliveryFailed` recorder event and new dead-letter fields. Additive: the failure block is a *trailer*, so an entry written without one decodes byte-for-byte as before — unlike 013's attempt count, which changed the framings themselves. No existing command, reply or key changed. |
 | 3.0 | 014 follow-up | **The channel backlog is removed.** A publish with no registered group is delivered to nobody; `HW.SUBSCRIBE` copies nothing and a new group starts empty. `BacklogRetention`, `MaxBacklogEntries`, the `hw:ch:{channel}:backlog` key, its entry framing and the `backlog` field on `HW.STATS` are all gone. **Major**: it removes a documented guarantee. The capability moved rather than vanishing — "hold this until someone can handle it" is `HW.QSEND` and a queue, which is durable by design and has no surprising dependence on when the first subscriber started. Existing backlog data becomes unreachable; delete the data directory. |
 | 2.2 | 012 | **Security.** No command changes. `AUTH` joins the stock dependencies a client must issue against a secured server; the error contract gains a third class (`NOAUTH`, `WRONGPASS`, `NOPERM` — permanent, carrying neither existing marker); a section documents authentication, TLS and the `@dangerous` trap. Additive. |
@@ -70,8 +71,6 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.PUBLISH` | -3 | 2 | Durable fan-out to every subscriber group, immediately or at a future time |
 | `HW.SUBSCRIBE` | 3 | 1 | Register a subscriber group |
 | `HW.UNSUBSCRIBE` | 3 | 1 | Remove a subscriber group and delete its state |
-| `HW.RECEIVE` | -3 | 1 | Consume a batch of messages for a group; promotes due delayed messages and sweeps expired leases |
-| `HW.RACK` | 4 | 1 | Acknowledge a consumed message |
 | `HW.HEARTBEAT` | -2 | 3 | Register a catalog, prove liveness, or depart |
 | `HW.DISCOVER` | 2 | 1 | Live nodes hosting a service |
 | `HW.STATS` | -1 | 4 | Server, service, channel, or recorder counters |
@@ -80,7 +79,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.QSEND` | -4 | 2 | Enqueue work for exactly one processor, now or at a future time |
 | `HW.QCLAIM` | 3 | 1 | Claim the next queued message for a worker; promotes deferred work and sweeps expired leases |
 | `HW.QACK` | 4 | 1 | Acknowledge a claimed queued message |
-| `HW.FAIL` | 7 | 3 | Record why a handler failed, without acknowledging the message |
+| `HW.FAIL` | 7 | 2 | Record why a handler failed, without acknowledging the message |
 
 ---
 
@@ -105,9 +104,10 @@ Service names, channel names, group names, node IDs, request IDs and message IDs
 
 - non-empty;
 - at most `MaxIdentifierBytes` (default 256) bytes;
-- every byte `>= 0x20` and not `0x7F`.
+- every byte `>= 0x20` and not `0x7F`;
+- **must not contain `@`** (reserved for derived group queue names `{channel}@{group}` as of protocol 4.0).
 
-No C0 control characters, no DEL. Validation runs on raw bytes before any string decoding, so no key is ever derived from an invalid value. A violation is rejected with `HW_INVALID_ARG`.
+No C0 control characters, no DEL, no `@`. Validation runs on raw bytes before any string decoding, so no key is ever derived from an invalid value. A violation is rejected with `HW_INVALID_ARG`.
 
 **Why the rule exists.** Several internal keys are newline-delimited lists (see [Key Schema](#key-schema)). An identifier containing a newline would split into two entries and silently corrupt routing — a node could vanish from a worker set, or messages could fan out to a group no consumer drains. Banning the whole C0 range plus DEL is cheaper to reason about than banning newline alone and costs nothing for real identifiers.
 
@@ -192,8 +192,6 @@ Only commands that read a key during `Prepare`. That is:
 | `HW.DISCOVER` | `HW.ACK` |
 | `HW.STATS` | `HW.SUBSCRIBE` |
 | `HW.HEARTBEAT` — registration and departure forms | `HW.UNSUBSCRIBE` |
-| | `HW.RECEIVE` |
-| | `HW.RACK` |
 | | `HW.HEARTBEAT` — liveness form |
 
 The right-hand column takes its locks without a prior read, so there is no watch to invalidate.
@@ -325,15 +323,15 @@ A time already in the past delivers immediately rather than failing: clock skew 
 
 A delayed publish replies `:0` — the reply counts groups the message was *delivered* to, and nothing has been delivered yet. No doorbell is rung, because the message is in nobody's queue.
 
-**The guarantee is "not before", not an alarm clock.** A delayed message is held whole in `hw:ch:{channel}:delayed` and promoted into group queues by `HW.RECEIVE` — that is, **by consumer activity, not by a timer inside the broker**. Consequences a client implementer must know:
+**The guarantee is "not before", not an alarm clock.** A delayed message is held in each group's `hw:q:{channel}@{group}:delayed` sorted set and promoted into that group's queue by `HW.QCLAIM` — that is, **by consumer activity, not by a timer inside the broker**. Consequences a client implementer must know:
 
-- The message arrives on the first `HW.RECEIVE` after its delivery time, so practical resolution is bounded by how often consumers poll.
-- **A channel whose groups have no running consumer promotes nothing** until one starts. The message is not lost; it is not delivered either.
-- Promotion is capped at 256 messages per `HW.RECEIVE`; a larger due batch drains over successive polls.
+- The message arrives on the first `HW.QCLAIM` after its delivery time, so practical resolution is bounded by how often consumers poll.
+- **A group queue whose workers have all stopped promotes nothing** until one starts. The message is not lost; it is not delivered either.
+- Promotion is capped at 256 messages per `HW.QCLAIM`; a larger due batch drains over successive polls.
 
 A background server timer would give tighter resolution and was rejected: it writes to the keyspace, so it needs its own transaction, its own failure handling and its own interaction with AOF replay, and it runs whether or not anyone is listening. Highway already recovers abandoned work lazily in exactly this shape.
 
-**Groups are resolved at delivery time, not publish time.** The message is stored whole rather than fanned out, so a group registering during the delay receives it: a delayed publish behaves like a publish that happens later. This differs from an immediate publish, which fans out to the groups registered at that moment.
+**Groups are resolved at publish time, not promotion time (018 semantic change R5.3).** The message is fanned out into each group's delayed set immediately. A group registering *during* the delay does not receive it. This matches C2.1's own wording — "every group registered at publish time" — and C2.4, which says pub/sub is not a store for messages nobody has subscribed to.
 
 There is no way to cancel or list pending delayed messages.
 
@@ -344,8 +342,8 @@ Appends the message to every registered group's queue, atomically.
 |---|---|
 | **Arguments** | `channel` — identifier. `payload` — opaque, up to `MaxPayloadBytes`. `AT <ticks>` — optional absolute delivery time, .NET UTC ticks. |
 | **Reply** | RESP integer: the number of groups the message reached. `0` means no group is registered, or that the message is deferred and has reached none yet. |
-| **Keys written** | `hw:ch:{channel}:seq`, then every `hw:ch:{channel}:grp:{group}:q`, or — when `AT` is in the future — `hw:ch:{channel}:delayed` |
-| **Doorbell** | `hw:door:ch:{channel}:grp:{group}` per group, payload = `messageId`. **None for a delayed publish**, which is in nobody's queue yet. |
+| **Keys written** | `hw:ch:{channel}:seq`, then every `hw:q:{channel}@{group}:q`, or — when `AT` is in the future — every `hw:q:{channel}@{group}:delayed` |
+| **Doorbell** | `hw:door:q:{channel}@{group}` per group, payload = `messageId`. **None for a delayed publish**, which is in nobody's queue yet. |
 | **Idempotency** | **Not idempotent.** Repeating publishes a second message with a new ID. |
 
 Fan-out is atomic: all groups receive the message or none do. There is no partial delivery.
@@ -358,9 +356,9 @@ Highway previously held such messages in a per-channel backlog that a future sub
 
 **On transient abort the message was not delivered at all.** See [Error Contract](#error-contract).
 
-**Retry backoff is off by default, and shares the mechanism but not the scope.** A message returned to a group after a lease expiry goes into `hw:ch:{channel}:grp:{group}:retry` — a *per-group* sorted set — and is promoted back to that group's queue alone. The channel-wide delayed set is promoted to every registered group, which is correct for a delayed publish and would turn one group's retry into every other group's duplicate.
+**Retry backoff is off by default.** A message returned to a group after a lease expiry goes into `hw:q:{channel}@{group}:delayed` — the same sorted set used for deferred delivery — and is promoted back to that group's queue alone. This is the same mechanism the queue engine uses for all retry backoff.
 
-**A delayed publish uses none of the backlog path.** It is held whole in the delayed set regardless of how many groups exist, because groups are resolved when it is promoted, not when it is published.
+**A delayed publish fans out to each group's delayed set at publish time.** Each group's `hw:q:{channel}@{group}:delayed` receives one copy, so there is no separate channel-level delayed set.
 
 ### HW.SUBSCRIBE
 
@@ -368,18 +366,14 @@ Highway previously held such messages in a per-channel backlog that a future sub
 HW.SUBSCRIBE <channel> <group>   →   +OK
 ```
 
-Registers a subscriber group and, for a genuinely new group, copies the channel backlog into its queue.
+Registers a subscriber group. Creates the derived queue `{channel}@{group}` if the group is genuinely new.
 
 | | |
 |---|---|
 | **Arguments** | Both identifiers. |
 | **Reply** | `+OK` |
-| **Keys written** | `hw:ch:{channel}:groups`, `hw:ch:{channel}:grplist`, `hw:ch:{channel}:grp:{group}:q` |
-| **Idempotency** | **Idempotent.** Re-subscribing an existing group returns `+OK`, adds nothing, and does not re-copy the backlog. |
-
-The backlog is **copied, not drained**: a second group registering within the retention window receives the same messages, so late subscribers do not compete for them.
-
-The backlog copy happens **only when the group was not already registered**. Re-subscribing an existing group copies nothing — without that check, a node that re-subscribes on every start would receive the whole backlog again on every restart.
+| **Keys written** | `hw:ch:{channel}:groups`, `hw:ch:{channel}:grplist` |
+| **Idempotency** | **Idempotent.** Re-subscribing an existing group returns `+OK` and adds nothing. |
 
 Group registration is durable and survives a restart when AOF is enabled.
 
@@ -395,12 +389,12 @@ Removes the group and deletes its state.
 |---|---|
 | **Arguments** | Both identifiers. |
 | **Reply** | `+OK` |
-| **Keys** | Removes from `hw:ch:{channel}:groups` and `hw:ch:{channel}:grplist`; **deletes** `hw:ch:{channel}:grp:{group}:q` and `:proc` |
+| **Keys** | Removes from `hw:ch:{channel}:groups` and `hw:ch:{channel}:grplist`; **deletes** `hw:q:{channel}@{group}:q`, `:proc:*`, `:dlq`, `:delayed`, `:nodes`, `:nodelist` |
 | **Idempotency** | **Idempotent.** Unsubscribing an unknown group returns `+OK`. |
 
 **This deletes undelivered messages.** Everything queued for the group is discarded. That is why the .NET client never sends this command: a node's group is meant to outlive its process so a restart resumes pending messages. Send it only when a group is genuinely finished forever.
 
-A group removed this way is new again if it re-subscribes, so it receives the backlog once more.
+A group removed this way is new again if it re-subscribes, and starts empty.
 
 ### HW.RECEIVE
 
@@ -739,16 +733,17 @@ With no listener attached, `StartActivity` returns null and nothing is materiali
 ```
 HW.DLQ PEEK    SVC <service>          [COUNT n]   →   array of dead letters (non-destructive)
 HW.DLQ PEEK    Q   <queue>            [COUNT n]
-HW.DLQ PEEK    CH  <channel> <group>  [COUNT n]
 HW.DLQ REQUEUE SVC <service>          [COUNT n]   →   :n   (moved back to the live queue)
-HW.DLQ REQUEUE CH  <channel> <group>  [COUNT n]
+HW.DLQ REQUEUE Q   <queue>            [COUNT n]
 HW.DLQ PURGE   SVC <service>          [COUNT n]   →   :n   (removed)
-HW.DLQ PURGE   CH  <channel> <group>  [COUNT n]
+HW.DLQ PURGE   Q   <queue>            [COUNT n]
 ```
 
 `COUNT` defaults to `ReceiveDefaultCount` and is capped at `ReceiveMaxCount`.
 
-**How entries get here.** Nothing writes to a dead-letter list directly. An entry arrives when `HW.DEQUEUE`'s lease sweep or `HW.RECEIVE`'s group sweep finds it has exceeded `MaxDeliveryAttempts`, and moves it out of the live queue in the same transaction that removes it from the processing list.
+**Target grammar: `SVC` or `Q`.** A subscriber group's dead letters are accessed as `Q {channel}@{group}` — the derived queue name — because a group **is** a queue (feature 018). The `CH` form no longer exists.
+
+**How entries get here.** Nothing writes to a dead-letter list directly. An entry arrives when `HW.DEQUEUE`'s lease sweep or `HW.QCLAIM`'s sweep finds it has exceeded `MaxDeliveryAttempts`, and moves it out of the live queue in the same transaction that removes it from the processing list.
 
 **PEEK is non-destructive** and is listed first deliberately: the supported workflow is look, then decide. An operator who can only drain has to destroy the evidence in order to see it. Each entry is a flat field/value array — the same self-describing shape `HW.STATS` and `HW.REPLAY` use, so fields can be appended later without breaking readers:
 
@@ -757,13 +752,13 @@ deadLetteredAt  <ISO-8601 UTC>
 attempts        <n>
 reason          MAX_ATTEMPTS
 requestId       <id>            (SVC targets)
-messageId       <id>            (CH targets)
+messageId       <id>            (Q targets)
 payload         <bytes>
 ```
 
 **REQUEUE resets the attempt count to zero.** An operator requeues *after fixing something*; a message that immediately re-dead-letters has wasted the round trip. Requeue is always operator-initiated — Highway never re-feeds a dead-letter list automatically, because a queue that retries its own failures without limit is the defect this feature removes.
 
-**An unknown service, channel or group returns an empty array or `:0`, never an error**, matching `HW.DISCOVER` and `HW.STATS`.
+**An unknown service or queue returns an empty array or `:0`, never an error**, matching `HW.DISCOVER` and `HW.STATS`.
 
 **Recorded events:** none. `HW.DLQ` is an operator command, and recording reads would drown the record — the same reasoning that keeps `HW.STATS` and `HW.REPLAY` out of the recorder. The *dead-lettering* itself is recorded, by the sweep that performed it.
 
@@ -825,14 +820,13 @@ Until this arrives the message remains in the worker's processing list and will 
 ```
 HW.FAIL SVC <service> <node>  <requestId>  <type> <detail>   →   :1 recorded   |   :0 not found
 HW.FAIL Q   <queue>   <node>  <messageId>  <type> <detail>
-HW.FAIL CH  <channel> <group> <messageId>  <type> <detail>
 ```
 
 Records **why** a delivery failed. Without it a dead letter says only that something failed *n* times, and an operator has to correlate logs across every worker to learn what threw.
 
 | | |
 |---|---|
-| **Target grammar** | The same `SVC` / `Q` / `CH` forms `HW.DLQ` parses. One command serves all three families; three per-family commands would triplicate parsing for no gain. |
+| **Target grammar** | `SVC` or `Q`. A subscriber group is targeted as `Q {channel}@{group}` — the derived queue name — because a group **is** a queue (feature 018). One command serves both families. |
 | **`<type>`** | The exception type name. A separate argument, not a field inside `<detail>`, because the server itself needs it to maintain `firstType` — and reading it out of a JSON blob would mean parsing JSON inside a transaction on the failure path. |
 | **`<detail>`** | An opaque blob the server never interprets. Highway's own client sends JSON carrying the message, stack, node and timestamp. |
 | **Idempotency** | Idempotent in effect: a second report for the same message replaces the block rather than appending one. |
@@ -840,8 +834,6 @@ Records **why** a delivery failed. Without it a dead letter says only that somet
 **It does not acknowledge.** The message stays in the processing list and the lease sweep recovers it on exactly the schedule it would have. Reporting is orthogonal to delivery: a client that reports a failure has not finished with the message, it has explained itself.
 
 **A message that is no longer in the processing list returns `:0`.** Already acknowledged, already swept, or never claimed — all the same answer. A late report is a race the client cannot avoid, not an error to investigate.
-
-`CH` matches on the numeric message id; a non-integer is refused with `HW_INVALID_ARG`.
 
 #### The failure block
 
@@ -955,11 +947,8 @@ Every key Highway creates lives under the `hw:` namespace and cannot collide wit
 | `hw:ch:{channel}:groups` | Object | Set | Registered subscriber groups |
 | `hw:ch:{channel}:grplist` | Main | String | Newline-delimited mirror of the groups set |
 | `hw:ch:{channel}:seq` | Main | Integer | Message-ID counter |
-| `hw:ch:{channel}:delayed` | Object | Sorted Set | Messages awaiting a future delivery time. Score = delivery time in .NET UTC ticks, member = the channel entry |
-| `hw:ch:{channel}:grp:{group}:q` | Object | List | Undelivered messages for one group |
-| `hw:ch:{channel}:grp:{group}:proc` | Object | List | Received, not yet acknowledged |
-| `hw:ch:{channel}:grp:{group}:dlq` | Object | List | Dead letters for one group. Capped at `MaxDeadLetterEntries` |
-| `hw:ch:{channel}:grp:{group}:retry` | Object | Sorted Set | Messages held for this group's retry backoff. Score = the time they become claimable again |
+
+A subscriber group's queue, processing list, dead letters and delayed set all live under `hw:q:{channel}@{group}:*` — the standard queue key space. The derived queue name `{channel}@{group}` is what makes the `@` reservation mandatory (see [Identifiers](#identifiers)).
 
 ### Registry
 
@@ -989,8 +978,6 @@ All multi-byte integers are **big-endian** (network byte order). All lengths are
 |---|---|
 | RPC queue entry | `[u8 0xFF][u16 attempts][u16 requestIdLen][requestId][payload]` |
 | RPC processing entry | `[u8 0xFF][i64 claimTicksUtc][u16 attempts][u16 requestIdLen][requestId][payload]` |
-| Channel entry | `[u8 0xFF][u16 attempts][i64 messageId][payload]` |
-| Group processing entry | `[u8 0xFF][i64 receiveTicksUtc][u16 attempts][i64 messageId][payload]` |
 | Dead-letter entry | `[i64 deadLetteredTicksUtc][u16 attempts][u16 reasonLen][reason][original entry]` |
 | Registration record | `[i64 seenTicksUtc][catalog json bytes]` |
 
@@ -1000,7 +987,7 @@ All multi-byte integers are **big-endian** (network byte order). All lengths are
 
 The count lives *in the entry* rather than in a side key so that incrementing it is atomic with the move that caused it. A count kept beside the entry would be lost by exactly the crash it exists to survive. It saturates at `u16` maximum rather than wrapping, because a wrapped counter silently restores unbounded retry.
 
-Three paths increment it: `HW.DEQUEUE`'s lease sweep, `HW.RECEIVE`'s group lease sweep, and the dead-node prune. A path that requeued without counting would let an entry escape the limit indefinitely.
+Two paths increment it: `HW.DEQUEUE`'s lease sweep and `HW.QCLAIM`'s lease sweep. A path that requeued without counting would let an entry escape the limit indefinitely.
 
 ### The version byte, and a breaking change
 
@@ -1008,7 +995,7 @@ Three paths increment it: `HW.DEQUEUE`'s lease sweep, `HW.RECEIVE`'s group lease
 
 `0xFF` is unambiguous against every pre-existing leading byte: the high half of a `u16` identifier length (bounded by `MaxIdentifierBytes`), the high byte of a message-ID counter starting at 1, and the high byte of a .NET tick count. Raising `MaxIdentifierBytes` to 65,280 or above would break that property, and is rejected.
 
-**Upgrade path:** drain the affected queues with the previous version, or delete the data directory. Backlog entries are deliberately unversioned and unchanged — a backlog entry has never been delivered, so it carries no attempt count and gains one (at zero) when promoted into a group queue. Existing backlog data therefore survives an upgrade.
+**Upgrade path:** drain the affected queues with the previous version, or delete the data directory.
 
 Timestamps are .NET UTC tick counts (100-nanosecond intervals since 0001-01-01).
 
@@ -1026,7 +1013,8 @@ Doorbells are Garnet RESP pub/sub messages that wake waiting clients so they nee
 |---|---|---|
 | `hw:door:svc:{service}` | `HW.CALL` | `requestId` |
 | `hw:door:rep` | `HW.REPLY` | `requestId` |
-| `hw:door:ch:{channel}:grp:{group}` | `HW.PUBLISH`, once per group | `messageId` |
+| `hw:door:q:{channel}@{group}` | `HW.PUBLISH`, once per group | `messageId` |
+| `hw:door:q:{queue}` | `HW.QSEND` | `messageId` |
 
 Doorbells are rung **after** the transaction commits, and are **not** rung during AOF replay — a recovering server does not wake workers for requests that were already handled before the restart. A rejected command rings nothing.
 
@@ -1048,11 +1036,11 @@ If it crashes between the two, the reply is already delivered and the lease even
 
 ### Pub/Sub: acknowledge only after dispatch completes
 
-A consumer must send `HW.RACK` only **after** the message has been fully dispatched to its handlers.
+A consumer must send `HW.QACK` only **after** the message has been fully dispatched to its handlers.
 
 Acknowledging first turns a crash mid-dispatch into silent loss. Acknowledging last turns it into redelivery, which at-least-once permits.
 
-*Enforced by* `ChannelConsumerLoopTests.Dispatch_RacksOnlyAfterSubscribersRun`.
+*Enforced by* `SubscriptionWorkerLoop`'s structure: `ProcessAsync` calls `ExecuteSubscribersAsync` first, then `QAckAsync` only if all handlers succeed.
 
 ### Pruning requeues RPC work but never deletes subscriber groups
 

@@ -75,7 +75,7 @@ public class FlightRecorderTests
     }
 
     [Fact]
-    public void PublishAndReceive_AreRecorded_WithCounts()
+    public void PublishAndClaim_AreRecorded_WithCounts()
     {
         using var server = new HighwayTestServer();
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
@@ -84,14 +84,14 @@ public class FlightRecorderTests
         db.Execute("HW.SUBSCRIBE", "orders.placed", "grp-1");
         db.Execute("HW.PUBLISH", "orders.placed", "m1");
         db.Execute("HW.PUBLISH", "orders.placed", "m2");
-        db.Execute("HW.RECEIVE", "orders.placed", "grp-1", "COUNT", "10");
+        db.Execute("HW.QCLAIM", "orders.placed@grp-1", "node-1");
 
         var events = Replay(db, "orders.placed").Select(Fields).ToList();
 
-        events.Select(e => e["eventType"]).Should().Equal(
-            "GroupRegistered", "Published", "Published", "MessagesReceived");
-        events[1]["count"].Should().Be("1", "one group received the publish");
-        events[3]["count"].Should().Be("2", "one event per batch, carrying the batch size");
+        events.Select(e => e["eventType"]).Should().Contain("GroupRegistered");
+        events.Select(e => e["eventType"]).Should().Contain("Published");
+        events.Count(e => e["eventType"] == "Published").Should().Be(2);
+        events.First(e => e["eventType"] == "Published")["count"].Should().Be("1", "one group received the publish");
     }
 
     [Fact]

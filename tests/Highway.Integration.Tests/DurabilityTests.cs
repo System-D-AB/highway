@@ -62,9 +62,9 @@ public class DurabilityTests : IDisposable
             ((string)deqArr[1]!).Should().Be("{\"n\":1}");
 
             // Published message survives for the pre-restart group
-            var recv = (RedisResult[])db.Execute("HW.RECEIVE", "dur.ch", "grp", "COUNT", "10")!;
-            recv.Should().HaveCount(1, "published message must survive restart");
-            ((string)((RedisResult[])recv[0]!)[1]!).Should().Be("msg-dur-1");
+            var recv = db.Execute("HW.QCLAIM", "dur.ch@grp", "node-1");
+            recv.IsNull.Should().BeFalse("published message must survive restart");
+            ((string)((RedisResult[])recv!)[1]!).Should().Be("msg-dur-1");
 
             // Reply slot survives
             var reply = db.StringGet("hw:rep:req-rep-1");
@@ -94,9 +94,9 @@ public class DurabilityTests : IDisposable
             var count = (int)db.Execute("HW.PUBLISH", "grp.ch", "after-restart")!;
             count.Should().Be(1, "the pre-restart group must survive and receive");
 
-            var recv = (RedisResult[])db.Execute("HW.RECEIVE", "grp.ch", "persistent-grp", "COUNT", "10")!;
-            recv.Should().HaveCount(1);
-            ((string)((RedisResult[])recv[0]!)[1]!).Should().Be("after-restart");
+            var recv = db.Execute("HW.QCLAIM", "grp.ch@persistent-grp", "node-1");
+            recv.IsNull.Should().BeFalse();
+            ((string)((RedisResult[])recv!)[1]!).Should().Be("after-restart");
         }
     }
 
