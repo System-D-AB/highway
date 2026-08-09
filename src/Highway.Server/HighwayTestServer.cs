@@ -144,4 +144,27 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
             result.Value?.Select(q => (q.Name, q.Depth, q.Bytes)).ToArray()
                 ?? []);
     }
+
+    /// <summary>Reads the classified catalogue the way the dashboard does (022).</summary>
+    internal async Task<IReadOnlyList<Observability.CatalogueEntryDto>> ReadCatalogueAsync()
+    {
+        await using var state = new Observability.BrokerState(
+            _opts, Microsoft.Extensions.Logging.Abstractions.NullLogger<Observability.BrokerState>.Instance);
+
+        // The observed half comes from the in-process recorder, exactly as the dashboard's will.
+        var observed = _server.Recorder.Names().Select(n => n.Name).ToArray();
+        var result = await state.CatalogueAsync(observed);
+
+        return result.Value ?? [];
+    }
+
+    /// <summary>Reads the registered nodes and what each declared (022).</summary>
+    internal async Task<IReadOnlyList<Observability.NodeDto>> ReadNodesAsync()
+    {
+        await using var state = new Observability.BrokerState(
+            _opts, Microsoft.Extensions.Logging.Abstractions.NullLogger<Observability.BrokerState>.Instance);
+
+        var result = await state.NodesAsync();
+        return result.Value ?? [];
+    }
 }

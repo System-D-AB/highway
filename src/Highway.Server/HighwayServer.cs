@@ -57,6 +57,9 @@ public sealed class HighwayServer : IHighwayServer
     public string Endpoint
         => $"{_opts.BindAddress}:{_opts.Port}";
 
+    /// <summary>The flight recorder, for in-process components and tests (022).</summary>
+    internal Observability.FlightRecorder Recorder => _recorder;
+
     /// <inheritdoc/>
     public void Start()
     {
