@@ -240,3 +240,6 @@ table.grid tr.child td:first-child { padding-left: 2rem; }
 dl.detail { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin-bottom: 1.5rem; }
 dl.detail dt { color: #666; }
 dl.detail dd { margin: 0; }
+
+pre.body { background: #f7f7f9; padding: 0.75rem; overflow-x: auto;
+           border-left: 3px solid #ddd; font-size: 0.85em; }

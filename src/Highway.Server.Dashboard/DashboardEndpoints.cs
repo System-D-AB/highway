@@ -86,6 +86,56 @@ internal static class DashboardEndpoints
             return Results.Json(new CatalogueDto(rows, result.Unavailable));
         });
 
+        // Messages, not protocol events (023). The correlation and the outcome are decided on
+        // the server: a browser doing it would fetch every event to group them and re-implement
+        // what "acknowledged" means.
+        app.MapGet("/api/messages/{name}", (string name, FlightRecorder recorder) =>
+        {
+            var events = ReadAllFor(recorder, name);
+            var counts = MessageProjection.Count(name, events);
+            var messages = MessageProjection.Summarise(name, events);
+
+            return Results.Json(new MessageListDto(
+                messages.Select(m => new MessageRowDto(
+                    m.Id, m.Outcome.ToString(), m.StartedAt, m.StartedOnNode,
+                    m.CompletedAt, m.CompletedOnNode, m.DurationMs, m.FailureDetail)).ToArray(),
+                counts.Processed, counts.Failed, counts.DeadLettered, counts.Refused,
+                counts.InFlight, counts.WindowStart));
+        });
+
+        app.MapGet("/api/message/{name}/{id}", (string name, string id, FlightRecorder recorder) =>
+        {
+            var events = ReadAllFor(recorder, name)
+                .Where(e => MessageProjection.KeyOf(e) == id)
+                .ToArray();
+
+            if (events.Length == 0)
+                return Results.NotFound();
+
+            var summary = MessageProjection.Summarise(name, events).FirstOrDefault();
+            var steps = MessageProjection.Timeline(events);
+
+            // The body obeys feature 002's capture modes. The dashboard is not an exemption
+            // from the setting that exists to keep application data out of the recorder.
+            var capture = GetCaptureMode(recorder, name);
+            var payload = events.Select(e => e.Payload).FirstOrDefault(p => p is { Length: > 0 });
+
+            var state = capture switch
+            {
+                PayloadCapture.Full when payload is not null => "captured",
+                PayloadCapture.Full => "not-captured",
+                PayloadCapture.HeadersOnly => "headers-only",
+                _ => "disabled",
+            };
+
+            return Results.Json(new MessageDetailDto(
+                id, name, summary?.Outcome.ToString() ?? "Incomplete",
+                steps.Select(s => new MessageStepRowDto(
+                    s.At, s.Type, s.Visibility.ToString(), s.Node, s.SincePreviousMs, s.Detail)).ToArray(),
+                state == "captured" && payload is not null ? Convert.ToBase64String(payload) : null,
+                state));
+        });
+
         app.MapGet("/api/recorder", (FlightRecorder recorder, DashboardInfo info) =>
         {
             if (!recorder.Enabled)
@@ -228,5 +278,25 @@ internal static class DashboardEndpoints
             }
         }
         return DateTimeOffset.TryParse(value, out var parsed) ? parsed : null;
+    }
+
+    /// <summary>
+    /// Every retained event for a name, plus the reply bucket.
+    ///
+    /// <para>An RPC's reply is recorded under <c>hw.replies</c> (015's fix for one buffer per
+    /// reply), so reconstructing a request-and-response needs both names. That is the one join
+    /// in this feature which crosses recorder names.</para>
+    /// </summary>
+    private static IReadOnlyList<HighwayEvent> ReadAllFor(FlightRecorder recorder, string name)
+    {
+        if (!recorder.Enabled) return [];
+
+        var events = recorder.Read(name, DateTimeOffset.MinValue, DateTimeOffset.MaxValue, null, int.MaxValue).ToList();
+
+        var replies = recorder.Read("hw.replies", DateTimeOffset.MinValue, DateTimeOffset.MaxValue, null, int.MaxValue);
+        var ids = events.Select(MessageProjection.KeyOf).Where(k => k is not null).ToHashSet();
+
+        events.AddRange(replies.Where(r => ids.Contains(MessageProjection.KeyOf(r))));
+        return events;
     }
 }
