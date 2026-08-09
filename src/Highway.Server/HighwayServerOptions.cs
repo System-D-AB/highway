@@ -59,6 +59,22 @@ public sealed class HighwayServerOptions
     public long AofSizeLimitBytes { get; set; } = 512L * 1024 * 1024;
 
     /// <summary>
+    /// Maximum bytes a single live queue may hold. Default: 1 GB. Zero disables the limit.
+    ///
+    /// <para>After feature 018 this one setting covers both verbs — a <c>SendAsync</c> queue
+    /// and the per-group queue a <c>PublishAsync</c> fans out into are the same structure.</para>
+    ///
+    /// <para><b>Per queue, not per server (016 decision 1).</b> Ten queues at their limit is
+    /// ten gigabytes; this does <i>not</i> bound the process. That gap is recorded as
+    /// constraint C4.7 rather than left for someone to infer from the name.</para>
+    ///
+    /// <para>Reaching it <b>refuses the producer</b> rather than dropping the oldest entry.
+    /// Under C1.2 a queued message is one nobody has ever processed, so discarding it loses
+    /// exactly the data the queue exists to protect.</para>
+    /// </summary>
+    public long MaxQueueBytes { get; set; } = 1024L * 1024 * 1024;
+
+    /// <summary>
     /// Lease duration for RPC processing entries. After this period, a pending
     /// entry is considered abandoned and returned to the queue by the next
     /// <c>HW.DEQUEUE</c> call. <see cref="TimeSpan.Zero"/> disables lazy requeue.

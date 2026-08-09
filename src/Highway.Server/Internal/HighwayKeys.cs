@@ -48,6 +48,16 @@ internal static class HighwayKeys
     /// <summary>Messages that exhausted <see cref="HighwayServerOptions.MaxDeliveryAttempts"/>.</summary>
     public static string QueueDeadLetter(string queue) => $"hw:q:{queue}:dlq";
 
+    /// <summary>
+    /// Running size of a queue in bytes, as a main-store integer (feature 016).
+    /// hw:q:{queue}:bytes
+    ///
+    /// <para>Main store, not object store: it is read in <c>Prepare</c> on the enqueue path,
+    /// and reading an object-store structure there registers a watch that later exclusive
+    /// locks fail against (004.1).</para>
+    /// </summary>
+    public static string QueueBytes(string queue) => $"hw:q:{queue}:bytes";
+
     /// <summary>Messages held for retry backoff, or sent with a future delivery time.</summary>
     public static string QueueDelayed(string queue) => $"hw:q:{queue}:delayed";
 

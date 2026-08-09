@@ -23,6 +23,17 @@ internal static class HighwayErrors
     /// Identifier blank, contains a control character, exceeds the length cap,
     /// or is otherwise malformed (e.g. a non-numeric message ID).
     /// </summary>
+    /// <summary>
+    /// A queue is at its byte limit and refused the message (feature 016).
+    ///
+    /// <para><b>Permanent</b>, under the 004.1 contract: the connection does not retry it.
+    /// A full queue may well drain, which is the argument for transient — and it is the wrong
+    /// argument. A bounded client retry would hold a connection and hammer a broker already
+    /// over budget, and if the queue does not drain the caller learns nothing until the
+    /// retries are exhausted. Backpressure is information the application must act on.</para>
+    /// </summary>
+    public const string QueueFull = "HW_QUEUE_FULL";
+
     public const string InvalidArg = "HW_INVALID_ARG";
 
     /// <summary>Payload exceeds <c>MaxPayloadBytes</c>.</summary>

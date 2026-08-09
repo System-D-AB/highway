@@ -404,3 +404,26 @@ entry from its decoded parts, and the trailer is not one of the parts. The sweep
 wired first and the claim was not, so the context survived the requeue and then
 vanished. The two-worker integration test caught it; this sample run would have shown
 `failure: not reported` and looked merely disappointing rather than broken.
+
+---
+
+## 2026-08-09 — feature 016 (retention, storage, durability)
+
+**Ran:** broker startup, verifying the durability default and its logging.
+
+```
+Building Highway server: bind=127.0.0.1, port=6500,
+  dataDir=C:\Software\ai\highway\data, lease=00:05:00
+```
+
+The samples pass `--data-dir` explicitly, so they exercise the logging (R1.3) rather than the
+new default. The default itself is covered by `DurableByDefaultConfigurationTests`, and the
+restart guarantee by `DurableByDefaultTests`, which was watched failing against memory-only
+before being believed.
+
+### Findings
+
+**15. `HW_QUEUE_FULL` is not demonstrated in the samples.** R7.4 asks for it and the byte
+budget defaults to 1 GB, which no sample run will reach. Showing it needs a `--max-queue-bytes`
+flag on the sample broker plus a command that fills a queue. Recorded rather than skipped
+silently: the behaviour is covered by `ByteBudgetTests`, but the sample gap is real.

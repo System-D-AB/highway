@@ -67,6 +67,9 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
         _knownNodes = SplitList(nodeListValue);
 
         AddKey(CreateArgSlice(HighwayKeys.Queue(_queue)), LockType.Exclusive, StoreType.Object);
+        // Byte accounting (016): a claimed message leaves the live queue, so the counter
+        // follows it out. The sweep puts both back together on requeue.
+        AddKey(CreateArgSlice(HighwayKeys.QueueBytes(_queue)), LockType.Exclusive, StoreType.Main);
         AddKey(CreateArgSlice(HighwayKeys.QueueDelayed(_queue)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.QueueDeadLetter(_queue)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.QueueNodes(_queue)), LockType.Exclusive, StoreType.Object);
@@ -111,7 +114,8 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
                         decode: DecodeProcessing,
                         encodeQueueEntry: static (id, payload, attempts) =>
                             Envelope.EncodeRpcEntry(id, payload, attempts),
-                        idToString: static id => Encoding.UTF8.GetString(id));
+                        idToString: static id => Encoding.UTF8.GetString(id),
+                bytesCounterKey: HighwayKeys.QueueBytes(_queue));
 
                     foreach (var d in dead)
                         _deadLettered.Add((d.Id, d.Attempts));
@@ -132,6 +136,8 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
 
             // The attempt count travels with the claim; resetting it here would make the
             // limit unreachable, because every redelivery starts a fresh claim.
+            AdjustByteCounter(api, HighwayKeys.QueueBytes(_queue), -popped.ReadOnlySpan.Length);
+
             var procEntry = Envelope.CarryFailureBlock(
                 popped.ReadOnlySpan,
                 Envelope.EncodeRpcProcessingEntry(DateTime.UtcNow.Ticks, messageId, payload, attempts));

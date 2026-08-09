@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.0**
+**Current version: 4.1**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.1 | 016 | **Durable by default, and bounded.** No command changes. A server built with no configuration now creates a data directory beside the executable and enables AOF, so queued work survives a restart; memory-only is asked for by name (`Ephemeral()`). Adds the `HW_QUEUE_FULL` error and the `hw:q:{queue}:bytes` counter key. A full queue **refuses** rather than dropping its oldest entry, and a publish refuses in full when **any** group's queue is full, naming that group — a fan-out reaches every registered group or none. Additive: no existing command, reply or entry framing changed. |
 | 4.0 | 018 | **Pub/Sub Unification.** Removes `HW.RECEIVE` and `HW.RACK` — subscribers now consume through `HW.QCLAIM`/`HW.QACK` on derived queues named `{channel}@{group}`. Removes two entry framings (channel entry, group processing entry); `Envelope` is down to two. `HW.FAIL` and `HW.DLQ` lose the `CH` target — a group **is** a queue, targeted as `Q`. The `hw:ch:{channel}:grp:{group}:*` key space, `hw:ch:{channel}:delayed`, and the `hw:door:ch:{channel}:grp:{group}` doorbells are all gone. `@` is reserved in identifiers. **Three semantic changes (R5):** (1) batch consumption is lost — one claim per round trip replaces `HW.RECEIVE`'s batch; (2) subscriber ordering is preserved by default (concurrency 1 per group); (3) deferred publish resolves groups at **publish time**, not promotion time — a group registering during the delay does not receive the message. **Major**: removes two commands, two framings, one key space; existing channel data becomes unreachable. A broker started against pre-018 data refuses with a diagnostic message. |
 | 3.1 | 015 | **Diagnosable failures.** Adds `HW.FAIL`, which records the exception that caused a delivery to fail without acknowledging the message, and an optional **failure block** on every entry framing. Adds the `DeliveryFailed` recorder event and new dead-letter fields. Additive: the failure block is a *trailer*, so an entry written without one decodes byte-for-byte as before — unlike 013's attempt count, which changed the framings themselves. No existing command, reply or key changed. |
 | 3.0 | 014 follow-up | **The channel backlog is removed.** A publish with no registered group is delivered to nobody; `HW.SUBSCRIBE` copies nothing and a new group starts empty. `BacklogRetention`, `MaxBacklogEntries`, the `hw:ch:{channel}:backlog` key, its entry framing and the `backlog` field on `HW.STATS` are all gone. **Major**: it removes a documented guarantee. The capability moved rather than vanishing — "hold this until someone can handle it" is `HW.QSEND` and a queue, which is durable by design and has no surprising dependence on when the first subscriber started. Existing backlog data becomes unreachable; delete the data directory. |
@@ -76,7 +77,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.STATS` | -1 | 4 | Server, service, channel, or recorder counters |
 | `HW.REPLAY` | -2 | 1 | Recent recorded operations for one name |
 | `HW.DLQ` | -3 | 3 | Inspect, requeue, or purge dead letters |
-| `HW.QSEND` | -4 | 2 | Enqueue work for exactly one processor, now or at a future time |
+| `HW.QSEND` | -4 | 2 | Enqueue work for exactly one processor, now or at a future time. Refuses with `HW_QUEUE_FULL` at the byte limit |
 | `HW.QCLAIM` | 3 | 1 | Claim the next queued message for a worker; promotes deferred work and sweeps expired leases |
 | `HW.QACK` | 4 | 1 | Acknowledge a claimed queued message |
 | `HW.FAIL` | 7 | 2 | Record why a handler failed, without acknowledging the message |
@@ -171,6 +172,7 @@ Highway's own errors carry the `ERR HW_` prefix so the bare Garnet message stays
 | `WRONGPASS <detail>` | The credentials were rejected | **Permanent** |
 | `NOPERM <detail>` | Authenticated, but not permitted to run the command | **Permanent** |
 | `ERR HW_STORAGE_FORMAT <detail>` | A queue holds entries written by a pre-013 Highway. The message names the key | Permanent — drain the queue or delete the data directory |
+| `ERR HW_QUEUE_FULL <detail>` | A queue is at its byte limit. The message names the queue (or, for a publish, the **group**) and the limit | Permanent — the caller must shed load, buffer, or alert. Retrying into a full queue holds a connection and hammers a broker already over budget |
 | `ERR HW_INTERNAL <detail>` | An unexpected exception escaped a command handler | Permanent — a server bug |
 | `ERR Transaction failed.` | Garnet aborted the transaction; no work was performed | **Transient — retry** |
 | `ERR wrong number of arguments...` | Garnet's arity check, before the command runs | Permanent |
