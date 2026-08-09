@@ -516,5 +516,6 @@ get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the
 - [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) — the wire contract these guarantees are built on
 - [`roadmap.md`](roadmap.md) — what is being built and in what order
 - [`product.md`](product.md) — vision and positioning
+- [`brainstorming.md`](brainstorming.md) — design discussions that have not (yet) become features; the 2026-08-09 API-surface review and do-nothing triage live there
 - `docs/features/013-reliable-delivery/` — dead letters, delayed delivery, deduplication
 - `docs/features/014-queue/` — the queue
