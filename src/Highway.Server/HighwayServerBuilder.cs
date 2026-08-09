@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using Garnet.server;
 using Garnet.server.Auth.Settings;
@@ -63,11 +64,31 @@ public sealed class HighwayServerBuilder
 
     /// <summary>
     /// Sets the data directory for AOF and checkpoints.
-    /// When omitted, the server runs in memory-only mode (no durability).
+    ///
+    /// <para>When omitted, Highway picks one beside the executable (feature 016) — the server
+    /// is <b>durable by default</b>. Use <see cref="Ephemeral"/> to opt out deliberately.</para>
     /// </summary>
     public HighwayServerBuilder WithDataDir(string dataDir)
     {
         _opts.DataDir = dataDir;
+        _opts.Ephemeral = false;
+        return this;
+    }
+
+    /// <summary>
+    /// Runs the broker in memory: no data directory, no AOF, nothing survives the process.
+    ///
+    /// <para><b>The deliberate opt-out from durability (016 R1.4).</b> Durability as a default
+    /// only works if declining it is one call — otherwise a test suite fights the default and
+    /// somebody eventually flips the default back rather than the tests.</para>
+    ///
+    /// <para>Correct for tests and genuinely disposable brokers. Wrong for anything asked to
+    /// remember a message: every queue, group queue and dead letter is lost on exit.</para>
+    /// </summary>
+    public HighwayServerBuilder Ephemeral()
+    {
+        _opts.Ephemeral = true;
+        _opts.DataDir = null;
         return this;
     }
 
@@ -292,6 +313,8 @@ public sealed class HighwayServerBuilder
         _opts.Tls.Validate();
         ValidateDeliveryOptions(_opts);
 
+        ResolveDataDirectory(_opts);
+
         var garnetOpts = BuildGarnetOptions(_opts);
         var logger = _loggerFactory?.CreateLogger<HighwayServerBuilder>();
 
@@ -340,6 +363,63 @@ public sealed class HighwayServerBuilder
     /// Maps <see cref="HighwayServerOptions"/> to <see cref="GarnetServerOptions"/>
     /// per the design table.
     /// </summary>
+    /// <summary>
+    /// Chooses the data directory when the caller did not (016 R1, decision 4).
+    ///
+    /// <para><b>Durable by default.</b> Until this feature <c>new HighwayServerBuilder().Build()</c>
+    /// was memory-only, which made every queue and pub/sub guarantee false in the configuration
+    /// a newcomer meets first. The location is beside the executable: predictable, and findable
+    /// without reading source.</para>
+    ///
+    /// <para><b>An unusable location throws here rather than degrading.</b> A broker that
+    /// quietly becomes non-durable is the exact defect this feature removes — and it would be
+    /// worse after this change than before, because the guarantee is now documented as true.
+    /// The message names the path and both ways out.</para>
+    /// </summary>
+    private static void ResolveDataDirectory(HighwayServerOptions opts)
+    {
+        if (opts.Ephemeral)
+        {
+            opts.DataDir = null;   // asked for by name
+            return;
+        }
+
+        opts.DataDir ??= DefaultDataDirectory(opts.Port);
+
+        var dir = Path.GetFullPath(opts.DataDir);
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+
+            // Creatable is not the same as writable — a directory can exist and refuse writes.
+            // Prove it now, at Build(), rather than on the first AOF commit.
+            var probe = Path.Combine(dir, ".highway-write-probe");
+            File.WriteAllText(probe, string.Empty);
+            File.Delete(probe);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            throw new InvalidOperationException(
+                $"Highway could not use its data directory '{dir}': {ex.Message} " +
+                "A broker that cannot write cannot be durable, and silently running in memory " +
+                "would lose every message it was asked to keep. Either point it somewhere " +
+                "writable with WithDataDir(path), or ask for a memory-only broker by name with " +
+                "Ephemeral().", ex);
+        }
+
+        opts.DataDir = dir;
+    }
+
+    /// <summary>
+    /// Beside the executable, port-suffixed when the port is not the default so two brokers on
+    /// one machine do not share a directory and recover each other's data.
+    /// </summary>
+    private static string DefaultDataDirectory(int port)
+        => Path.Combine(
+            AppContext.BaseDirectory,
+            port == HighwayServerOptions.DefaultPort ? "highway-data" : $"highway-data-{port}");
+
     internal static GarnetServerOptions BuildGarnetOptions(HighwayServerOptions opts)
     {
         var garnet = new GarnetServerOptions
@@ -364,7 +444,8 @@ public sealed class HighwayServerBuilder
 
         if (opts.DataDir is not null)
         {
-            // Durable mode: AOF + storage tier + recovery
+            // Durable mode: AOF + storage tier + recovery.
+            // Since 016 this is the DEFAULT path — see ResolveDataDirectory.
             var dir = Path.GetFullPath(opts.DataDir);
 
             garnet.EnableStorageTier = true;
@@ -373,6 +454,12 @@ public sealed class HighwayServerBuilder
             garnet.EnableAOF         = true;
             garnet.CommitFrequencyMs = 0;   // commit per op
             garnet.Recover           = true;
+
+            // Bound the log (016 R6). Without this Garnet never checkpoints on size, so the
+            // AOF grows without limit and a long-lived broker replays its whole history on
+            // start. Truncation is the broker's own housekeeping — it refuses nothing.
+            if (opts.AofSizeLimitBytes > 0)
+                garnet.AofSizeLimit = opts.AofSizeLimitBytes.ToString(CultureInfo.InvariantCulture);
 
             if (opts.WaitForCommit)
                 garnet.WaitForCommit = true;

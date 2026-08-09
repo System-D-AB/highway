@@ -132,7 +132,6 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             }
 
             if (_catalog.AllQueues.Count > 0)
-                WarnIfQueuesAreNotDurable();
 
             foreach (var queue in _catalog.AllQueues)
             {
@@ -335,22 +334,4 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         _lifecycleLock.Dispose();
     }
 
-    /// <summary>
-    /// Warns once when this node processes queues (feature 014).
-    ///
-    /// <para>A queue whose contents vanish on restart contradicts the point of the concept,
-    /// and <c>new HighwayServerBuilder().Build()</c> is memory-only. Feature 016 makes
-    /// durability the default; until then the one unacceptable option is a silent lie, so
-    /// this says it out loud — once at startup, never per send.</para>
-    ///
-    /// <para>The client cannot see the server's data directory, so this is phrased as a
-    /// reminder rather than a diagnosis. A wrong-but-loud warning beats a right-but-absent
-    /// one when the failure mode is silent data loss.</para>
-    /// </summary>
-    private void WarnIfQueuesAreNotDurable()
-        => _logger.LogWarning(
-            "This node processes {Count} queue(s). A queue is only durable if the broker was started " +
-            "with a data directory — a memory-only server loses queued work on restart. Queues: {Queues}",
-            _catalog.AllQueues.Count,
-            string.Join(", ", _catalog.AllQueues.Select(q => q.Name)));
 }
