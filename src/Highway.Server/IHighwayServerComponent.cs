@@ -22,4 +22,11 @@ internal sealed record HighwayComponentContext(
     HighwayServerOptions Options,
     FlightRecorder Recorder,
     ILoggerFactory LoggerFactory,
-    string Endpoint);
+    string Endpoint,
+
+    /// <summary>
+    /// Read-only broker state, for components that need to show what is true now rather than
+    /// what has happened (020). The recorder answers the second question; this answers the
+    /// first.
+    /// </summary>
+    IBrokerState BrokerState);

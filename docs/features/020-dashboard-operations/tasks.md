@@ -11,7 +11,38 @@ task is wrong — read-only first, writes get their own feature with confirmatio
 
 ## Phase 0 — Settle the read path
 
-### - [ ] T1 — Spike: can the dashboard read broker state in-process?
+### - [x] T1 — Spike: can the dashboard read broker state in-process? **No.**
+
+**Answer: an in-process read path does not exist as supported API.** Falling back to C, the
+server-owned connection, with mTLS as a documented limitation.
+
+What the spike found:
+
+- Garnet exposes `StoreApi` for admin operations (flush, commit, checkpoint) — **not** for
+  reading keys or running commands.
+- An `EmbeddedRespServer` pattern *does* exist, but only as `internal` scaffolding inside
+  Garnet's **benchmark** project (`benchmark/BDN.benchmark/Embedded/`, ~400 lines across five
+  files). It is not a supported API.
+- Adopting it means **vendoring 400 lines of unsupported internals** and changing how Highway
+  constructs its server — `GarnetServer` takes an `IGarnetServer[]`, so a TCP and an embedded
+  transport could coexist, but every Garnet upgrade would then be able to break the dashboard's
+  read path in ways the compiler would not necessarily catch.
+
+That is more coupling than a read-only view is worth. `HighwayGarnetServer` already reaches for
+one `protected` field (`storeWrapper`) and that has been stable; a whole vendored transport is a
+different order of dependency.
+
+**So: C — a connection the SERVER builds from its own options**, not one the dashboard assembles
+from a connection string. That removes 018's actual failure mode, which was *mirroring* the
+configuration and forgetting a setting, rather than the connection itself.
+
+**What it still cannot do:** present a client certificate under
+`Tls.ClientCertificateRequired`. Named in R1.2 and handled by degrading the state views with a
+clear message — never by failing the broker, which is what 018 did.
+
+<details><summary>The original task text</summary>
+
+### T1 — Spike: can the dashboard read broker state in-process?</details>
 
 *Requirements:* R1.1, R1.4, Open Decision 1
 **Done when** one of these is true and written down:
@@ -28,7 +59,7 @@ transport-aware and *still* cannot present a client certificate under mTLS. What
 concludes must be tested against all four security configurations (T2) before anything is built
 on it.
 
-### - [ ] T2 — The security matrix, first
+### - [x] T2 — The security matrix, first
 
 *Requirements:* R1.2
 **Done when:** the chosen read path is proven against **open, password, TLS, and TLS with
@@ -38,7 +69,21 @@ on it.
 one is not a read path; it is a demo. Finding that out after four views are built means
 rewriting four views.
 
-### - [ ] T3 — `IBrokerState`, narrow and read-only
+**Done.** Six tests across open, password, TLS and mTLS. `LoopbackConnection` is the one place
+that builds a self-connection from server options — the startup check from 018 now shares it, so
+a transport setting added later is added once rather than mirrored by two callers who will
+diverge.
+
+> **Doing this first paid for itself immediately.** The TLS case failed on the first run — but in
+> the *test*, whose seeding client connected in plaintext to a TLS listener, not in the read
+> path. The read path was correct because it never assembles a connection string. Had this been
+> written after the views, that failure would have arrived tangled up with four views' worth of
+> other changes.
+
+Under mTLS the read **degrades with a reason naming the setting**, and the broker keeps running.
+018's version of this took the whole broker down.
+
+### - [x] T3 — `IBrokerState`, narrow and read-only
 
 *Requirements:* R1.1, R1.3, R1.4, R1.5
 **Done when:** one interface returns DTOs for queue state and dead letters, a failure surfaces
@@ -47,6 +92,14 @@ measured and stated.
 
 Read-only **by construction** — the interface exposes no mutation, so R1.4 is a compile-time
 fact rather than a code-review promise.
+
+**Done.** `IBrokerState` returns `StateResult<T>` — a value with either data or a reason it is
+unavailable — so a failed read is a *return*, never an exception escaping into the host. The
+connection is lazy: a broker must not fail to start because a diagnostic component could not
+connect to it.
+
+A subscriber group is identified by `@` in its derived name, which is the whole reason one view
+covers both verbs (018).
 
 ---
 

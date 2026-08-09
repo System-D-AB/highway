@@ -122,4 +122,26 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync() => _server.DisposeAsync();
+
+    /// <summary>
+    /// Reads live queue state through the same path the dashboard uses (020).
+    ///
+    /// <para>Exposed on the test server because the read path's whole risk is the security
+    /// matrix — open, password, TLS and mTLS — and that has to be provable before any view is
+    /// built on it. 018 shipped a self-connection that worked on an open broker and stopped a
+    /// TLS one from starting at all.</para>
+    /// </summary>
+    internal async Task<(string? Unavailable, IReadOnlyList<(string Name, long Depth, long Bytes)> Rows)>
+        ReadQueueStateAsync()
+    {
+        await using var state = new Observability.BrokerState(
+            _opts, Microsoft.Extensions.Logging.Abstractions.NullLogger<Observability.BrokerState>.Instance);
+
+        var result = await state.QueuesAsync();
+
+        return (
+            result.Unavailable,
+            result.Value?.Select(q => (q.Name, q.Depth, q.Bytes)).ToArray()
+                ?? []);
+    }
 }
