@@ -114,17 +114,28 @@ let a fast subscriber deny a slow one the message, which is not fan-out.
 A message leaves a group's queue when that group acknowledges it via `HW.QACK`. Storage tracks
 **undelivered** work, which in a healthy system is near zero.
 
-### C2.3 — A subscriber that is down receives what it missed
+### C2.3 — A subscriber that is down receives what it missed, **until its node is declared gone**
 
-**Status: Met.**
+**Status: Met, and now bounded** — feature 018 for the holding, feature 017 for the bound.
 
-A subscriber group outlives the process that created it. `HW.HEARTBEAT BYE` — sent
-automatically on graceful shutdown — deliberately does not remove it. A node down for a week
-returns to find its messages waiting. Verified across real processes in the sample run.
+A registered group's queue holds every publish while its subscriber is away, so a restart or a
+deploy loses nothing. That was unqualified until 017 and it could not stay that way: a guarantee
+to hold messages forever, for a node that will never return, is a guarantee to fill a disk and —
+after 016 — to block the channel for every healthy subscriber on it.
 
-**This is now true because its queue holds the work.** The group's derived queue
-(`hw:q:{channel}@{group}:q`) is the same durable structure as any other queue —
-no separate "pub/sub retention" mechanism is needed.
+The bound is **evidence-based, not a blind idle timer**. A group is retired when the node that
+owns it has been absent from the heartbeat registry past `SubscriberRetirementThreshold`
+(24 hours by default). A group nobody has *consumed* from is not dead; a group whose node has
+stopped *heartbeating* is. RabbitMQ's `x-expires` and Azure's `AutoDeleteOnIdle` cannot tell
+those apart — Highway can, because a group is a node (018).
+
+Three ways a group is retired: the node says so (`CleanAndByeForeverAsync`), an operator says it
+(`HW.HEARTBEAT <node> BYE PURGE`), or the broker decides after the threshold. Plain `BYE`
+retires nothing — *"I am stopping"* and *"I am never coming back"* are different statements and
+confusing them loses data.
+
+Retirement deletes the backlog and is **never silent**: it logs at Warning, records a
+`GroupRetired` event, and reports the messages and bytes destroyed.
 
 ### C2.4 — Pub/Sub is **not** a store for messages nobody has subscribed to
 
@@ -389,7 +400,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C1.5 | Sends can be deferred | ✅ Machinery met (013) |
 | C2.1 | At-least-once per registered group | ✅ Met |
 | C2.2 | Acknowledged means gone | ✅ Met |
-| C2.3 | A down subscriber receives what it missed | ✅ Met |
+| C2.3 | A down subscriber receives what it missed, until its node is declared gone | ✅ Met, bounded (017) |
 | C2.4 | Not a store for absent subscribers | ✅ Met |
 | C2.5 | Not a replayable log | ✅ Met |
 | C3.1 | In-flight requests survive departure | ✅ Met |

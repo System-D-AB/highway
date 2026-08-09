@@ -26,6 +26,15 @@ internal sealed class HwPublishCommand : HighwayCommandBase
     private string _channel = null!;
     private byte[] _payloadBytes = [];
     private string[] _groups = [];
+
+    /// <summary>Groups whose owning node has been absent past the retirement threshold (017).</summary>
+    private string[] _deadGroups = [];
+
+    // What this publish retired, so Finalize can log it loudly. Retirement is the largest
+    // single loss Highway can inflict, and C4.3 — a loss is never silent — applies most here.
+    private int _retiredGroups;
+    private long _retiredMessages;
+    private long _retiredBytes;
     private long _messageId;
 
     public HwPublishCommand(HighwayServerOptions opts, DoorbellBridge doorbell, FlightRecorder recorder)
@@ -49,6 +58,10 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
     protected override void ResetState()
     {
+        _deadGroups = [];
+        _retiredGroups = 0;
+        _retiredMessages = 0;
+        _retiredBytes = 0;
         _groups = [];
         _messageId = 0;
         _payloadBytes = [];
@@ -111,6 +124,50 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             AddKey(CreateArgSlice(HighwayKeys.Queue(derivedName)), LockType.Exclusive, StoreType.Object);
             AddKey(CreateArgSlice(HighwayKeys.QueueDelayed(derivedName)), LockType.Exclusive, StoreType.Object);
             AddKey(CreateArgSlice(HighwayKeys.QueueBytes(derivedName)), LockType.Exclusive, StoreType.Main);
+            AddKey(CreateArgSlice(HighwayKeys.QueueDeadLetter(derivedName)), LockType.Exclusive, StoreType.Object);
+            AddKey(CreateArgSlice(HighwayKeys.QueueNodes(derivedName)), LockType.Exclusive, StoreType.Object);
+            AddKey(CreateArgSlice(HighwayKeys.QueueNodeList(derivedName)), LockType.Exclusive, StoreType.Main);
+            AddKey(CreateArgSlice(HighwayKeys.QueueProcessing(derivedName, group)), LockType.Exclusive, StoreType.Object);
+            AddKey(CreateArgSlice(HighwayKeys.NodeChannels(group)), LockType.Exclusive, StoreType.Main);
+        }
+
+        // Automatic retirement (017) rides here rather than on a timer. A publish already reads
+        // this channel's group list and already locks every group's queue, so the check costs one
+        // main-store GET per group on a path that is about to do N pushes anyway — and the
+        // publish that WOULD be blocked by a dead subscriber is the one that clears it.
+        //
+        // Liveness evidence, not a consumption gap: a group nobody has consumed from is not
+        // dead, but a group whose node has stopped heartbeating is. RabbitMQ's x-expires and
+        // Azure's AutoDeleteOnIdle cannot tell those apart; Highway can, because a group IS a
+        // node (018).
+        if (_opts.SubscriberRetirementThreshold > TimeSpan.Zero && _groups.Length > 0)
+        {
+            // Retirement unregisters the group, which means touching the object-store SET that
+            // a publish has never needed before. Undeclared keys are rejected in Main, not here
+            // — the wall 013, 014, 015 and now 017 have each met.
+            AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);
+
+            var now = DateTime.UtcNow.Ticks;
+            var dead = new List<string>();
+
+            foreach (var group in _groups)
+            {
+                var regKey = CreateArgSlice(HighwayKeys.RegistrationNode(group));
+                AddKey(regKey, LockType.Exclusive, StoreType.Main);
+
+                api.GET(regKey, out PinnedSpanByte record);
+
+                // No registration at all is NOT evidence of death: a subscriber that never
+                // registered a catalog still has a group. Only a record that exists and has
+                // gone stale proves the node was here and stopped.
+                if (record.Length >= NodeRegistration.HeaderSize
+                    && NodeRegistration.IsStale(record.ReadOnlySpan, now, _opts.SubscriberRetirementThreshold))
+                {
+                    dead.Add(group);
+                }
+            }
+
+            _deadGroups = [.. dead];
         }
 
         return true;
@@ -160,6 +217,20 @@ internal sealed class HwPublishCommand : HighwayCommandBase
                 // Fan out to derived queue keys using RPC framing.
                 var rpcEntry = Envelope.EncodeRpcEntry(messageIdBytes, _payloadBytes);
 
+                // Retire first, so a dead subscriber cannot fail the limit check below for the
+                // living ones. This is the self-healing step: the publish that would have been
+                // refused clears the group that would have refused it.
+                foreach (var group in _deadGroups)
+                {
+                    var destroyed = RetireGroup(api, _channel, group);
+                    _retiredGroups++;
+                    _retiredMessages += destroyed.Messages;
+                    _retiredBytes += destroyed.Bytes;
+                }
+
+                if (_deadGroups.Length > 0)
+                    _groups = [.. _groups.Where(g => !_deadGroups.Contains(g))];
+
                 // Check EVERY group before writing ANY of them (016 T10). Fan-out is atomic —
                 // 018 guarantees a publish reaches every registered group or none — so a full
                 // group queue has to fail the whole publish rather than deliver a partial one.
@@ -207,6 +278,17 @@ internal sealed class HwPublishCommand : HighwayCommandBase
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
     {
         if (Failed) return; // a rejected command must never ring a doorbell
+
+        // Loud, and in the replay (017 T7). An operator who later asks "where did my
+        // subscriber's backlog go?" must be able to answer it without guessing.
+        if (_retiredGroups > 0)
+        {
+            _recorder.Record(
+                HighwayEventType.GroupRetired, _channel ?? "?",
+                count: (int)_retiredMessages,
+                errorCode: $"retired {_retiredGroups} group(s), discarded {_retiredMessages} message(s) / {_retiredBytes} byte(s)");
+        }
+
         _recorder.Record(
             HighwayEventType.Published, _channel ?? "?",
             messageId: _messageId == 0 ? null : _messageId,

@@ -232,4 +232,26 @@ internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
             RespWriteUtils.TryWriteInt32(value, ref curr, ptr + len);
         }
     }
+
+    /// <summary>
+    /// Writes a three-element RESP array of integers — used by <c>HW.HEARTBEAT BYE PURGE</c> to
+    /// report what a retirement destroyed (groups, messages, bytes).
+    ///
+    /// <para>An array rather than three commands: an operator needs the three numbers together
+    /// or none of them, and an irreversible operation should hand back its receipt in one
+    /// reply.</para>
+    /// </summary>
+    private const string Crlf = "\r\n";
+
+    protected static unsafe void WriteThreeIntegers(
+        ref MemoryResult<byte> output, long a, long b, long c)
+    {
+        var body = "*3" + Crlf + ":" + a + Crlf + ":" + b + Crlf + ":" + c + Crlf;
+        var bytes = System.Text.Encoding.ASCII.GetBytes(body);
+
+        output.MemoryOwner?.Dispose();
+        output.MemoryOwner = MemoryPool<byte>.Shared.Rent(bytes.Length);
+        output.Length = bytes.Length;
+        bytes.CopyTo(output.MemoryOwner.Memory.Span);
+    }
 }

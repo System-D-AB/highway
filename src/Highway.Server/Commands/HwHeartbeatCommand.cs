@@ -51,8 +51,12 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
 {
     /// <summary>Reserved second argument marking graceful departure.</summary>
     private static readonly byte[] ByeToken = "BYE"u8.ToArray();
+    private static readonly byte[] PurgeToken = "PURGE"u8.ToArray();
 
-    private enum Form { Liveness, Registration, Departure }
+    private enum Form { Liveness, Registration, Departure, Purge }
+
+    /// <summary>Channels this node subscribes to, read in Prepare so their keys can be declared.</summary>
+    private string[] _subscribedChannels = [];
 
     private readonly HighwayServerOptions _opts;
     private readonly FlightRecorder _recorder;
@@ -96,8 +100,38 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
 
         if (raw.SequenceEqual(ByeToken))
         {
-            _form = Form.Departure;
+            // BYE alone is "I am stopping"; BYE PURGE is "I am never coming back" (017).
+            // The difference is the subscriber groups: a node that shuts down cleanly still
+            // expects its pending messages when it returns, and one that has retired does not.
+            var third = GetNextArg(ref procInput, ref idx);
+            _form = third.Length > 0 && third.ReadOnlySpan.SequenceEqual(PurgeToken)
+                ? Form.Purge
+                : Form.Departure;
+
             PrepareTeardownKeys(api);
+
+            if (_form == Form.Purge)
+            {
+                AddKey(CreateArgSlice(HighwayKeys.NodeChannels(_nodeId)), LockType.Exclusive, StoreType.Main);
+
+                // Read from the main-store mirror, never the object-store set: reading an
+                // object structure in Prepare registers a watch that these very locks would
+                // then fail against (004.1). This is why the mirror key exists at all.
+                _subscribedChannels = ReadNodeChannels(api, _nodeId);
+
+                foreach (var channel in _subscribedChannels)
+                {
+                    AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(channel)), LockType.Exclusive, StoreType.Object);
+                    AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(channel)), LockType.Exclusive, StoreType.Main);
+
+                    var (objectKeys, mainKeys) = GroupQueueKeys(channel, _nodeId);
+                    foreach (var key in objectKeys)
+                        AddKey(CreateArgSlice(key), LockType.Exclusive, StoreType.Object);
+                    foreach (var key in mainKeys)
+                        AddKey(CreateArgSlice(key), LockType.Exclusive, StoreType.Main);
+                }
+            }
+
             return true;
         }
 
@@ -145,6 +179,10 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
                     break;
                 default:
                     RunDeparture(api, ref output);
+                    break;
+
+                case Form.Purge:
+                    RunPurge(api, ref output);
                     break;
             }
         }
@@ -233,6 +271,43 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
         RemoveRegistration(api, _nodeId);
         WriteSimpleString(ref output, "OK");
     }
+
+    /// <summary>
+    /// Departure, plus the subscriber groups (017). The node has declared it will never exist
+    /// again, so messages addressed to it alone are deleted rather than held for a return that
+    /// is not coming.
+    ///
+    /// <para><b>The asymmetry is deliberate.</b> RPC and queue work is <i>requeued</i> — a
+    /// caller may still be waiting, and queued work belongs to the queue rather than to the
+    /// node that happened to claim it. Only the subscriber's own queue is destroyed, because
+    /// nobody else can process it.</para>
+    /// </summary>
+    private void RunPurge<TGarnetApi>(TGarnetApi api, ref MemoryResult<byte> output)
+        where TGarnetApi : IGarnetApi
+    {
+        foreach (var service in _catalogServices)
+        {
+            RequeueNodeWork(api, service, _nodeId);
+            RemoveNodeFromService(api, service, _nodeId);
+            RemoveFromServiceIndex(api, service, _nodeId);
+        }
+
+        var destroyed = default(RetirementOutcome);
+        foreach (var channel in _subscribedChannels)
+            destroyed += RetireGroup(api, channel, _nodeId);
+
+        api.DELETE(CreateArgSlice(HighwayKeys.NodeChannels(_nodeId)));
+        RemoveRegistration(api, _nodeId);
+
+        _retired = destroyed;
+
+        // Returns what it destroyed, so an irreversible operation leaves a record even when
+        // nobody was watching the log.
+        WriteThreeIntegers(ref output, destroyed.Groups, destroyed.Messages, destroyed.Bytes);
+    }
+
+    /// <summary>What the purge destroyed, for the flight recorder in Finalize.</summary>
+    private RetirementOutcome _retired;
 
     // -------------------------------------------------------------------------
     // Helpers

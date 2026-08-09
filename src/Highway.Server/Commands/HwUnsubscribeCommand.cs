@@ -38,9 +38,18 @@ internal sealed class HwUnsubscribeCommand : HighwayCommandBase
 
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(_channel)), LockType.Exclusive, StoreType.Main);
-        // Lock the derived queue key so it can be cleaned up.
-        var derivedName = $"{_channel}@{_group}";
-        AddKey(CreateArgSlice(HighwayKeys.Queue(derivedName)), LockType.Exclusive, StoreType.Object);
+        // Lock every key the group's queue owns, not just the list (017 T2). Before this,
+        // unsubscribing deleted the queue and left its byte counter, delayed set, dead-letter
+        // list and processing list behind — a leak 016's byte accounting made visible, because
+        // the stale counter kept charging a queue that no longer existed.
+        AddKey(CreateArgSlice(HighwayKeys.NodeChannels(_group)), LockType.Exclusive, StoreType.Main);
+
+        var (objectKeys, mainKeys) = GroupQueueKeys(_channel, _group);
+        foreach (var key in objectKeys)
+            AddKey(CreateArgSlice(key), LockType.Exclusive, StoreType.Object);
+        foreach (var key in mainKeys)
+            AddKey(CreateArgSlice(key), LockType.Exclusive, StoreType.Main);
+
         return true;
     }
 
@@ -50,31 +59,9 @@ internal sealed class HwUnsubscribeCommand : HighwayCommandBase
 
         try
         {
-            var groupsKey    = CreateArgSlice(HighwayKeys.ChannelGroups(_channel));
-            var groupSlice    = CreateArgSlice(Encoding.UTF8.GetBytes(_group));
-
-            api.SetRemove(groupsKey, groupSlice, out _);
-
-            // Delete the derived queue key.
-            var derivedName = $"{_channel}@{_group}";
-            var derivedQueueKey = CreateArgSlice(HighwayKeys.Queue(derivedName));
-            api.DELETE(derivedQueueKey);
-
-            // Maintain main-store group list
-            var grpListKey = CreateArgSlice(HighwayKeys.ChannelGroupList(_channel));
-            PinnedSpanByte currentList;
-            api.GET(grpListKey, out currentList);
-            if (currentList.Length > 0)
-            {
-                var groups = Encoding.UTF8.GetString(currentList.ReadOnlySpan)
-                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                    .Where(g => g != _group)
-                    .ToArray();
-                if (groups.Length > 0)
-                    api.SET(grpListKey, CreateArgSlice(string.Join('\n', groups)));
-                else
-                    api.DELETE(grpListKey);
-            }
+            // One shared retirement (017 T2): deletes the queue and everything it owns,
+            // unregisters the group, and maintains both mirror lists.
+            RetireGroup(api, _channel, _group);
 
             WriteSimpleString(ref output, "OK");
         }

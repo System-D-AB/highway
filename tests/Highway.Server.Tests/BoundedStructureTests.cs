@@ -43,6 +43,7 @@ public class BoundedStructureTests
         ("hw:ch:{channel}:grplist",         "EXEMPT: main-store mirror of :groups (004.1)"),
         ("hw:reg:node:{nodeId}",            "EXEMPT: one per node; expired by heartbeat timeout (006)"),
         ("hw:reg:svc:{service}",            "EXEMPT: one per service name"),
+        ("hw:reg:node:{nodeId}:channels",   "EXEMPT: one line per channel a node subscribes to; entries removed on unsubscribe and the whole key on retirement (017)"),
 
         // --- scalars: fixed size by construction ---
         ("hw:q:{queue}:bytes",              "SCALAR: one integer, deleted when it reaches zero"),

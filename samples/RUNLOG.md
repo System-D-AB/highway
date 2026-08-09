@@ -427,3 +427,21 @@ before being believed.
 budget defaults to 1 GB, which no sample run will reach. Showing it needs a `--max-queue-bytes`
 flag on the sample broker plus a command that fills a queue. Recorded rather than skipped
 silently: the behaviour is covered by `ByteBudgetTests`, but the sample gap is real.
+
+---
+
+## 2026-08-09 — feature 017 (node decommissioning)
+
+**Ran:** the integration suite, not the samples. The samples have no way to kill a subscriber
+and wait out a retirement threshold, so the scenario that matters is covered by
+`NodeDecommissioningTests` — including the one that is the feature's whole reason to exist:
+fill a group until publishes are refused, let its node go stale, publish again, watch the
+channel recover.
+
+### Findings
+
+**16. The samples cannot demonstrate retirement, and adding it would be contrived.** R6.4 asks
+for it. Doing it honestly needs a `--retirement-threshold` flag on the sample broker plus a way
+to stop the order service without stopping the storefront — which the sample harness does not
+have. Recorded rather than faked with a shortened timer that proves nothing an operator would
+recognise.

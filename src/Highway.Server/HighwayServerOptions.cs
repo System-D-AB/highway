@@ -75,6 +75,23 @@ public sealed class HighwayServerOptions
     public long MaxQueueBytes { get; set; } = 1024L * 1024 * 1024;
 
     /// <summary>
+    /// How long a subscriber's node may be absent from the heartbeat registry before its
+    /// subscriber groups are retired and their queues deleted. Default: 24 hours.
+    /// <see cref="TimeSpan.Zero"/> disables automatic retirement.
+    ///
+    /// <para><b>The default is not a midpoint, and the asymmetry sets it</b> (feature 017).
+    /// Retiring too early loses messages a live subscriber would have processed — a
+    /// <i>correctness</i> failure against C2.3. Retiring too late leaves a channel blocked once
+    /// the dead group's queue reaches <see cref="MaxQueueBytes"/> — an <i>availability</i>
+    /// failure an operator can also fix by hand. When in doubt, wait longer.</para>
+    ///
+    /// <para>A subscriber absent for a full day is not restarting. This is deliberately far
+    /// longer than <see cref="NodeExpiry"/>, which governs liveness for routing: a node can be
+    /// too stale to receive an RPC call long before it is presumed never to return.</para>
+    /// </summary>
+    public TimeSpan SubscriberRetirementThreshold { get; set; } = TimeSpan.FromHours(24);
+
+    /// <summary>
     /// Lease duration for RPC processing entries. After this period, a pending
     /// entry is considered abandoned and returned to the queue by the next
     /// <c>HW.DEQUEUE</c> call. <see cref="TimeSpan.Zero"/> disables lazy requeue.

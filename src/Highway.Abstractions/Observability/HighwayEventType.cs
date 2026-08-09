@@ -89,4 +89,14 @@ public enum HighwayEventType
     /// than invisible. <c>ErrorCode</c> carries the exception type.
     /// </summary>
     DeliveryFailed = 17,
+
+    /// <summary>
+    /// A subscriber group was retired and its queue destroyed (feature 017). <c>Count</c>
+    /// carries the number of messages discarded.
+    ///
+    /// <para>This is the largest single loss Highway can inflict, so it is recorded whether it
+    /// was asked for (<c>BYE PURGE</c>) or decided by the broker after a node stayed absent
+    /// past the retirement threshold.</para>
+    /// </summary>
+    GroupRetired = 18,
 }

@@ -39,6 +39,11 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
 
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(_channel)), LockType.Exclusive, StoreType.Main);
+
+        // 017: the reverse index. A group IS a node (018), so this records which channels a
+        // node subscribes to — the only way retirement can derive, and therefore declare, the
+        // keys it must delete.
+        AddKey(CreateArgSlice(HighwayKeys.NodeChannels(_group)), LockType.Exclusive, StoreType.Main);
         return true;
     }
 
@@ -79,6 +84,8 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
             // prefix of history depending on when the first subscriber started — and the
             // copy materialised the entire backlog under an exclusive lock, which was
             // fatal at any serious size. A new group starts empty (feature 014 follow-up).
+
+            AddToMirrorList(api, HighwayKeys.NodeChannels(_group), _channel);
 
             WriteSimpleString(ref output, "OK");
         }
