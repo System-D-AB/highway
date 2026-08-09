@@ -61,8 +61,14 @@ internal sealed class FlightRecorder : IDisposable
     /// <inheritdoc cref="GroupsRetired"/>
     public long MessagesDiscarded => Interlocked.Read(ref _messagesDiscarded);
 
+    /// <summary>
+    /// Sends and publishes refused at a queue's byte limit (feature 016 R4.6). Cumulative.
+    /// </summary>
+    public long SendsRefused => Interlocked.Read(ref _sendsRefused);
+
     private long _groupsRetired;
     private long _messagesDiscarded;
+    private long _sendsRefused;
 
     /// <summary>Observer failure count, surfaced in snapshots.</summary>
     internal long ObserverFailures => Interlocked.Read(ref _observerFailures);
@@ -137,6 +143,9 @@ internal sealed class FlightRecorder : IDisposable
         // Counted BEFORE the enabled check: a retirement that happened must be countable even
         // on a broker whose recorder is switched off. The count is not diagnostics, it is the
         // receipt for a destructive act.
+        if (eventType == HighwayEventType.SendRefused)
+            Interlocked.Increment(ref _sendsRefused);
+
         if (eventType == HighwayEventType.GroupRetired)
         {
             Interlocked.Increment(ref _groupsRetired);
