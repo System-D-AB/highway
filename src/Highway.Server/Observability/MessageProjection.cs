@@ -41,7 +41,17 @@ internal sealed record MessageSummaryDto(
     DateTimeOffset? CompletedAt,
     string? CompletedOnNode,
     double? DurationMs,
-    string? FailureDetail);
+    string? FailureDetail,
+
+    /// <summary>
+    /// For a channel: how many subscriber groups finished this message, out of how many exist.
+    /// Null for anything that does not fan out.
+    ///
+    /// <para>A single outcome cannot describe a fan-out. Three groups where one failed is not
+    /// "failed" and not "processed", and collapsing it to either hides the half that matters.</para>
+    /// </summary>
+    int? DeliveredGroups = null,
+    int? SubscriberGroups = null);
 
 /// <summary>One step in a message's life.</summary>
 internal sealed record MessageStepDto(
@@ -87,8 +97,13 @@ internal static class MessageProjection
         => e.RequestId
            ?? e.MessageId?.ToString(CultureInfo.InvariantCulture);
 
+    /// <param name="subscriberGroups">
+    /// How many groups a channel fans out to, or 0 for an entity that does not fan out. The
+    /// caller knows this; the events do not, because a group that has received nothing leaves
+    /// no trace in them and is exactly the group worth noticing.
+    /// </param>
     public static IReadOnlyList<MessageSummaryDto> Summarise(
-        string entity, IEnumerable<HighwayEvent> events, int limit = 100)
+        string entity, IEnumerable<HighwayEvent> events, int limit = 100, int subscriberGroups = 0)
     {
         var byKey = new Dictionary<string, List<HighwayEvent>>(StringComparer.Ordinal);
 
@@ -103,13 +118,14 @@ internal static class MessageProjection
         }
 
         return byKey
-            .Select(kv => Summarise(entity, kv.Key, kv.Value))
+            .Select(kv => Summarise(entity, kv.Key, kv.Value, subscriberGroups))
             .OrderByDescending(m => m.StartedAt ?? DateTimeOffset.MinValue)
             .Take(limit)
             .ToArray();
     }
 
-    private static MessageSummaryDto Summarise(string entity, string id, List<HighwayEvent> events)
+    private static MessageSummaryDto Summarise(
+        string entity, string id, List<HighwayEvent> events, int subscriberGroups)
     {
         events.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
 
@@ -135,7 +151,18 @@ internal static class MessageProjection
             // row exists to say.
             outcome is MessageOutcome.InFlight or MessageOutcome.Incomplete ? null : terminal?.NodeId,
             startedAt is { } s && completedAt is { } c && c >= s ? (c - s).TotalMilliseconds : null,
-            terminal?.ErrorCode);
+            terminal?.ErrorCode,
+
+            // Each group is resolved on its OWN events, not on the union. A group that failed
+            // and a group that succeeded are two facts, and the union has room for one.
+            subscriberGroups > 0 ? events
+                .Select(e => e.Name)
+                .Where(n => !string.Equals(n, entity, StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal)
+                .Count(g => Resolve([.. events.Where(e => e.Name == g)], null).Item1
+                    == MessageOutcome.Processed)
+                : null,
+            subscriberGroups > 0 ? subscriberGroups : null);
     }
 
     /// <summary>
@@ -209,9 +236,10 @@ internal static class MessageProjection
     /// Counts for one entity, with the window they cover. "1,204 processed" reads as a lifetime
     /// total; "1,204 processed since 20:31" is something an operator can act on.
     /// </summary>
-    public static EntityCountsDto Count(string entity, IEnumerable<HighwayEvent> events)
+    public static EntityCountsDto Count(
+        string entity, IEnumerable<HighwayEvent> events, int subscriberGroups = 0)
     {
-        var messages = Summarise(entity, events, limit: int.MaxValue);
+        var messages = Summarise(entity, events, int.MaxValue, subscriberGroups);
         var window = events.Select(e => e.Timestamp).DefaultIfEmpty().Min();
 
         return new EntityCountsDto(

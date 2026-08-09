@@ -327,4 +327,105 @@ public class MessageProjectionTests
         MessageProjection.Count("q", events).WindowStart.Should().Be(T0,
             "\"1,204 processed\" reads as a lifetime total; the window is what makes it actionable");
     }
+
+    // ---- a publish finishes under a DIFFERENT recorder name -------------------
+
+    /// <summary>
+    /// The defect this covers was found by looking at the dashboard: every message on a channel
+    /// page read <c>InFlight</c> for ever while the samples had processed all of them.
+    ///
+    /// <para>A channel records only <c>Published</c>. The delivery and the acknowledgement are
+    /// recorded under the subscriber group, <c>{channel}@{node}</c>, so a projection given only
+    /// the channel's own events sees a message that starts and never ends. Nothing was wrong
+    /// with the outcome logic; it was being asked about half a message.</para>
+    /// </summary>
+    [Fact]
+    public void ChannelMessage_WithGroupEvents_Completes()
+    {
+        var events = new[]
+        {
+            Event(HighwayEventType.Published, "inventory.low", "7"),
+            Event(HighwayEventType.QueueClaimed, "inventory.low@node-a", "7", 15, "node-a"),
+            Event(HighwayEventType.QueueAcknowledged, "inventory.low@node-a", "7", 16, "node-a"),
+        };
+
+        var only = MessageProjection.Summarise("inventory.low", [events[0]]).Single();
+        only.Outcome.Should().Be(MessageOutcome.InFlight, "the channel alone records no ending");
+
+        var joined = MessageProjection.Summarise("inventory.low", events, subscriberGroups: 1).Single();
+
+        joined.Outcome.Should().Be(MessageOutcome.Processed);
+        joined.CompletedOnNode.Should().Be("node-a");
+        joined.DurationMs.Should().BeApproximately(16, 0.001);
+        joined.DeliveredGroups.Should().Be(1);
+        joined.SubscriberGroups.Should().Be(1);
+    }
+
+    /// <summary>
+    /// A fan-out has more than one ending, and a single outcome word has room for one. Two of
+    /// three subscribers succeeding is not "processed" and not "failed", and reporting either
+    /// hides the half that matters — so the count is carried beside the outcome.
+    /// </summary>
+    [Fact]
+    public void PartialFanout_ReportsGroupsSeparatelyFromTheOutcome()
+    {
+        var events = new[]
+        {
+            Event(HighwayEventType.Published, "orders.placed", "9"),
+            Event(HighwayEventType.QueueClaimed, "orders.placed@a", "9", 5, "a"),
+            Event(HighwayEventType.QueueAcknowledged, "orders.placed@a", "9", 6, "a"),
+            Event(HighwayEventType.QueueClaimed, "orders.placed@b", "9", 5, "b"),
+            Event(HighwayEventType.QueueAcknowledged, "orders.placed@b", "9", 7, "b"),
+            Event(HighwayEventType.QueueClaimed, "orders.placed@c", "9", 5, "c"),
+            Event(HighwayEventType.DeliveryFailed, "orders.placed@c", "9", 8, "c", "System.TimeoutException"),
+        };
+
+        var m = MessageProjection.Summarise("orders.placed", events, subscriberGroups: 3).Single();
+
+        // Each group is resolved on its OWN events. Resolving the union would let one group's
+        // acknowledgement answer for another group's failure.
+        m.DeliveredGroups.Should().Be(2);
+        m.SubscriberGroups.Should().Be(3);
+
+        // And the outcome still surfaces the failure rather than being averaged away.
+        m.Outcome.Should().Be(MessageOutcome.Failed);
+        m.FailureDetail.Should().Be("System.TimeoutException");
+    }
+
+    /// <summary>
+    /// A group that has received nothing leaves no trace in the events, and is exactly the group
+    /// worth noticing — a subscriber that is registered and getting none of the traffic. The
+    /// count therefore comes from the caller, not from the events.
+    /// </summary>
+    [Fact]
+    public void SilentGroup_IsCountedAsSubscribedButNotDelivered()
+    {
+        var events = new[]
+        {
+            Event(HighwayEventType.Published, "inventory.low", "3"),
+            Event(HighwayEventType.QueueClaimed, "inventory.low@a", "3", 4, "a"),
+            Event(HighwayEventType.QueueAcknowledged, "inventory.low@a", "3", 5, "a"),
+        };
+
+        var m = MessageProjection.Summarise("inventory.low", events, subscriberGroups: 2).Single();
+
+        m.DeliveredGroups.Should().Be(1);
+        m.SubscriberGroups.Should().Be(2);
+    }
+
+    /// <summary>An entity that does not fan out reports no fan-out, rather than "1/1".</summary>
+    [Fact]
+    public void NonChannel_ReportsNoFanout()
+    {
+        var events = new[]
+        {
+            Event(HighwayEventType.QueueSent, "invoices.generate", "4"),
+            Event(HighwayEventType.QueueAcknowledged, "invoices.generate", "4", 3, "node-a"),
+        };
+
+        var m = MessageProjection.Summarise("invoices.generate", events).Single();
+
+        m.DeliveredGroups.Should().BeNull();
+        m.SubscriberGroups.Should().BeNull();
+    }
 }

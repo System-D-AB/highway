@@ -131,7 +131,11 @@ internal sealed record MessageRowDto(
     DateTimeOffset? CompletedAt,
     string? CompletedOnNode,
     double? DurationMs,
-    string? FailureDetail);
+    string? FailureDetail,
+
+    /// <summary>Fan-out, for a channel: groups finished out of groups subscribed. Null otherwise.</summary>
+    int? DeliveredGroups,
+    int? SubscriberGroups);
 
 internal sealed record MessageListDto(
     IReadOnlyList<MessageRowDto> Messages,

@@ -27,6 +27,18 @@ function endpoint(at, node) {
     return `${esc(clock(at))}${node ? ` <span class="muted">${esc(node)}</span>` : ''}`;
 }
 
+// A publish that reached two of three subscribers is neither processed nor failed,
+// and the single outcome word has room for only one of those. This says the rest.
+function fanout(m) {
+    if (!m.subscriberGroups) return '';
+
+    const all = m.deliveredGroups === m.subscriberGroups;
+    const cls = all ? 'muted' : 'state-stale';
+
+    return `<span class="${cls}" title="Subscriber groups that finished this message">`
+        + `${m.deliveredGroups}/${m.subscriberGroups} groups</span>`;
+}
+
 function messageRow(entity, m) {
     const href = `#/message?entity=${encodeURIComponent(entity)}&id=${encodeURIComponent(m.id)}`;
     const cls = OUTCOME_CLASS[m.outcome] || 'muted';
@@ -35,7 +47,11 @@ function messageRow(entity, m) {
         <td><a href="${href}">${esc(m.id)}</a></td>
         <td>${endpoint(m.startedAt, m.startedOnNode)}</td>
         <td>${endpoint(m.completedAt, m.completedOnNode)}</td>
-        <td><span class="${cls}">${esc(m.outcome)}</span>${m.failureDetail ? ` <span class="muted">${esc(m.failureDetail)}</span>` : ''}</td>
+        <td>
+            <span class="${cls}">${esc(m.outcome)}</span>
+            ${fanout(m)}
+            ${m.failureDetail ? ` <span class="muted">${esc(m.failureDetail)}</span>` : ''}
+        </td>
         <td>${esc(ms(m.durationMs))}</td>
     </tr>`;
 }
@@ -47,8 +63,12 @@ function counts(d) {
         ? `<span class="muted">since ${esc(clock(d.windowStart))}</span>`
         : '<span class="muted">no events retained</span>';
 
-    const cell = (label, n, cls) =>
-        n ? `<div class="stat"><span>${label}</span><b class="${cls}">${n}</b></div>` : '';
+    const cell = (label, n, cls) => n
+        ? `<div class="stat">
+             <div class="stat-label">${label}</div>
+             <div class="stat-value ${cls}">${n}</div>
+           </div>`
+        : '';
 
     return `<div class="stat-grid">
         ${cell('PROCESSED', d.processed, 'state-live')}

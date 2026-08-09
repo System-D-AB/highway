@@ -132,14 +132,15 @@ internal static class DashboardEndpoints
         // what "acknowledged" means.
         app.MapGet("/api/messages/{name}", (string name, FlightRecorder recorder) =>
         {
-            var events = ReadAllFor(recorder, name);
-            var counts = MessageProjection.Count(name, events);
-            var messages = MessageProjection.Summarise(name, events);
+            var events = ReadAllFor(recorder, name, out var groups);
+            var counts = MessageProjection.Count(name, events, groups);
+            var messages = MessageProjection.Summarise(name, events, subscriberGroups: groups);
 
             return Results.Json(new MessageListDto(
                 messages.Select(m => new MessageRowDto(
                     m.Id, m.Outcome.ToString(), m.StartedAt, m.StartedOnNode,
-                    m.CompletedAt, m.CompletedOnNode, m.DurationMs, m.FailureDetail)).ToArray(),
+                    m.CompletedAt, m.CompletedOnNode, m.DurationMs, m.FailureDetail,
+                    m.DeliveredGroups, m.SubscriberGroups)).ToArray(),
                 counts.Processed, counts.Failed, counts.DeadLettered, counts.Refused,
                 counts.InFlight, counts.WindowStart));
         });
@@ -329,10 +330,32 @@ internal static class DashboardEndpoints
     /// in this feature which crosses recorder names.</para>
     /// </summary>
     private static IReadOnlyList<HighwayEvent> ReadAllFor(FlightRecorder recorder, string name)
+        => ReadAllFor(recorder, name, out _);
+
+    private static IReadOnlyList<HighwayEvent> ReadAllFor(
+        FlightRecorder recorder, string name, out int subscriberGroups)
     {
+        subscriberGroups = 0;
         if (!recorder.Enabled) return [];
 
         var events = recorder.Read(name, DateTimeOffset.MinValue, DateTimeOffset.MaxValue, null, int.MaxValue).ToList();
+
+        // A PUBLISH finishes somewhere else. The channel records Published; the delivery and the
+        // acknowledgement are recorded under each subscriber group, `{channel}@{node}`. Without
+        // this join every message on a channel page sits at InFlight for ever -- which is what
+        // it did on first contact, while the messages had in fact all been processed.
+        //
+        // Same rule as the reply join below, and the same reason: one message's life spans more
+        // than one recorder name. Splitting on '@' is how `Catalogue.Classify` decides what a
+        // group is, so this agrees with the catalogue rather than inventing a second rule.
+        var groupPrefix = name + "@";
+        foreach (var group in recorder.Names().Select(n => n.Name))
+        {
+            if (!group.StartsWith(groupPrefix, StringComparison.Ordinal)) continue;
+
+            subscriberGroups++;
+            events.AddRange(recorder.Read(group, DateTimeOffset.MinValue, DateTimeOffset.MaxValue, null, int.MaxValue));
+        }
 
         var replies = recorder.Read("hw.replies", DateTimeOffset.MinValue, DateTimeOffset.MaxValue, null, int.MaxValue);
         var ids = events.Select(MessageProjection.KeyOf).Where(k => k is not null).ToHashSet();

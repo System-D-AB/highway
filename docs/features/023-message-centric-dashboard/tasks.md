@@ -344,6 +344,50 @@ now carries the weight instead:
 
 That is a smaller gap than 022's, and unlike 022's it is a decision rather than an omission.
 
+### Defect found by looking at the running dashboard: a channel never completed
+
+Every message on a channel page read `InFlight` for ever, while the samples had processed all of
+them. Reported from a screenshot, and reproduced in one query:
+
+```
+/api/messages/inventory.low                    id 2  InFlight   no completion
+/api/messages/inventory.low@order-service-1    id 2  Processed  order-service-1, +20ms
+```
+
+**Same message, two recorder names.** A channel records only `Published`; the delivery and the
+acknowledgement are recorded under the subscriber group `{channel}@{node}`. The projection was
+sound and was being asked about half a message.
+
+The endpoint already joined `hw.replies` for exactly this reason — an RPC's reply is recorded
+under a different name than its request — and the same join was missing for channels. Splitting
+on `@` is how `Catalogue.Classify` already decides what a group is, so the fix agrees with the
+catalogue rather than inventing a second rule.
+
+**A fan-out has more than one ending, and one outcome word has room for one.** Two of three
+subscribers succeeding is not "processed" and not "failed". The row now carries `2/3 groups`
+beside the outcome, with each group resolved on **its own** events — resolving the union would
+let one group's acknowledgement answer for another group's failure. The subscriber count comes
+from the caller rather than the events, because a group that has received nothing leaves no
+trace and is exactly the group worth noticing.
+
+Four tests in `MessageProjectionTests`, all checked against deliberately-broken code. The channel
+test asserts **both** worlds — `InFlight` on the channel's own events, `Processed` once joined —
+so it cannot pass by accident.
+
+The message timeline gained the thing R1 asked for and never showed:
+
+```
+Public    Published                             —
+Internal  QueueClaimed         order-service-1  +15.6ms
+Internal  QueueAcknowledged    order-service-1  +0.5ms
+```
+
+### The counts panel rendered its label and its number as one word
+
+`IN FLIGHT2`, in the screenshot. The stylesheet has defined `.stat-label` and `.stat-value` since
+022; `entity.js` emitted a bare `<span>` and `<b>`, so neither rule applied and the two ran
+together. A markup-and-CSS mismatch that no test would have caught and one look did.
+
 ## Not done
 
 **`startedOnNode` is still unrecorded**, and this phase is more evidence it matters: the node page
