@@ -60,6 +60,24 @@ internal static class HighwayActivity
     /// Rides the envelope's optional <c>tp</c> field so a server-side span can
     /// join the caller's trace.
     /// </summary>
+    /// <summary>
+    /// Marks the current activity when a handler outruns <c>MaxProcessingTime</c> and its lease
+    /// stops being renewed (019).
+    ///
+    /// <para><b>Client-side on purpose, because it has to be.</b> The cap is a decision the
+    /// worker loop makes; nothing is sent when renewal stops, so the flight recorder — which
+    /// only sees what crosses the wire — has nothing to record. This is where that fact becomes
+    /// visible to a tracing backend.</para>
+    /// </summary>
+    public static void MarkProcessingCapExceeded(Activity? activity, string messageId, TimeSpan elapsed)
+        => activity?.AddEvent(new ActivityEvent(
+            "highway.processing_cap_exceeded",
+            tags: new ActivityTagsCollection
+            {
+                { "highway.message_id", messageId },
+                { "highway.elapsed_ms", (long)elapsed.TotalMilliseconds },
+            }));
+
     public static string? CurrentTraceParent()
         => Activity.Current is { IdFormat: ActivityIdFormat.W3C } current ? current.Id : null;
 
