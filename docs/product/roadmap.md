@@ -299,6 +299,35 @@ the shape of the feature, so the design is not written until they are settled.
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
 
+### 023 — Messages, Not Protocol Events  ← **next**
+
+**Specced** — `docs/features/023-message-centric-dashboard/`. 022 made the dashboard show *what
+exists*. Clicking into a queue still shows six rows of `QueueSent` / `QueueClaimed` /
+`QueueAcknowledged` for two messages — **not one of them a thing the developer did**. The page
+cannot answer the first question anyone asks: how many succeeded, and how many failed?
+
+**The unit is wrong.** A row per protocol event, where the unit of meaning is a *message* — sent
+once, processed once, with an outcome.
+
+**The correlation key is already in every event and nothing has ever grouped by it.** RPC and
+queue events carry `requestId`; a publish carries the channel sequence and fans that same number
+into each group's entry. A message's whole life — including its journey across nodes — is
+reconstructible from data the recorder has held since 002.
+
+Three views, all projections of the same events: **by entity** (what is happening to
+`orders.create`), **by message** (what happened to this one order, across every node, with the
+body and the reply), **by node** (what is this host doing).
+
+**The architectural answer to "the dashboard is becoming an application":** it is, and **the
+server aggregates while the browser renders**. That rule has now survived three features — the
+browser must not learn the key layout (020), must not parse a name (022), must not decide what
+acknowledged means (023) — and at three it is a principle rather than a preference. No build
+step; server-side aggregation is what keeps a thin client thin.
+
+Also lands 022's deferred node address, done properly: `NodeRegistration` gains a **version
+byte in the same change as the field**, because adding one to an unversioned binary format is
+exactly how 013's storage break happened.
+
 ### 022 — Dashboard: A Catalogue, Not a List of Names
 
 **Specced** — `docs/features/022-dashboard-catalogue/`. Run against the samples, the dashboard's
