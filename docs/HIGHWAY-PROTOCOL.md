@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.2**
+**Current version: 4.3**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.3 | 019 | **Long-running tasks.** Adds `HW.TOUCH SVC/Q`, which moves a claimed entry's timestamp forward so a handler that outlives `Lease` is not duplicated while it is still running. No new field, framing or key — the sweep already decides expiry from that timestamp. Adds the `ProcessingCapExceeded` recorder event. **One behaviour change:** the client renews automatically by default, so a **hung** handler is now recovered after `MaxProcessingTime` (15 min) rather than after `Lease` (5 min). Deliberate: a slow-but-working handler executed five times and dead-lettered corrupts data, while a hung one taking ten minutes longer to recover is a delay. `MaxProcessingTime = TimeSpan.Zero` restores the old behaviour exactly. |
 | 4.2 | 017 | **Node decommissioning.** Adds `HW.HEARTBEAT <node> BYE PURGE` — a third form that retires a node permanently, destroying its subscriber queues and returning `[groups, messages, bytes]`. Plain `BYE` is unchanged and still preserves a subscriber's backlog: `BYE` is "I am stopping", `PURGE` is "I am never coming back". Adds the `hw:reg:node:{nodeId}:channels` mirror key and the `GroupRetired` recorder event. **A subscriber group whose node has been absent past `SubscriberRetirementThreshold` (24h default) is now retired automatically**, which is what stops one dead subscriber blocking a channel once its queue reaches `MaxQueueBytes`. Additive — no existing command, reply or entry framing changed. |
 | 4.1 | 016 | **Durable by default, and bounded.** No command changes. A server built with no configuration now creates a data directory beside the executable and enables AOF, so queued work survives a restart; memory-only is asked for by name (`Ephemeral()`). Adds the `HW_QUEUE_FULL` error and the `hw:q:{queue}:bytes` counter key. A full queue **refuses** rather than dropping its oldest entry, and a publish refuses in full when **any** group's queue is full, naming that group — a fan-out reaches every registered group or none. Additive: no existing command, reply or entry framing changed. |
 | 4.0 | 018 | **Pub/Sub Unification.** Removes `HW.RECEIVE` and `HW.RACK` — subscribers now consume through `HW.QCLAIM`/`HW.QACK` on derived queues named `{channel}@{group}`. Removes two entry framings (channel entry, group processing entry); `Envelope` is down to two. `HW.FAIL` and `HW.DLQ` lose the `CH` target — a group **is** a queue, targeted as `Q`. The `hw:ch:{channel}:grp:{group}:*` key space, `hw:ch:{channel}:delayed`, and the `hw:door:ch:{channel}:grp:{group}` doorbells are all gone. `@` is reserved in identifiers. **Three semantic changes (R5):** (1) batch consumption is lost — one claim per round trip replaces `HW.RECEIVE`'s batch; (2) subscriber ordering is preserved by default (concurrency 1 per group); (3) deferred publish resolves groups at **publish time**, not promotion time — a group registering during the delay does not receive the message. **Major**: removes two commands, two framings, one key space; existing channel data becomes unreachable. A broker started against pre-018 data refuses with a diagnostic message. |
@@ -82,6 +83,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.QCLAIM` | 3 | 1 | Claim the next queued message for a worker; promotes deferred work and sweeps expired leases |
 | `HW.QACK` | 4 | 1 | Acknowledge a claimed queued message |
 | `HW.FAIL` | 7 | 2 | Record why a handler failed, without acknowledging the message |
+| `HW.TOUCH` | 5 | 2 | Renew a claimed message's lease, without acknowledging it |
 
 ---
 
@@ -837,6 +839,37 @@ Records **why** a delivery failed. Without it a dead letter says only that somet
 **It does not acknowledge.** The message stays in the processing list and the lease sweep recovers it on exactly the schedule it would have. Reporting is orthogonal to delivery: a client that reports a failure has not finished with the message, it has explained itself.
 
 **A message that is no longer in the processing list returns `:0`.** Already acknowledged, already swept, or never claimed — all the same answer. A late report is a race the client cannot avoid, not an error to investigate.
+
+### HW.TOUCH
+
+```
+HW.TOUCH SVC <service> <node> <requestId>   →   :1 renewed   |   :0 not found
+HW.TOUCH Q   <queue>   <node> <messageId>
+```
+
+Says "still working" about a message this node has claimed. Without it, a handler that outlives
+`Lease` has its message requeued **while it is still running** — a concurrent duplicate caused
+by nothing but slowness, not by a failure.
+
+| | |
+|---|---|
+| **Target grammar** | The `SVC` / `Q` forms `HW.FAIL` and `HW.DLQ` already parse. A subscriber group's queue is a queue (4.0), so `{channel}@{group}` needs no third form |
+| **Effect** | The entry's claim timestamp becomes now. Nothing else changes — not the attempt count, not the payload, not the byte counters, not its position in the list |
+| **Idempotency** | Idempotent: renewing twice is renewing |
+
+**It does not acknowledge.** The message stays claimed and every recovery path still applies.
+
+**The failure block survives renewal.** An entry that already reported a failure keeps its
+`firstType` — the trailer is carried across the rewrite rather than rebuilt from decoded parts.
+
+**A message that is no longer in the processing list returns `:0`.** Already acknowledged,
+already swept, never claimed — all the same answer. A late renewal is a race the client cannot
+avoid, not an error to investigate.
+
+**Renewal is bounded by the client, not the server.** The server renews whenever asked; the
+client stops after `MaxProcessingTime` so a hung handler is still recovered. Unbounded renewal
+would delete lease recovery — a deadlocked handler would hold its message forever, never
+redelivered, never dead-lettered, never visible.
 
 #### The failure block
 

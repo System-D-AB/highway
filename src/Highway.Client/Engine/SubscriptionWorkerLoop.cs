@@ -38,8 +38,10 @@ internal sealed class SubscriptionWorkerLoop : SingleMessageWorkerLoop
         string nodeName,
         int concurrency,
         LoopWake wake,
-        ILogger logger)
-        : base(descriptor.MessageType, connection, executor, nodeName, concurrency, wake, logger)
+        ILogger logger,
+        TimeSpan renewalInterval = default,
+        TimeSpan maxProcessingTime = default)
+        : base(descriptor.MessageType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime)
     {
         _descriptor = descriptor;
         _derivedQueueName = $"{descriptor.Name}@{nodeName}";

@@ -299,6 +299,19 @@ the shape of the feature, so the design is not written until they are settled.
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
 
+### 019 — Long-Running Tasks  ✅ **shipped**
+
+`HighwayServerOptions.Lease` defaults to 5 minutes and could not be extended, so a handler that
+outlived it had its message requeued **while it was still running** — a concurrent duplicate
+caused by nothing but slowness. A twenty-minute job ran five times and then dead-lettered.
+
+`HW.TOUCH` moves a claimed entry's timestamp forward; the client renews automatically while a
+handler runs. **Bounded by `MaxProcessingTime` (15 min)** — unbounded renewal would delete lease
+recovery, letting a deadlocked handler hold its message forever.
+
+For work measured in hours, renewal is the wrong tool:
+[`docs/cookbook/long-running-work.md`](../cookbook/long-running-work.md) documents chunk-and-checkpoint.
+
 ### 017 — Node Decommissioning  ← **next**
 
 **Specced** — `docs/features/017-node-decommissioning/`. A node that is never coming back can

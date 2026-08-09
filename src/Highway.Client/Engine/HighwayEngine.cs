@@ -89,7 +89,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 var loop = new RpcWorkerLoop(
                     service, _connection, executor, _options.NodeName,
                     _options.WorkerConcurrency, wake,
-                    _loggerFactory.CreateLogger($"Highway.Worker.{service.Name}"));
+                    _loggerFactory.CreateLogger($"Highway.Worker.{service.Name}"),
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
                     CancellationToken.None));
@@ -105,7 +106,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 var loop = new SubscriptionWorkerLoop(
                     channel, _connection, executor, _options.NodeName,
                     1, wake,
-                    _loggerFactory.CreateLogger($"Highway.Subscriber.{channel.Name}"));
+                    _loggerFactory.CreateLogger($"Highway.Subscriber.{channel.Name}"),
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
                     CancellationToken.None));
@@ -139,7 +141,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 var loop = new QueueWorkerLoop(
                     queue, _connection, executor, _options.NodeName,
                     _options.WorkerConcurrency, wake,
-                    _loggerFactory.CreateLogger($"Highway.Queue.{queue.Name}"));
+                    _loggerFactory.CreateLogger($"Highway.Queue.{queue.Name}"),
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
                     CancellationToken.None));
@@ -200,6 +203,21 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             _runningTasks.AddRange(loopTasks);
             _state = EngineState.Running;
 
+            // 019 R5: a reminder, not a diagnosis. Some deployments genuinely prefer a fast
+            // drain and accept redelivery — this says what will happen and does not refuse to
+            // start. Feature 014's memory-only-queue precedent: the one unacceptable option is
+            // a silent surprise.
+            if (_options.MaxProcessingTime > _options.DrainTimeout)
+            {
+                _logger.LogWarning(
+                    "MaxProcessingTime ({Cap}) exceeds DrainTimeout ({Drain}). A handler still " +
+                    "running at shutdown will be cancelled mid-flight after {Drain} and its message " +
+                    "redelivered - the work is not lost, but it will be done again. Raise " +
+                    "DrainTimeout to let long handlers finish, or keep this if a fast drain matters " +
+                    "more.",
+                    _options.MaxProcessingTime, _options.DrainTimeout, _options.DrainTimeout);
+            }
+
             _logger.LogInformation(
                 "Highway engine running: node '{Node}', server '{Server}', {Services} services, {Channels} channels, doorbells {Doorbells}",
                 // Redacted: this string routinely carries a password now, and Information
@@ -246,8 +264,14 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         // have already done its own cleanup. Found by the test rather than by reading the code.
         await StopAsync(ct).ConfigureAwait(false);
 
+        // Server is validated at StartAsync, so reaching here without one is impossible — but
+        // saying so beats a null-forgiving operator that hides a real regression later.
+        var server = _options.Server
+            ?? throw new InvalidOperationException(
+                "Cannot retire a node without a server address; the engine was never started.");
+
         await using var purgeConnection = await HighwayConnection
-            .ConnectAsync(_options.Server, _options, ct).ConfigureAwait(false);
+            .ConnectAsync(server, _options, ct).ConfigureAwait(false);
 
         var destroyed = await purgeConnection.PurgeAsync(_options.NodeName, ct).ConfigureAwait(false);
 
