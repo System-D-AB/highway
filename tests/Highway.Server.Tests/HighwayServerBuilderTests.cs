@@ -45,7 +45,7 @@ public class HighwayServerBuilderTests
         using var server = new HighwayServerBuilder()
             .WithPort(6591)
             .WithBindAddress("127.0.0.1")
-            .Build();
+            .Ephemeral().Build();
 
         server.Endpoint.Should().Be("127.0.0.1:6591");
     }
@@ -56,7 +56,7 @@ public class HighwayServerBuilderTests
         using var server = new HighwayServerBuilder()
             .WithPort(6592)
             .WithBindAddress(IPAddress.Loopback)
-            .Build();
+            .Ephemeral().Build();
 
         server.Endpoint.Should().Be("127.0.0.1:6592");
     }
@@ -66,7 +66,7 @@ public class HighwayServerBuilderTests
     {
         var builder = new HighwayServerBuilder().WithBindAddress("not-an-ip-address");
 
-        var act = () => builder.Build();
+        var act = () => builder.Ephemeral().Build();
 
         act.Should().Throw<ArgumentException>()
             .WithMessage("*not-an-ip-address*");
@@ -75,7 +75,7 @@ public class HighwayServerBuilderTests
     [Fact]
     public void Endpoint_DefaultRendersConfiguredAddress()
     {
-        using var server = new HighwayServerBuilder().WithPort(6593).Build();
+        using var server = new HighwayServerBuilder().WithPort(6593).Ephemeral().Build();
 
         server.Endpoint.Should().Be("127.0.0.1:6593");
     }
@@ -85,7 +85,7 @@ public class HighwayServerBuilderTests
     {
         using var server = new HighwayServerBuilder()
             .WithOptions(o => o.Port = 6594)
-            .Build();
+            .Ephemeral().Build();
 
         server.Endpoint.Should().Be("127.0.0.1:6594");
     }

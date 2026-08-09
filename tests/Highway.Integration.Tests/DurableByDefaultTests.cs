@@ -235,6 +235,82 @@ public class DurableByDefaultConfigurationTests
                 "eventually flips the default back rather than the tests");
     }
 
+    /// <summary>
+    /// A data directory written by an older build must be refused <b>before</b> Garnet tries to
+    /// recover from it.
+    ///
+    /// <para><b>Found by running the samples.</b> Garnet's AOF stores a positional
+    /// stored-procedure id per record; feature 018 removed two commands, so every id after them
+    /// shifted and replaying an older log fails with "Transaction procedure N not found".
+    /// Recovery then aborts and the broker carries on with an <b>empty store</b> — healthy to
+    /// every outward appearance, and missing every message it was asked to keep.</para>
+    ///
+    /// <para>018's own guard scanned for leftover <c>hw:ch:*:grp:*</c> keys, which can only be
+    /// found when recovery <i>succeeded</i>. It looked for a symptom that is absent in exactly
+    /// the worst case.</para>
+    /// </summary>
+    [Fact]
+    public void ADataDirectoryFromAnOlderBuild_IsRefusedBeforeRecovery()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "hw-oldfmt-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(Path.Combine(dir, "checkpoints"));   // looks like a used dir
+        try
+        {
+            var build = () => new HighwayServerBuilder()
+                .WithPort(Highway.Server.Internal.EphemeralPort.Probe())
+                .WithDataDir(dir)
+                .Build();
+
+            var thrown = build.Should().Throw<InvalidOperationException>();
+            thrown.WithMessage("*storage format*");
+            thrown.WithMessage("*delete the directory*");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void AMismatchedStorageFormat_IsRefusedNamingWhatItFound()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "hw-badfmt-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "highway.format"), "1");
+        try
+        {
+            var build = () => new HighwayServerBuilder()
+                .WithPort(Highway.Server.Internal.EphemeralPort.Probe())
+                .WithDataDir(dir)
+                .Build();
+
+            build.Should().Throw<InvalidOperationException>()
+                .WithMessage("*format '1'*", "the message names what it found, not just that it disagreed");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void AFreshDataDirectory_IsStampedSoTheNextBuildCanCheckIt()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "hw-fresh-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            using (var server = new HighwayServerBuilder()
+                .WithPort(Highway.Server.Internal.EphemeralPort.Probe())
+                .WithDataDir(dir)
+                .Build())
+            {
+                File.Exists(Path.Combine(dir, "highway.format")).Should().BeTrue();
+            }
+
+            // And a second start against its own directory is fine — the stamp matches.
+            var again = () => new HighwayServerBuilder()
+                .WithPort(Highway.Server.Internal.EphemeralPort.Probe())
+                .WithDataDir(dir)
+                .Build();
+            again.Should().NotThrow();
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch { } }
+    }
+
     [Fact]
     public void AnUnusableDataDirectory_ThrowsAtBuild_NamingBothWaysOut()
     {

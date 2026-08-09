@@ -26,3 +26,8 @@ BenchmarkDotNet.Artifacts/
 # OS files
 Thumbs.db
 .DS_Store
+
+# Feature 016 made durability the default, so every run creates one of these.
+data/
+highway-data/
+highway-data-*/
