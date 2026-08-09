@@ -208,3 +208,35 @@ button.active { background: var(--accent); color: #fff; border-color: var(--acce
     .filter-bar { flex-direction: column; align-items: stretch; }
     .truncate { max-width: 80px; }
 }
+
+/* ---- feature 022: catalogue, nodes, entity pages ---------------------------- */
+
+nav { margin: 0.75rem 0; display: flex; gap: 1.25rem; }
+nav a { text-decoration: none; padding-bottom: 2px; border-bottom: 2px solid transparent; }
+nav a.active { border-bottom-color: currentColor; font-weight: 600; }
+
+/* Errors are keyed by source and never share space with broker identity (R-4A). */
+.error-region { margin: 0.5rem 0; padding: 0.5rem 0.75rem;
+                border-left: 3px solid #b00; background: #fff5f5; }
+.error-row + .error-row { margin-top: 0.25rem; }
+
+table.grid { width: 100%; border-collapse: collapse; margin-bottom: 1.5rem; }
+table.grid th { text-align: left; font-weight: 600; border-bottom: 1px solid #ddd; padding: 0.4rem 0.5rem; }
+table.grid td { padding: 0.4rem 0.5rem; border-bottom: 1px solid #f0f0f0; }
+table.grid tr.child td:first-child { padding-left: 2rem; }
+
+.muted { color: #777; }
+.unavailable { color: #a60; background: #fffbf0; padding: 0.5rem 0.75rem; border-left: 3px solid #a60; }
+
+/* State reads as an interpretation, not a colour to decode. */
+.state-live   { color: #0a0; }
+.state-stale  { color: #a60; }
+.state-absent { color: #b00; }
+
+.kind-badge { font-size: 0.7em; text-transform: uppercase; letter-spacing: 0.05em;
+              color: #666; border: 1px solid #ccc; border-radius: 3px;
+              padding: 0.1rem 0.35rem; vertical-align: middle; }
+
+dl.detail { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin-bottom: 1.5rem; }
+dl.detail dt { color: #666; }
+dl.detail dd { margin: 0; }

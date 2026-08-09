@@ -31,6 +31,61 @@ internal static class DashboardEndpoints
             return ctx.Response.WriteAsync(EmbeddedResources.GetJs());
         });
 
+        // Every module under wwwroot/js is served by one route: adding a view means adding a
+        // file, not a route. No build step — the browser resolves the imports (022 R-5A).
+        app.MapGet("/js/{module}.js", (string module, HttpContext ctx) =>
+        {
+            // Whitelisted by shape, not sanitised: a module name is an identifier, and anything
+            // that is not one is not a module.
+            if (!module.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))
+                return Results.NotFound();
+
+            ctx.Response.ContentType = "application/javascript; charset=utf-8";
+            ctx.Response.Headers.CacheControl = "no-store";
+            return Results.Text(EmbeddedResources.GetModule(module), "application/javascript");
+        });
+
+        app.MapGet("/api/nodes", async (IBrokerState state) =>
+        {
+            var result = await state.NodesAsync();
+            if (result.Value is null)
+                return Results.Json(new NodesDto([], result.Unavailable));
+
+            var rows = result.Value.Select(n => new NodeRowDto(
+                n.Name,
+
+                // Liveness is interpreted here, not in the browser. "Last seen 14:02:11" makes
+                // an operator do arithmetic; "stale 4m" does not (022 R2.2).
+                n.IsLive ? "live" : n.SinceLastSeen > TimeSpan.FromHours(1) ? "absent" : "stale",
+                n.SinceLastSeen.TotalSeconds,
+                n.Services, n.Queues, n.Channels)).ToArray();
+
+            return Results.Json(new NodesDto(rows, null));
+        });
+
+        app.MapGet("/api/catalogue", async (IBrokerState state, FlightRecorder recorder) =>
+        {
+            // The recorder is in-process and needs no connection, so the observed half survives
+            // even when the declared half cannot be read (022 R-3A, mTLS).
+            var observed = recorder.Names().Select(n => n.Name).ToArray();
+
+            var result = await state.CatalogueAsync(observed);
+            var queues = await state.QueuesAsync();
+            var byName = queues.Value?.ToDictionary(q => q.Name) ?? [];
+
+            var rows = (result.Value ?? [])
+                .Select(e =>
+                {
+                    byName.TryGetValue(e.Name, out var q);
+                    return new CatalogueRowDto(
+                        e.Name, e.Kind.ToString(), e.State.ToString(), e.ParentChannel, e.Hosts,
+                        q?.Depth, q?.Bytes, q?.MaxBytes, q?.DeadLettered);
+                })
+                .ToArray();
+
+            return Results.Json(new CatalogueDto(rows, result.Unavailable));
+        });
+
         app.MapGet("/api/recorder", (FlightRecorder recorder, DashboardInfo info) =>
         {
             if (!recorder.Enabled)

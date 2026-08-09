@@ -52,6 +52,7 @@ internal sealed class DashboardComponent : IHighwayServerComponent
             builder.Services.AddSingleton(_options);
             builder.Services.AddSingleton(_context.Recorder);
             builder.Services.AddSingleton(new DashboardInfo(_context.Endpoint));
+            builder.Services.AddSingleton(_context.BrokerState);
             builder.Services.AddSingleton(new StreamRegistry(_options.MaxConcurrentStreams));
 
             _app = builder.Build();

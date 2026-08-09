@@ -10,6 +10,9 @@ internal static class EmbeddedResources
     public static string GetCss() => ReadResource("app.css");
     public static string GetJs() => ReadResource("app.js");
 
+    /// <summary>One ES module from <c>wwwroot/js</c> (022 R-5A).</summary>
+    public static string GetModule(string name) => ReadResource($"js.{name}.js");
+
     private static string ReadResource(string name)
     {
         var fullName = Assembly.GetManifestResourceNames()
