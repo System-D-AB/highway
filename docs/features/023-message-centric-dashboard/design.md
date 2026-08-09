@@ -8,6 +8,7 @@
 > | 2 | Correlation key | **Message id, scoped by entity.** Trace context is a later enrichment |
 > | 3 | Retained window | **Stated, not extended.** A longer index is registered, not built |
 > | 4 | Relationship to 022's entity page | **Extends it.** One page answers one question |
+> | 5 | Public vs Internal events | **A property of the event type, on the server** |
 
 ## The shape of the change
 
@@ -81,6 +82,54 @@ for this — and it lives in the **payload**. Correlation would then stop workin
 operator sets `HeadersOnly` for privacy, which is exactly when they still need to know what
 happened. An id is present regardless.
 
+## Decision 5 — Public and Internal, and why the distinction is the feature
+
+Every event type is one or the other, decided once, on the server:
+
+| Event | | Why |
+|---|---|---|
+| `RpcEnqueued` | **Public** | the developer called `ExecuteAsync` |
+| `RpcReplied` | **Public** | the handler produced an answer |
+| `Published` | **Public** | the developer called `PublishAsync` |
+| `QueueSent` | **Public** | the developer called `SendAsync` |
+| `DeliveryFailed` | **Public** | a handler threw — the developer's problem |
+| `QueueDeadLettered`, `RpcDeadLettered` | **Public** | the message is dead; someone must act |
+| `SendRefused` | **Public** | the send did not happen |
+| `RpcClaimed`, `QueueClaimed` | Internal | the broker handed work to a worker |
+| `RpcAcknowledged`, `QueueAcknowledged` | Internal | the broker recorded completion |
+| `GroupRegistered`, `GroupRemoved` | Internal | topology, not traffic |
+| `NodeRegistered`, `NodeDeparted`, `NodeSuspect`, `GroupRetired` | Internal | operational, not message-scoped |
+| `LeaseRenewed`, `ProcessingCapExceeded` | Internal | the broker keeping a claim alive |
+
+### The subtlety that makes this more than a filter
+
+**Highway has no "the handler finished" event.** The acknowledgement *is* the evidence that it
+did. So the fact an operator needs — *processed at 8:35:47 on order-service-1* — is Public, and
+the only record of it is an event classified Internal.
+
+```
+event                        classification   what the view shows
+-----                        --------------   -------------------
+QueueSent                    Public           sent 8:35:47.201  shop-1
+QueueClaimed                 Internal         (hidden by default)
+QueueAcknowledged            Internal    ---> processed 8:35:47.248  order-service-1
+```
+
+**So the projection derives Public *facts*, and the classification governs which raw events are
+shown as steps.** They are two different jobs, and conflating them would produce a message list
+that says "acknowledged" — the exact word this feature exists to stop showing.
+
+### What a summary row is made of
+
+```
+started    the first Public event    ->  when + WHICH NODE
+completed  the terminal fact         ->  when + WHICH NODE, or why not
+```
+
+**Two nodes, never one.** A message is usually produced on one node and processed on another;
+"shop-1 sent it, order-service-1 processed it" is the whole point of the row. A single node
+column would have to choose, and would choose wrong half the time.
+
 ## The message projection
 
 ```csharp
@@ -91,10 +140,20 @@ internal sealed record MessageSummaryDto(
     DateTimeOffset FirstSeen,
     TimeSpan? Duration,
     string? FailureType,
-    int NodeCount);
+
+    // Two nodes, because a message usually crosses them. Either may be null when the
+    // recorder's window no longer holds that end of the story.
+    string? StartedOnNode,
+    DateTimeOffset? CompletedAt,
+    string? CompletedOnNode);
 
 internal sealed record MessageStepDto(
-    DateTimeOffset At, string Type, string? Node, TimeSpan? SincePrevious, string? Detail);
+    DateTimeOffset At,
+    string Type,
+    EventVisibility Visibility,   // Public | Internal - the view filters on this, never on a name
+    string? Node,
+    TimeSpan? SincePrevious,
+    string? Detail);
 ```
 
 **Outcome is derived on the server** from the event sequence — the last-writer wins, with

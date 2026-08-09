@@ -35,6 +35,27 @@ R3.4 work is the one that crosses names.
 **Do not change what is recorded to make this easier.** That would be a protocol change for a
 display problem.
 
+### - [ ] T1a — Classify every event `Public` or `Internal`
+
+*Requirements:* R1.6, R1.7, R1.8, design Decision 5
+**Done when:** `HighwayEventType` carries a visibility, decided **on the server**, and a test
+enumerates every member so a new event type cannot be added without someone saying which it is.
+
+**Public** is what the developer's code caused or must act on — an RPC started, a response
+returned, a message published or sent, a handler failed, a message dead-lettered, a send
+refused. **Internal** is the broker recognising its own work: claims, acknowledgements,
+doorbells, sweeps, requeues, topology.
+
+> **The subtlety that makes this more than a filter.** Highway has no "handler finished" event —
+> the acknowledgement *is* the evidence. So the Public **fact** (*processed at 8:35:47 on
+> order-service-1*) is derived from an event classified **Internal**. The projection derives
+> facts; the classification decides which raw steps are shown. Conflating them produces a
+> message list that says "acknowledged", which is the exact word this feature exists to stop
+> showing.
+
+The enumeration test is the same mechanism 016's `BoundedStructureTests` used, and it earned its
+keep on first contact in 017.
+
 ### - [ ] T2 — `Incomplete` is an outcome, not a failure
 
 *Requirements:* R1.5
@@ -65,9 +86,12 @@ attempts exhausted (013), a byte limit refused it (016).
 ### - [ ] T4 — The entity page lists messages
 
 *Requirements:* R1.1, R1.2, R1.3, Open Decision 4
-**Done when:** an entity page shows one row per **message** — id, sent, outcome in developer
-words, duration — and the protocol event view is one click away and **labelled as the protocol
-view**.
+**Done when:** an entity page shows one row per **message** — id, **started (when + node)**,
+**completed (when + node, or why not)**, outcome in developer words, duration — and the protocol
+event view is one click away and **labelled as the protocol view**.
+
+**Two node columns, not one.** "shop-1 sent it, order-service-1 processed it" is the sentence
+the row exists to say, and a single column would have to pick one end.
 
 Never `RpcAcknowledged` in an outcome column. The developer wrote `SendAsync`; the outcome is
 `processed`.
@@ -75,7 +99,8 @@ Never `RpcAcknowledged` in an outcome column. The developer wrote `SendAsync`; t
 ### - [ ] T5 — One message, its whole journey
 
 *Requirements:* R3.1–R3.6
-**Done when:** a message shows its timeline with the node at each step, **durations between
+**Done when:** a message shows its timeline with **Public steps first and Internal ones one
+click away**, the node at each step, **durations between
 steps** rather than bare clock times, the body subject to capture modes, the reply beside the
 request for RPC, and 015's failure context when it failed.
 
