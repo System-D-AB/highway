@@ -299,6 +299,31 @@ the shape of the feature, so the design is not written until they are settled.
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
 
+### 020 — Dashboard: Operations Console  ← **next**
+
+**Specced** — `docs/features/020-dashboard-operations/`. Feature 011 built a dashboard for the
+flight recorder, and that is still all it is. Five features have shipped since, each adding
+operational state it cannot show: dead letters with their diagnosis (015), byte budgets and
+refusals (016), retirement countdowns (017), groups-as-queues (018), long-running handlers (019).
+
+**The dashboard sees events, and nothing else.** An event says something happened; an operator
+needs to know what is true *right now* — how full that queue is, what is in the dead-letter
+list, which subscriber is about to be retired and take its backlog with it.
+
+**The first requirement is not a view.** The dashboard runs in-process with only
+`FlightRecorder` injected and has **no connection to its own broker**. Opening a loopback one is
+the obvious answer and it has already failed: 018's pre-018 check did exactly that, mirrored the
+password but not TLS, and no TLS-enabled server could start. mTLS defeats it even when correct.
+So T1 is a spike deciding between an in-process read API and a server-owned connection, and T2
+proves the answer against all four security configurations before a single view is built.
+
+**Read-only.** No requeue, purge or retire buttons — an operator destroying a dead-letter list
+from a browser tab is a different threat model, and writes get their own feature.
+
+The highest-value item is the **retirement countdown**: 017 made retirement automatic and it
+destroys a subscriber's whole backlog. A countdown turns the largest single loss Highway can
+inflict from a surprise into a decision.
+
 ### 019 — Long-Running Tasks  ✅ **shipped**
 
 `HighwayServerOptions.Lease` defaults to 5 minutes and could not be extended, so a handler that
