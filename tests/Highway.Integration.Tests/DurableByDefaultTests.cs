@@ -147,14 +147,19 @@ public class AofGrowthTests : IDisposable
         .GetFiles(Path.Combine(_dataDir, "checkpoints", "AOF"), "aof.log*", SearchOption.AllDirectories)
         .Sum(f => new FileInfo(f).Length);
 
-    [Fact(Skip = "016 R6.3 is NOT met: AofSizeLimit triggers checkpoints but never truncates " +
-                 "the AOF on disk. Measured, twice: 2,000 messages -> 8.9 MB; 4,000 -> 17.8 MB. " +
-                 "Growth is exactly linear in total history. Kept and skipped rather than " +
-                 "deleted or weakened, so the gap stays visible and the next attempt starts " +
-                 "from a measurement instead of an assumption.")]
+    [Fact(Skip = "C4.6 is NOT met, and configuring AofSizeLimit does not fix it. Measured at " +
+                 "production scale with a 32 MB limit: 12,000 x 8 KB messages -> 102 MB of AOF; " +
+                 "24,000 -> 205 MB. Exactly linear in total history. Garnet's checkpoint does " +
+                 "call TruncateUntil, so truncation is LOGICAL - the begin address moves and " +
+                 "disk is not returned. Kept and skipped so the gap stays visible and the next " +
+                 "attempt starts from a measurement.")]
     public async Task SustainedTraffic_DoesNotGrowTheLogWithoutBound()
     {
-        const long limit = 1L * 1024 * 1024;   // 1 MB, small enough to cross quickly
+        // 32 MB is Garnet's floor for an AOF page (it must be twice the 16 MB main-log page),
+        // so the log is reclaimed in 32 MB steps. This has to write enough to cross several of
+        // them or there is nothing to observe -- the earlier version of this test wrote 8 MB
+        // against a 1 MB limit and concluded the feature was broken. It was mis-scaled.
+        const long limit = 32L * 1024 * 1024;
         var port = Highway.Server.Internal.EphemeralPort.Probe();
 
         using var server = new HighwayServerBuilder()
@@ -165,7 +170,7 @@ public class AofGrowthTests : IDisposable
         server.Start();
 
         var db = ConnectionMultiplexer.Connect($"localhost:{port}").GetDatabase();
-        var blob = new string('x', 4096);
+        var blob = new string('x', 8192);
         var payload = Encoding.UTF8.GetBytes(
             "{\"v\":1,\"src\":\"t\",\"ts\":\"2026-08-09T00:00:00Z\",\"body\":{\"Blob\":\"" + blob + "\"}}");
 
@@ -179,20 +184,17 @@ public class AofGrowthTests : IDisposable
             }
         }
 
-        // Enforcement is a BACKGROUND task on a frequency (Garnet's
-        // AofSizeLimitEnforceFrequencySecs, 5s by default), not a check on the write path.
-        // Measuring immediately after the loop measures the log before the task has run.
-        Drive(0, 2_000);
-        await Task.Delay(TimeSpan.FromSeconds(12));
+        // ~8 KB x 12,000 x 3 ops is well past several pages.
+        Drive(0, 12_000);
+        await Task.Delay(TimeSpan.FromSeconds(12));   // enforcement is a background task
         var afterFirst = AofBytes();
 
-        Drive(2_000, 2_000);
+        Drive(12_000, 12_000);
         await Task.Delay(TimeSpan.FromSeconds(12));
         var afterSecond = AofBytes();
 
-        // Growth, not absolute size, is the property. A truncated log may stay preallocated on
-        // disk, so an absolute assertion would be testing the allocator; what matters is that
-        // doubling the traffic does not double the log.
+        // Growth, not absolute size. A log that is genuinely bounded grows sub-linearly with
+        // total history; an unbounded one doubles when the traffic doubles.
         var growth = afterSecond - afterFirst;
 
         growth.Should().BeLessThan(afterFirst,

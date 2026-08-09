@@ -523,6 +523,7 @@ public sealed class HighwayServerBuilder
             if (opts.AofSizeLimitBytes > 0)
                 garnet.AofSizeLimit = opts.AofSizeLimitBytes.ToString(CultureInfo.InvariantCulture);
 
+
             if (opts.WaitForCommit)
                 garnet.WaitForCommit = true;
         }
