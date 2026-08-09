@@ -238,10 +238,10 @@ internal sealed class HwDequeueCommand : HighwayCommandBase
             RemoveFromServiceIndex(api, _service, node);
             RemoveRegistration(api, node);
 
-            // NOTE: hw:ch:*:grp:{node}:* is deliberately NOT touched. A subscriber
-            // group outlives its node's process so a restart resumes its pending
-            // messages (005 Req 9 AC3). Deleting groups here would silently
-            // downgrade durable pub/sub to fire-and-forget for any node that
+            // NOTE: subscriber group state (hw:q:{channel}@{group}:*) is deliberately
+            // NOT touched. A subscriber group outlives its node's process so a restart
+            // resumes its pending messages (005 Req 9 AC3). Deleting groups here would
+            // silently downgrade durable pub/sub to fire-and-forget for any node that
             // outlives its expiry window.
 
             pruned.Add(node);

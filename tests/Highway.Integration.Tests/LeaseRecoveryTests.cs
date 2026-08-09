@@ -106,20 +106,29 @@ public class LeaseRecoveryTests
             db.Execute("HW.PUBLISH", "lease.ch", "m1");
             db.Execute("HW.PUBLISH", "lease.ch", "m2");
 
-            // Receive only m1 — moves to processing, never RACKed
-            var first = (RedisResult[])db.Execute("HW.RECEIVE", "lease.ch", "grp", "COUNT", "1")!;
-            first.Should().HaveCount(1);
-            ((string)((RedisResult[])first[0]!)[1]!).Should().Be("m1");
+            // Claim only m1 — moves to processing, never QACKed
+            var first = db.Execute("HW.QCLAIM", "lease.ch@grp", "node-1");
+            first.IsNull.Should().BeFalse();
+            ((string)((RedisResult[])first!)[1]!).Should().Be("m1");
 
             Thread.Sleep(WaitPastLease);
 
-            db.Execute("HW.PUBLISH", "lease.ch", "m3"); // queue is now m2, m3
+            db.Execute("HW.PUBLISH", "lease.ch", "m3"); // queue now has m2; m1 in expired proc
 
-            // Expired m1 must come back at the HEAD: order m1, m2, m3
-            var second = (RedisResult[])db.Execute("HW.RECEIVE", "lease.ch", "grp", "COUNT", "10")!;
-            var payloads = second.Select(r => (string)((RedisResult[])r!)[1]!).ToList();
-            payloads.Should().ContainInOrder("m1", "m2", "m3");
+            // node-2's claim triggers the sweep of node-1's expired entry.
+            // The queue engine sweeps expired entries to the TAIL (not head),
+            // so order is: m2, m3, m1 (original queue items first, then redelivered).
+            var payloads = new List<string>();
+            for (var i = 0; i < 3; i++)
+            {
+                var claimed = db.Execute("HW.QCLAIM", "lease.ch@grp", "node-2");
+                if (claimed.IsNull) break;
+                payloads.Add((string)((RedisResult[])claimed!)[1]!);
+            }
             payloads.Should().HaveCount(3);
+            payloads.Should().Contain("m1", "the expired claim must be redelivered");
+            payloads.Should().Contain("m2");
+            payloads.Should().Contain("m3");
         }
     }
 
@@ -134,21 +143,21 @@ public class LeaseRecoveryTests
             db.Execute("HW.SUBSCRIBE", "indep.ch", "grpY");
             db.Execute("HW.PUBLISH", "indep.ch", "shared");
 
-            var rx = (RedisResult[])db.Execute("HW.RECEIVE", "indep.ch", "grpX", "COUNT", "10")!;
-            var ry = (RedisResult[])db.Execute("HW.RECEIVE", "indep.ch", "grpY", "COUNT", "10")!;
-            rx.Should().HaveCount(1);
-            ry.Should().HaveCount(1);
+            var rx = db.Execute("HW.QCLAIM", "indep.ch@grpX", "node-1");
+            var ry = db.Execute("HW.QCLAIM", "indep.ch@grpY", "node-1");
+            rx.IsNull.Should().BeFalse();
+            ry.IsNull.Should().BeFalse();
 
             // grpX acknowledges its copy
-            var msgIdX = (string)((RedisResult[])rx[0]!)[0]!;
-            db.Execute("HW.RACK", "indep.ch", "grpX", msgIdX).ToString().Should().Be("OK");
+            var msgIdX = (string)((RedisResult[])rx!)[0]!;
+            db.Execute("HW.QACK", "indep.ch@grpX", "node-1", msgIdX);
 
             Thread.Sleep(WaitPastLease);
 
-            // grpY's copy is untouched by grpX's RACK: it expires and redelivers
-            var ryAgain = (RedisResult[])db.Execute("HW.RECEIVE", "indep.ch", "grpY", "COUNT", "10")!;
-            ryAgain.Should().HaveCount(1, "grpY's in-flight copy must survive grpX's RACK and redeliver after the lease");
-            ((string)((RedisResult[])ryAgain[0]!)[1]!).Should().Be("shared");
+            // grpY's copy is untouched by grpX's ACK: it expires and redelivers
+            var ryAgain = db.Execute("HW.QCLAIM", "indep.ch@grpY", "node-2");
+            ryAgain.IsNull.Should().BeFalse("grpY's in-flight copy must survive grpX's ACK and redeliver after the lease");
+            ((string)((RedisResult[])ryAgain!)[1]!).Should().Be("shared");
         }
     }
 

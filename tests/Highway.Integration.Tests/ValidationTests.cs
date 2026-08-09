@@ -89,14 +89,6 @@ public class ValidationTests : IDisposable
         act.Should().Throw<RedisServerException>();
     }
 
-    [Fact]
-    public void HwRack_WrongArity_ReturnsError()
-    {
-        // HW.RACK needs 3 args: channel, group, messageId
-        var act = () => _db.Execute("HW.RACK", "channel", "group");
-        act.Should().Throw<RedisServerException>();
-    }
-
     // ──────────────────────────────────────────────────────────────────
     // Blank identifier tests
     // ──────────────────────────────────────────────────────────────────

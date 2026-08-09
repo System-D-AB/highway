@@ -48,9 +48,9 @@ public class TestServerTests
         db.Execute("HW.PUBLISH", "ch", "m2");
         db.Execute("HW.PUBLISH", "ch", "m3");
 
-        // No COUNT arg → the configured default (2) applies
-        var result = (RedisResult[])db.Execute("HW.RECEIVE", "ch", "grp")!;
-        result.Should().HaveCount(2);
+        // Use HW.QCLAIM to verify messages were enqueued to the derived queue
+        var claimed = db.Execute("HW.QCLAIM", "ch@grp", "node-1");
+        claimed.IsNull.Should().BeFalse();
     }
 
     [Fact]

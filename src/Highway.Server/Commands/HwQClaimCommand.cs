@@ -54,7 +54,7 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
     protected override bool PrepareCore<TGarnetReadApi>(TGarnetReadApi api, ref CustomProcedureInput procInput)
     {
         var idx = 0;
-        if (!TryReadIdentifier(ref procInput, ref idx, "queue", _opts.MaxIdentifierBytes, out _queue))
+        if (!TryReadDerivedIdentifier(ref procInput, ref idx, "queue", _opts.MaxIdentifierBytes, out _queue))
             return true;
         if (!TryReadIdentifier(ref procInput, ref idx, "nodeId", _opts.MaxIdentifierBytes, out _nodeId))
             return true;

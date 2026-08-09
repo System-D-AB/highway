@@ -43,16 +43,15 @@ public class DoorbellWatcherTests
     }
 
     [Fact]
-    public async Task Start_SubscribesEveryServiceAndGroupDoorbell()
+    public async Task Start_SubscribesEveryServiceDoorbell()
     {
         var watcher = CreateWatcher();
         watcher.RegisterServiceWake("svc.a", new LoopWake());
-        watcher.RegisterGroupWake("ch.x", "node-1", new LoopWake());
 
         await watcher.StartAsync();
 
         _handlers.Keys.Should().BeEquivalentTo(
-            ["hw:door:rep", "hw:door:svc:svc.a", "hw:door:ch:ch.x:grp:node-1"]);
+            ["hw:door:rep", "hw:door:svc:svc.a"]);
     }
 
     [Fact]
@@ -77,25 +76,10 @@ public class DoorbellWatcherTests
     }
 
     [Fact]
-    public async Task GroupDoorbell_SignalsThatChannelsConsumerLoop()
-    {
-        var watcher = CreateWatcher();
-        var wake = new LoopWake();
-        watcher.RegisterGroupWake("ch.x", "node-1", wake);
-        await watcher.StartAsync();
-
-        _handlers["hw:door:ch:ch.x:grp:node-1"]("42");
-
-        await wake.Invoking(w => w.WaitAsync(TimeSpan.FromMilliseconds(50), CancellationToken.None))
-            .Should().CompleteWithinAsync(TimeSpan.FromMilliseconds(300));
-    }
-
-    [Fact]
     public async Task Start_WhenDoorbellsDisabled_SubscribesNothing()
     {
         var watcher = CreateWatcher(enabled: false);
         watcher.RegisterServiceWake("svc.a", new LoopWake());
-        watcher.RegisterGroupWake("ch.x", "node-1", new LoopWake());
 
         await watcher.StartAsync();
 

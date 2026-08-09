@@ -99,15 +99,36 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             foreach (var channel in _catalog.AllChannels)
             {
                 var wake = new LoopWake();
-                watcher.RegisterGroupWake(channel.Name, _options.NodeName, wake);
-                var loop = new ChannelConsumerLoop(
+                // 018 T2: Subscribers consume through the queue engine via SubscriptionWorkerLoop.
+                // The derived queue name is {channel}@{nodeName}.
+                // 018 T3: Concurrency defaults to 1 to preserve sequential ordering.
+                var loop = new SubscriptionWorkerLoop(
                     channel, _connection, executor, _options.NodeName,
-                    _options.ReceiveBatchSize, wake,
-                    _loggerFactory.CreateLogger($"Highway.Consumer.{channel.Name}"));
+                    1, wake,
+                    _loggerFactory.CreateLogger($"Highway.Subscriber.{channel.Name}"));
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
                     CancellationToken.None));
                 wakes.Add(wake);
+
+                // Subscribe to the queue doorbell for the derived queue name.
+                // The doorbell is a latency optimisation; the backstop sweep drives
+                // correctness, so a failure to subscribe must not stop the worker.
+                if (_options.DoorbellsEnabled)
+                {
+                    var channelWake = wake;
+                    try
+                    {
+                        await _connection.SubscribeQueueDoorbellAsync(
+                            loop.DerivedQueueName, _ => channelWake.Signal(), ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Could not subscribe to the doorbell for derived queue '{Queue}'; the backstop sweep still drives it",
+                            loop.DerivedQueueName);
+                    }
+                }
             }
 
             if (_catalog.AllQueues.Count > 0)

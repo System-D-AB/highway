@@ -139,38 +139,23 @@ public class HwFailCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task ChannelMessagesReportFailureByNumericId()
+    public async Task ChannelMessagesReportFailureByMessageId()
     {
         var db = await ConnectAsync();
         await db.ExecuteAsync("HW.SUBSCRIBE", "fail.ch", "grp");
         await db.ExecuteAsync("HW.PUBLISH", "fail.ch", Envelope());
 
-        var received = (RedisResult[])(await db.ExecuteAsync("HW.RECEIVE", "fail.ch", "grp"))!;
-        received.Should().NotBeEmpty();
+        // Claim via the derived queue (018 unified path)
+        var claimed = await db.ExecuteAsync("HW.QCLAIM", "fail.ch@grp", "node-1");
+        claimed.IsNull.Should().BeFalse();
 
-        // HW.RECEIVE returns an array of [messageId, payload] pairs; the id is what HW.FAIL
-        // matches on, and it is numeric for channels alone.
-        var messageId = ((RedisResult[])received[0]!)[0].ToString();
+        var messageId = ((RedisResult[])claimed!)[0].ToString();
 
+        // Report failure via the Q target on the derived queue
         var result = (long)await db.ExecuteAsync(
-            "HW.FAIL", "CH", "fail.ch", "grp", messageId, "SomeException", "d");
+            "HW.FAIL", "Q", "fail.ch@grp", "node-1", messageId!, "SomeException", "d");
 
         result.Should().Be(1);
-
-        await db.ExecuteAsync("HW.RACK", "fail.ch", "grp", messageId);
-        ((long)await db.ExecuteAsync("LLEN", "hw:ch:fail.ch:grp:grp:proc")).Should().Be(0,
-            "a rewritten group entry must still match its numeric id");
-    }
-
-    [Fact]
-    public async Task ANonNumericChannelMessageId_IsRejectedByName()
-    {
-        var db = await ConnectAsync();
-
-        var act = async () => await db.ExecuteAsync(
-            "HW.FAIL", "CH", "fail.ch2", "grp", "not-a-number", "SomeException", "d");
-
-        (await act.Should().ThrowAsync<RedisServerException>()).WithMessage("*not an integer*");
     }
 
     [Fact]
@@ -185,7 +170,7 @@ public class HwFailCommandTests : IDisposable
         // and one they have to read source to understand.
         var thrown = await act.Should().ThrowAsync<RedisServerException>();
         thrown.WithMessage("*SVC*");
-        thrown.WithMessage("*CH*");
+        thrown.WithMessage("*Q*");
     }
 
     // ---- merge ----------------------------------------------------------------

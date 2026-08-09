@@ -41,30 +41,6 @@ public class AttemptCountTests
     }
 
     [Fact]
-    public void ChannelEntry_RoundTripsTheAttemptCount()
-    {
-        var encoded = Envelope.EncodeChannelEntry(42L, "body"u8, attempts: 2);
-        Envelope.DecodeChannelEntry(encoded, out var messageId, out var payload, out var attempts);
-
-        messageId.Should().Be(42L);
-        attempts.Should().Be(2);
-        payload.ToArray().Should().Equal("body"u8.ToArray());
-    }
-
-    [Fact]
-    public void GroupProcessingEntry_RoundTripsTheAttemptCount()
-    {
-        var encoded = Envelope.EncodeGroupProcessingEntry(99L, 42L, "body"u8, attempts: 5);
-        Envelope.DecodeGroupProcessingEntry(
-            encoded, out var receiveTicks, out var messageId, out var payload, out var attempts);
-
-        receiveTicks.Should().Be(99L);
-        messageId.Should().Be(42L);
-        attempts.Should().Be(5);
-        payload.ToArray().Should().Equal("body"u8.ToArray());
-    }
-
-    [Fact]
     public void AttemptCount_DefaultsToZero()
     {
         Envelope.DecodeRpcEntry(
@@ -112,27 +88,10 @@ public class AttemptCountTests
     }
 
     [Fact]
-    public void LegacyChannelEntry_IsRefused_NotMisparsed()
-    {
-        // Pre-013 layout: [i64 messageId][payload]
-        var legacy = new byte[8 + 4];
-        BinaryPrimitives.WriteInt64BigEndian(legacy, 7L);
-        "body"u8.CopyTo(legacy.AsSpan(8));
-
-        Envelope.IsLegacyEntry(legacy).Should().BeTrue();
-
-        var act = () => Envelope.DecodeChannelEntry(legacy, out _, out _, out _);
-        act.Should().Throw<InvalidDataException>()
-            .WithMessage("*pre-013 storage format*");
-    }
-
-    [Fact]
     public void CurrentEntries_AreNotMistakenForLegacy()
     {
         Envelope.IsLegacyEntry(Envelope.EncodeRpcEntry(Id("r"), "b"u8)).Should().BeFalse();
-        Envelope.IsLegacyEntry(Envelope.EncodeChannelEntry(1L, "b"u8)).Should().BeFalse();
         Envelope.IsLegacyEntry(Envelope.EncodeRpcProcessingEntry(1L, Id("r"), "b"u8)).Should().BeFalse();
-        Envelope.IsLegacyEntry(Envelope.EncodeGroupProcessingEntry(1L, 1L, "b"u8)).Should().BeFalse();
     }
 
     /// <summary>

@@ -31,20 +31,18 @@ internal readonly record struct FailureTarget(FailureFamily Family, string Name,
         _ => "channel",
     };
 
-    /// <summary>The wire token <c>HW.FAIL</c> expects: <c>SVC</c>, <c>Q</c> or <c>CH</c>.</summary>
+    /// <summary>The wire token <c>HW.FAIL</c> expects: <c>SVC</c> or <c>Q</c>.</summary>
     public string WireKind => Family switch
     {
         FailureFamily.Service => "SVC",
-        FailureFamily.Queue => "Q",
-        _ => "CH",
+        _ => "Q",
     };
 }
 
 /// <summary>
-/// The one place a handler exception is reported from. All three loops route through it —
-/// <see cref="SingleMessageWorkerLoop"/> for services and queues, <see cref="ChannelConsumerLoop"/>
-/// for pub/sub — because failure reporting is the concern they genuinely have in common, even
-/// though the batch loop is otherwise a different shape.
+/// The one place a handler exception is reported from. All worker loops route through it —
+/// <see cref="SingleMessageWorkerLoop"/> for services, queues and subscribers — because failure
+/// reporting is the concern they genuinely have in common.
 ///
 /// <para><b>Reporting never breaks delivery.</b> A failed <c>HW.FAIL</c> is swallowed and
 /// logged <i>with the original exception attached</i>, the loop continues, and the message is

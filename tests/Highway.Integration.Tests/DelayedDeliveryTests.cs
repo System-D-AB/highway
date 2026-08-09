@@ -30,8 +30,8 @@ public class DelayedDeliveryTests : IDisposable
 
     private static async Task<int> ReceiveCountAsync(IDatabase db)
     {
-        var result = await db.ExecuteAsync("HW.RECEIVE", Channel, Group);
-        return result.IsNull ? 0 : ((RedisResult[])result!).Length;
+        var result = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@{Group}", "node-1");
+        return result.IsNull ? 0 : 1;
     }
 
     [Fact]
@@ -81,13 +81,12 @@ public class DelayedDeliveryTests : IDisposable
     }
 
     /// <summary>
-    /// Requirement 3 AC7. A delayed publish behaves like a publish that happens later, so
-    /// groups are resolved at promotion time — a group that subscribes during the delay
-    /// receives the message. That is the whole reason the message is held whole rather
-    /// than fanned out at publish.
+    /// After 018, Decision 3: delayed messages are fanned out at **publish time** to each
+    /// group's derived queue delayed set. A group that subscribes during the delay does NOT
+    /// receive the message. This is the documented semantic change (R5.3).
     /// </summary>
     [Fact]
-    public async Task GroupSubscribingDuringTheDelay_StillReceivesTheMessage()
+    public async Task GroupSubscribingDuringTheDelay_DoesNotReceiveTheMessage()
     {
         var db = await ConnectAsync();
         await db.ExecuteAsync("HW.SUBSCRIBE", Channel, Group);
@@ -99,12 +98,11 @@ public class DelayedDeliveryTests : IDisposable
         await db.ExecuteAsync("HW.SUBSCRIBE", Channel, "late-joiner");
 
         await Task.Delay(700);
-        await ReceiveCountAsync(db);   // any consumer's poll promotes for every group
+        await ReceiveCountAsync(db);   // any consumer's poll promotes for its own group
 
-        var late = await db.ExecuteAsync("HW.RECEIVE", Channel, "late-joiner");
-        late.IsNull.Should().BeFalse();
-        ((RedisResult[])late!).Should().HaveCount(1,
-            "a delayed publish behaves like a publish that happens later");
+        var late = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@late-joiner", "node-1");
+        late.IsNull.Should().BeTrue(
+            "a group registered after publish does not receive a delayed message (018 Decision 3)");
     }
 
     [Fact]
@@ -122,8 +120,15 @@ public class DelayedDeliveryTests : IDisposable
 
         await Task.Delay(800);
 
-        var result = (RedisResult[])(await db.ExecuteAsync("HW.RECEIVE", Channel, Group, "COUNT", "10"))!;
-        var payloads = result.Select(r => ((RedisResult[])r!)[1].ToString()).ToArray();
+        var payloads = new List<string>();
+        var derivedQueue = $"{Channel}@{Group}";
+        for (var i = 0; i < 3; i++)
+        {
+            var result = await db.ExecuteAsync("HW.QCLAIM", derivedQueue, "node-1");
+            if (result.IsNull) break;
+            var arr = (RedisResult[])result!;
+            payloads.Add((string)arr[1]!);
+        }
 
         payloads.Should().Equal(["first", "second", "third"],
             "promotion pops lowest-score-first, so delivery follows delivery time");
@@ -145,9 +150,8 @@ public class DelayedDeliveryTests : IDisposable
         var after = (await ConnectionMultiplexer.ConnectAsync(durable.ConnectionString)).GetDatabase();
         await Task.Delay(900);
 
-        var result = await after.ExecuteAsync("HW.RECEIVE", Channel, Group);
+        var result = await after.ExecuteAsync("HW.QCLAIM", $"{Channel}@{Group}", "node-1");
         result.IsNull.Should().BeFalse("a delayed message must survive AOF recovery");
-        ((RedisResult[])result!).Should().HaveCount(1);
     }
 
     [Fact]

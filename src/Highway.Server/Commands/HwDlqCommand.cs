@@ -13,7 +13,6 @@ namespace Highway.Server.Commands;
 /// <code>
 /// HW.DLQ PEEK    SVC &lt;service&gt;            [COUNT n]  → array of entries, non-destructive
 /// HW.DLQ PEEK    Q   &lt;queue&gt;              [COUNT n]
-/// HW.DLQ PEEK    CH  &lt;channel&gt; &lt;group&gt;    [COUNT n]
 /// HW.DLQ REQUEUE SVC &lt;service&gt;            [COUNT n]  → integer moved back
 /// HW.DLQ PURGE   SVC &lt;service&gt;            [COUNT n]  → integer removed
 /// </code>
@@ -39,13 +38,11 @@ internal sealed class HwDlqCommand : HighwayCommandBase
     private const string ActionRequeue = "REQUEUE";
     private const string ActionPurge = "PURGE";
     private const string TargetService = "SVC";
-    private const string TargetChannel = "CH";
     private const string TargetQueue = "Q";
 
     private readonly HighwayServerOptions _opts;
 
     private string _action = null!;
-    private bool _isService;
     private string _dlqKey = null!;
     private string _liveKey = null!;
     private int _count;
@@ -54,7 +51,6 @@ internal sealed class HwDlqCommand : HighwayCommandBase
 
     protected override void ResetState()
     {
-        _isService = false;
         _count = 0;
     }
 
@@ -80,7 +76,7 @@ internal sealed class HwDlqCommand : HighwayCommandBase
         var kindArg = GetNextArg(ref procInput, ref idx);
         if (kindArg.Length == 0)
         {
-            Fail(HighwayErrors.InvalidArg, "HW.DLQ requires a target: SVC <service> or CH <channel> <group>");
+            Fail(HighwayErrors.InvalidArg, "HW.DLQ requires a target: SVC <service> or Q <queue>");
             return true;
         }
 
@@ -91,36 +87,22 @@ internal sealed class HwDlqCommand : HighwayCommandBase
             {
                 if (!TryReadIdentifier(ref procInput, ref idx, "service", _opts.MaxIdentifierBytes, out var service))
                     return true;
-                _isService = true;
                 _dlqKey  = HighwayKeys.ServiceDeadLetter(service);
                 _liveKey = HighwayKeys.ServiceQueue(service);
                 break;
             }
 
-            case TargetChannel:
-            {
-                if (!TryReadIdentifier(ref procInput, ref idx, "channel", _opts.MaxIdentifierBytes, out var channel))
-                    return true;
-                if (!TryReadIdentifier(ref procInput, ref idx, "group", _opts.MaxIdentifierBytes, out var group))
-                    return true;
-                _isService = false;
-                _dlqKey  = HighwayKeys.GroupDeadLetter(channel, group);
-                _liveKey = HighwayKeys.GroupQueue(channel, group);
-                break;
-            }
-
             case TargetQueue:
             {
-                if (!TryReadIdentifier(ref procInput, ref idx, "queue", _opts.MaxIdentifierBytes, out var queue))
+                if (!TryReadDerivedIdentifier(ref procInput, ref idx, "queue", _opts.MaxIdentifierBytes, out var queue))
                     return true;
-                _isService = true;   // queue entries share the RPC framing (id + payload)
                 _dlqKey  = HighwayKeys.QueueDeadLetter(queue);
                 _liveKey = HighwayKeys.Queue(queue);
                 break;
             }
 
             default:
-                Fail(HighwayErrors.InvalidArg, $"unknown target '{kind}'; expected SVC, Q or CH");
+                Fail(HighwayErrors.InvalidArg, $"unknown target '{kind}'; accepted forms are SVC <service> or Q <queue>");
                 return true;
         }
 
@@ -245,17 +227,8 @@ internal sealed class HwDlqCommand : HighwayCommandBase
 
             // Reset attempts: the operator is retrying after changing something, and a
             // message that immediately re-dead-letters has wasted the round trip.
-            byte[] revived;
-            if (_isService)
-            {
-                Envelope.DecodeRpcEntry(original, out var requestId, out var payload, out _);
-                revived = Envelope.EncodeRpcEntry(requestId, payload, attempts: 0);
-            }
-            else
-            {
-                Envelope.DecodeChannelEntry(original, out var messageId, out var payload, out _);
-                revived = Envelope.EncodeChannelEntry(messageId, payload, attempts: 0);
-            }
+            Envelope.DecodeRpcEntry(original, out var requestId, out var payload, out _);
+            var revived = Envelope.EncodeRpcEntry(requestId, payload, attempts: 0);
 
             api.ListRightPush(liveKey, CreateArgSlice(revived), out _);
             moved++;
@@ -299,20 +272,10 @@ internal sealed class HwDlqCommand : HighwayCommandBase
             Add("attempts", attempts.ToString());
             Add("reason", Encoding.UTF8.GetString(reason));
 
-            if (_isService)
-            {
-                Envelope.DecodeRpcEntry(original, out var requestId, out var payload, out _);
-                Add("requestId", Encoding.UTF8.GetString(requestId));
-                fields.Add("payload"u8.ToArray());
-                fields.Add(payload.ToArray());
-            }
-            else
-            {
-                Envelope.DecodeChannelEntry(original, out var messageId, out var payload, out _);
-                Add("messageId", messageId.ToString());
-                fields.Add("payload"u8.ToArray());
-                fields.Add(payload.ToArray());
-            }
+            Envelope.DecodeRpcEntry(original, out var requestId, out var payload, out _);
+            Add("requestId", Encoding.UTF8.GetString(requestId));
+            fields.Add("payload"u8.ToArray());
+            fields.Add(payload.ToArray());
 
             // Why it died (015). Without these a dead letter says only that something failed
             // n times, and an operator has to correlate logs across every worker to learn what

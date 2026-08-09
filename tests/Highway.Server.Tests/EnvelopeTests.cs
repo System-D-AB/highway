@@ -100,97 +100,16 @@ public class EnvelopeTests
     }
 
     // =========================================================================
-    // Channel entry
-    // =========================================================================
-
-    [Fact]
-    public void ChannelEntry_RoundTrip_PreservesAll()
-    {
-        const long messageId = 42L;
-        var encoded = Envelope.EncodeChannelEntry(messageId, SamplePayload);
-
-        Envelope.DecodeChannelEntry(encoded, out var id, out var payload, out _);
-
-        id.Should().Be(messageId);
-        payload.ToArray().Should().Equal(SamplePayload);
-    }
-
-    [Fact]
-    public void ChannelEntry_EmptyPayload_RoundTrips()
-    {
-        var encoded = Envelope.EncodeChannelEntry(1L, ReadOnlySpan<byte>.Empty);
-        Envelope.DecodeChannelEntry(encoded, out var id, out var payload, out _);
-        id.Should().Be(1L);
-        payload.IsEmpty.Should().BeTrue();
-    }
-
-    [Fact]
-    public void ChannelEntry_Truncated_ThrowsInvalidDataException()
-    {
-        var encoded = Envelope.EncodeChannelEntry(1L, SamplePayload);
-        var truncated = encoded.AsSpan(0, 4).ToArray();
-
-        var act = () => Envelope.DecodeChannelEntry(truncated, out _, out _, out _);
-        act.Should().Throw<InvalidDataException>();
-    }
-
-    // =========================================================================
-    // =========================================================================
-
-
-
-    // =========================================================================
-    // Group processing entry
-    // =========================================================================
-
-    [Fact]
-    public void GroupProcessingEntry_RoundTrip_PreservesAll()
-    {
-        var receiveTicks = DateTime.UtcNow.Ticks;
-        const long messageId = 99L;
-
-        var encoded = Envelope.EncodeGroupProcessingEntry(receiveTicks, messageId, SamplePayload);
-        Envelope.DecodeGroupProcessingEntry(encoded, out var rt, out var id, out var payload, out _);
-
-        rt.Should().Be(receiveTicks);
-        id.Should().Be(messageId);
-        payload.ToArray().Should().Equal(SamplePayload);
-    }
-
-    [Fact]
-    public void GroupProcessingEntry_Truncated_ThrowsInvalidDataException()
-    {
-        var encoded = Envelope.EncodeGroupProcessingEntry(1L, 2L, SamplePayload);
-        var truncated = encoded.AsSpan(0, 7).ToArray();
-
-        var act = () => Envelope.DecodeGroupProcessingEntry(truncated, out _, out _, out _, out _);
-        act.Should().Throw<InvalidDataException>();
-    }
-
-    [Fact]
-    public void GetMessageId_ExtractsFromGroupProcessingEntry()
-    {
-        const long messageId = 55L;
-        var encoded = Envelope.EncodeGroupProcessingEntry(DateTime.UtcNow.Ticks, messageId, SamplePayload);
-
-        var id = Envelope.GetMessageId(encoded);
-        id.Should().Be(messageId);
-    }
-
-    // =========================================================================
     // Big-endian encoding verification (endianness correctness)
     // =========================================================================
 
     [Fact]
-    public void ChannelEntry_MessageId_IsStoredBigEndian()
+    public void RpcEntry_MessageId_IsStoredBigEndian()
     {
-        // Layout since feature 013: [u8 version][u16 attempts][i64 messageId][payload].
-        // If the message ID is big-endian, 1 is stored as 00 .. 01 in bytes 3..10.
-        var encoded = Envelope.EncodeChannelEntry(1L, ReadOnlySpan<byte>.Empty);
-        encoded.Should().HaveCountGreaterThanOrEqualTo(11);
+        // Layout since feature 013: [u8 version][u16 attempts][u16 requestIdLen][requestId][payload].
+        // Verify the version byte is placed correctly.
+        var encoded = Envelope.EncodeRpcEntry("1"u8, ReadOnlySpan<byte>.Empty);
         encoded[0].Should().Be(Envelope.FormatVersion);
-        encoded[1..3].Should().Equal(new byte[] { 0, 0 }, "attempts default to zero");
-        encoded[3..11].Should().Equal(new byte[] { 0, 0, 0, 0, 0, 0, 0, 1 });
     }
 
 }

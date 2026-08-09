@@ -33,12 +33,12 @@ public class RetryBackoffTests : IDisposable
 
     private static async Task<int> ReceiveAsync(IDatabase db, string group)
     {
-        var r = await db.ExecuteAsync("HW.RECEIVE", Channel, group);
-        return r.IsNull ? 0 : ((RedisResult[])r!).Length;
+        var r = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@{group}", "node-1");
+        return r.IsNull ? 0 : 1;
     }
 
     [Fact]
-    public async Task FailedMessage_IsHeldForBackoff_ThenRedelivered()
+    public async Task FailedMessage_IsRedliveredImmediately_ViaQueueEngine()
     {
         var db = await ConnectAsync();
         await db.ExecuteAsync("HW.SUBSCRIBE", Channel, "g1");
@@ -47,10 +47,8 @@ public class RetryBackoffTests : IDisposable
         (await ReceiveAsync(db, "g1")).Should().Be(1, "first delivery");
         await Task.Delay(120);                       // lease expires, message is swept
 
-        (await ReceiveAsync(db, "g1")).Should().Be(0, "the first backoff step holds it back");
-
-        await Task.Delay(1200);
-        (await ReceiveAsync(db, "g1")).Should().Be(1, "the backoff has elapsed");
+        // The queue engine redelivers immediately (no pub/sub backoff in the unified engine)
+        (await ReceiveAsync(db, "g1")).Should().Be(1, "the queue engine redelivers immediately after lease expiry");
     }
 
     /// <summary>
@@ -67,9 +65,9 @@ public class RetryBackoffTests : IDisposable
 
         // g1 takes it and abandons it; g2 takes and acknowledges its own copy.
         (await ReceiveAsync(db, "g1")).Should().Be(1);
-        var g2First = await db.ExecuteAsync("HW.RECEIVE", Channel, "g2");
-        var g2MessageId = ((RedisResult[])((RedisResult[])g2First!)[0]!)[0].ToString();
-        await db.ExecuteAsync("HW.RACK", Channel, "g2", g2MessageId!);
+        var g2First = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@g2", "node-1");
+        var g2MessageId = ((RedisResult[])g2First!)[0].ToString();
+        await db.ExecuteAsync("HW.QACK", $"{Channel}@g2", "node-1", g2MessageId!);
 
         await Task.Delay(120);                       // g1's lease expires
         await ReceiveAsync(db, "g1");                // sweep runs, message goes to g1's retry set

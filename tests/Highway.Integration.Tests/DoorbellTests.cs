@@ -80,13 +80,13 @@ public class DoorbellTests
     }
 
     [Fact]
-    public async Task HwPublish_RingsGroupDoorbell_OncePerGroup()
+    public async Task HwPublish_RingsQueueDoorbell_OncePerGroup()
     {
         using var server = new HighwayTestServer();
         using var collectorX = new RingCollector(server.ConnectionString);
         using var collectorY = new RingCollector(server.ConnectionString);
-        await collectorX.SubscribeAsync("hw:door:ch:ring.ch:grp:grpX");
-        await collectorY.SubscribeAsync("hw:door:ch:ring.ch:grp:grpY");
+        await collectorX.SubscribeAsync("hw:door:q:ring.ch@grpX");
+        await collectorY.SubscribeAsync("hw:door:q:ring.ch@grpY");
 
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
@@ -95,9 +95,9 @@ public class DoorbellTests
         db.Execute("HW.PUBLISH", "ring.ch", "fan-out-msg");
 
         (await collectorX.WaitForRingAsync(TimeSpan.FromSeconds(5)))
-            .Should().BeTrue("every group's doorbell must ring");
+            .Should().BeTrue("every group's queue doorbell must ring");
         (await collectorY.WaitForRingAsync(TimeSpan.FromSeconds(5)))
-            .Should().BeTrue("every group's doorbell must ring");
+            .Should().BeTrue("every group's queue doorbell must ring");
 
         // Payload is the messageId assigned by the server (decimal long)
         long.Parse(collectorX.Last).Should().BePositive();
@@ -159,7 +159,7 @@ public class DoorbellTests
     }
 
     [Fact]
-    public void HwReceive_ReplyShape_ArrayOfTwoElementPairs()
+    public void HwQClaim_ReplyShape_TwoElementArray()
     {
         using var server = new HighwayTestServer();
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
@@ -167,20 +167,14 @@ public class DoorbellTests
 
         db.Execute("HW.SUBSCRIBE", "shape.ch", "grp");
         db.Execute("HW.PUBLISH", "shape.ch", "payload-a");
-        db.Execute("HW.PUBLISH", "shape.ch", "payload-b");
 
-        var result = db.Execute("HW.RECEIVE", "shape.ch", "grp", "COUNT", "10");
+        var result = db.Execute("HW.QCLAIM", "shape.ch@grp", "node-1");
 
-        // Contract 005 parses against: *N of *2 [messageId, payload]
-        var outer = (RedisResult[])result!;
-        outer.Should().HaveCount(2);
-
-        foreach (var item in outer)
-        {
-            var pair = (RedisResult[])item!;
-            pair.Should().HaveCount(2);
-            long.Parse((string)pair[0]!).Should().BePositive("messageId is a decimal long");
-            ((string)pair[1]!).Should().StartWith("payload-");
-        }
+        // Contract: *2 [messageId, payload]
+        result.IsNull.Should().BeFalse();
+        var pair = (RedisResult[])result!;
+        pair.Should().HaveCount(2);
+        long.Parse((string)pair[0]!).Should().BePositive("messageId is a decimal long");
+        ((string)pair[1]!).Should().Be("payload-a");
     }
 }

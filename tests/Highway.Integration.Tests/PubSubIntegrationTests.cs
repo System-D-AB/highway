@@ -76,8 +76,8 @@ public class PubSubIntegrationTests : IDisposable
 
         await db.ExecuteAsync("HW.SUBSCRIBE", "orphan.ch", "arrives-later");
 
-        var received = await db.ExecuteAsync("HW.RECEIVE", "orphan.ch", "arrives-later");
-        (received.IsNull || ((RedisResult[])received!).Length == 0)
+        var received = await db.ExecuteAsync("HW.QCLAIM", "orphan.ch@arrives-later", "node-1");
+        received.IsNull
             .Should().BeTrue("a new group starts empty — use SendAsync when the work must wait");
     }
 

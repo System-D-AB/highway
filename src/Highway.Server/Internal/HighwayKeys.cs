@@ -97,44 +97,6 @@ internal static class HighwayKeys
     /// <summary>Per-channel message-ID sequence counter.  hw:ch:{channel}:seq</summary>
     public static string ChannelSeq(string channel) => $"hw:ch:{channel}:seq";
 
-
-    /// <summary>Pending message queue for a specific subscriber group.  hw:ch:{channel}:grp:{group}:q</summary>
-    /// <summary>
-    /// Dead letters for one channel group: messages that exhausted
-    /// <see cref="HighwayServerOptions.MaxDeliveryAttempts"/> (feature 013).
-    /// </summary>
-    /// <summary>
-    /// Messages published with a future delivery time (feature 013). Sorted set, score =
-    /// delivery time in .NET UTC ticks, member = the channel entry.
-    ///
-    /// <para>Not fanned out to groups until promotion, so a group that subscribes during
-    /// the delay still receives the message — a delayed publish behaves like a publish
-    /// that happens later, which is the only reading of "delay" that is not surprising.</para>
-    /// </summary>
-    public static string ChannelDelayed(string channel) => $"hw:ch:{channel}:delayed";
-
-    /// <summary>
-    /// Messages held for one group's retry backoff (feature 013). Sorted set, score =
-    /// the time the message becomes claimable again.
-    ///
-    /// <para><b>Per group, not per channel.</b> The channel-wide delayed set is promoted
-    /// to <i>every</i> registered group, which is right for a delayed publish and wrong
-    /// for a retry: a message failing for one group would be redelivered to all the
-    /// others as a duplicate.</para>
-    /// </summary>
-    public static string GroupRetry(string channel, string group) =>
-        $"hw:ch:{channel}:grp:{group}:retry";
-
-    public static string GroupDeadLetter(string channel, string group) =>
-        $"hw:ch:{channel}:grp:{group}:dlq";
-
-    public static string GroupQueue(string channel, string group) =>
-        $"hw:ch:{channel}:grp:{group}:q";
-
-    /// <summary>Processing list for a subscriber group.  hw:ch:{channel}:grp:{group}:proc</summary>
-    public static string GroupProcessing(string channel, string group) =>
-        $"hw:ch:{channel}:grp:{group}:proc";
-
     // -------------------------------------------------------------------------
     // Registry keys (feature 006)
     //
@@ -173,10 +135,6 @@ internal static class HighwayKeys
     /// <summary>Rung by HW.REPLY after writing the reply slot.  hw:door:rep</summary>
     public const string ReplyDoorbell = "hw:door:rep";
 
-    /// <summary>Rung by HW.PUBLISH per group.  hw:door:ch:{channel}:grp:{group}</summary>
-    public static string GroupDoorbell(string channel, string group) =>
-        $"hw:door:ch:{channel}:grp:{group}";
-
     // -------------------------------------------------------------------------
     // UTF-8 byte[] overloads  (Garnet APIs operate on byte arrays / PinnedSpanByte)
     // -------------------------------------------------------------------------
@@ -199,20 +157,11 @@ internal static class HighwayKeys
     public static byte[] ChannelSeqBytes(string channel) =>
         Encoding.UTF8.GetBytes(ChannelSeq(channel));
 
-    public static byte[] GroupQueueBytes(string channel, string group) =>
-        Encoding.UTF8.GetBytes(GroupQueue(channel, group));
-
-    public static byte[] GroupProcessingBytes(string channel, string group) =>
-        Encoding.UTF8.GetBytes(GroupProcessing(channel, group));
-
     public static byte[] ServiceDoorbellBytes(string service) =>
         Encoding.UTF8.GetBytes(ServiceDoorbell(service));
 
     public static readonly byte[] ReplyDoorbellBytes =
         Encoding.UTF8.GetBytes(ReplyDoorbell);
-
-    public static byte[] GroupDoorbellBytes(string channel, string group) =>
-        Encoding.UTF8.GetBytes(GroupDoorbell(channel, group));
 
     public static byte[] RegistrationNodeBytes(string nodeId) =>
         Encoding.UTF8.GetBytes(RegistrationNode(nodeId));

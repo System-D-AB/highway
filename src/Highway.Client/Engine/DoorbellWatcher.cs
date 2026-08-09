@@ -22,7 +22,6 @@ internal sealed class DoorbellWatcher
     private readonly ILogger<DoorbellWatcher> _logger;
 
     private readonly Dictionary<string, LoopWake> _serviceWakes = new();
-    private readonly Dictionary<string, LoopWake> _groupWakes = new();
 
     public DoorbellWatcher(
         IHighwayConnection connection,
@@ -39,13 +38,9 @@ internal sealed class DoorbellWatcher
     /// <summary>Registers the wake for one catalog service (call before StartAsync).</summary>
     public void RegisterServiceWake(string service, LoopWake wake) => _serviceWakes[service] = wake;
 
-    /// <summary>Registers the wake for one catalog channel group (call before StartAsync).</summary>
-    public void RegisterGroupWake(string channel, string group, LoopWake wake)
-        => _groupWakes[GroupDoorbellKey(channel, group)] = wake;
-
     /// <summary>
-    /// Subscribes the reply doorbell (one per node, shared by all pending calls),
-    /// every service doorbell, and every group doorbell.
+    /// Subscribes the reply doorbell (one per node, shared by all pending calls)
+    /// and every service doorbell.
     /// </summary>
     public async Task StartAsync(CancellationToken ct = default)
     {
@@ -63,12 +58,6 @@ internal sealed class DoorbellWatcher
             await _connection.SubscribeDoorbellAsync($"hw:door:svc:{service}", _ => captured.Signal(), ct)
                 .ConfigureAwait(false);
         }
-
-        foreach (var key in _groupWakes.Keys)
-        {
-            var captured = _groupWakes[key];
-            await _connection.SubscribeDoorbellAsync(key, _ => captured.Signal(), ct).ConfigureAwait(false);
-        }
     }
 
     private void OnReplyDoorbell(string requestId)
@@ -76,7 +65,4 @@ internal sealed class DoorbellWatcher
         // Minimal work in the handler; the GET/DEL happens in the registry.
         _ = _registry.TryCompleteFromSlotAsync(requestId);
     }
-
-    private static string GroupDoorbellKey(string channel, string group)
-        => $"hw:door:ch:{channel}:grp:{group}";
 }

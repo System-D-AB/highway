@@ -239,47 +239,37 @@ cannot block what is behind it — is right and is kept, as the delayed tier. It
 **retry** structure, not the DLQ: a retry set means "needs a moment", a dead-letter list
 means "needs a human", and conflating them removes the distinction that makes either useful.
 
-### 018 — Pub/Sub Unification  ← **next**
+### 018 — Pub/Sub Unification  ✅
 
-**Specced** — `docs/features/018-pubsub-unification/`. Highway has three verbs and **two**
-delivery engines. The queue (014) and pub/sub (004) each implement claim, lease, redelivery,
-attempt counting, dead-lettering and deferred delivery independently — 1,234 lines against 470,
-with `HW.RECEIVE` alone (481) larger than the entire queue.
+**Status:** Complete
 
-A durable subscription stops *resembling* a queue and becomes one: `PublishAsync` fans out into
-one queue per registered group, and subscribers use the same commands and the same worker loop
-as `[Queue]`. Roughly **944 lines deleted**; commands 18 → 16; entry framings **4 → 2**.
+A durable subscription stops *resembling* a queue and becomes one: `PublishAsync` fans out
+into one queue per registered group (`{channel}@{group}`), and subscribers consume with the
+same commands and the same worker loop as `[Queue]`. Roughly **944 lines deleted**;
+commands 18 → 16; entry framings **4 → 2**.
 
-**Pub/Sub keeps every guarantee.** Removing durability was considered and rejected — without it
-an event is lost whenever a subscriber is mid-deploy, and the only remedy makes the publisher
-know its subscribers, which destroys the decoupling pub/sub exists for.
+**Placed before 016** because it deletes the group queues 016 was going to bound. Retention
+first would have meant building byte budgets and eviction for a structure about to disappear.
 
-**Why this is the tax being paid.** 013 found one bug in three requeue paths. 014 T2 had to
-extract the shared lease sweep to stop a fourth copy. 015 dropped the failure block at three
-re-encode sites, one of them `HW.RECEIVE`. Four consecutive features, including 016 below.
+Protocol 4.0: two commands removed (`HW.RECEIVE`, `HW.RACK`), two entry framings removed,
+`HW.DLQ` and `HW.FAIL` narrowed to `SVC|Q`. Existing channel data becomes unreachable;
+the broker refuses to start against it rather than serving an empty channel.
 
-**Runs before 016**, because it deletes the group queues 016 was going to bound. Retention
-first would mean building byte budgets and eviction for a structure about to disappear.
+**Three semantic changes:** batch consumption lost (one claim per round trip), subscriber
+ordering preserved by default (concurrency 1), deferred publish resolves groups at publish
+time (not promotion time).
 
-Major protocol break (4.0): two commands and two framings removed, and existing channel data
-becomes unreachable — the broker refuses to start against it rather than serving an empty
-channel.
-
-### 017 — Node Decommissioning
-
-A node that is never coming back can say so, and an operator can say it on the node's
-behalf. Closes C1.5's unbounded growth.
-
-- `IHighwayClient.CleanAndByeForever()` — stop the loops first (or the next heartbeat resurrects the node), drain in-flight work, then purge
-- `HW.HEARTBEAT <node> BYE PURGE` — the operator path, for the far more common case where the node is already gone
-- Unacknowledged **RPC** work is requeued, never deleted; queued **messages** are deleted — the subscriber has declared it no longer exists
-- Returns what it destroyed, so an irreversible operation appears in a log
+---
 
 ### 016 — Retention, Storage and Durability
 
 > **Runs after 018.** Several of the structures below stop existing when pub/sub unifies onto
 > the queue — in particular C4.4's unbounded group queues. Building byte budgets for them first
 > would be work thrown away.
+>
+> **Note (post-018):** Group queues no longer exist as a separate structure. They are now
+> ordinary queues under `hw:q:{channel}@{group}:*`, bounded by the same mechanism as every
+> other queue. C4.4's former "Pub/Sub group queues — no bound at all" row is gone.
 
 **Specced** — `docs/features/016-retention-and-durability/requirements.md`. Closes all five
 remaining unmet constraints (C4.1–C4.6). One coherent piece of work rather than five
@@ -301,6 +291,16 @@ the shape of the feature, so the design is not written until they are settled.
 - **Backpressure instead of silent loss** — refuse the publish rather than drop the oldest
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
+
+### 017 — Node Decommissioning
+
+A node that is never coming back can say so, and an operator can say it on the node's
+behalf. Closes C1.5's unbounded growth.
+
+- `IHighwayClient.CleanAndByeForever()` — stop the loops first (or the next heartbeat resurrects the node), drain in-flight work, then purge
+- `HW.HEARTBEAT <node> BYE PURGE` — the operator path, for the far more common case where the node is already gone
+- Unacknowledged **RPC** work is requeued, never deleted; queued **messages** are deleted — the subscriber has declared it no longer exists
+- Returns what it destroyed, so an irreversible operation appears in a log
 
 
 The next theme is **not** breadth. It is making the delivery Highway already

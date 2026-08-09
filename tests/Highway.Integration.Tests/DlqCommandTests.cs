@@ -120,7 +120,7 @@ public class DlqCommandTests : IDisposable
         peeked.Should().BeEmpty("an operator querying a quiet name deserves an answer, not a failure");
 
         ((long)(await db.ExecuteAsync("HW.DLQ", "PURGE", "SVC", "never.seen"))).Should().Be(0);
-        ((long)(await db.ExecuteAsync("HW.DLQ", "REQUEUE", "CH", "never.seen", "grp"))).Should().Be(0);
+        ((long)(await db.ExecuteAsync("HW.DLQ", "REQUEUE", "Q", "never.seen@grp"))).Should().Be(0);
     }
 
     [Fact]
@@ -149,7 +149,7 @@ public class DlqCommandTests : IDisposable
 
         var badTarget = async () => await db.ExecuteAsync("HW.DLQ", "PEEK", "QUEUE", Service);
         (await badTarget.Should().ThrowAsync<RedisServerException>())
-            .WithMessage("*HW_INVALID_ARG*expected SVC, Q or CH*");
+            .WithMessage("*HW_INVALID_ARG*accepted forms are SVC*");
 
         var badCount = async () => await db.ExecuteAsync("HW.DLQ", "PEEK", "SVC", Service, "COUNT", "0");
         (await badCount.Should().ThrowAsync<RedisServerException>())

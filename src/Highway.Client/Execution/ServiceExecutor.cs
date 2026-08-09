@@ -115,8 +115,26 @@ public sealed class ServiceExecutor
 
     /// <summary>
     /// Executes all subscribers for a channel. Each subscriber runs in its own scope.
-    /// A failing subscriber does not abort siblings.
+    ///
+    /// <para><b>Attempt all, then fail (018 T2a).</b> A failing subscriber does not abort its
+    /// siblings — every handler gets its attempt — but if any of them threw, this method
+    /// <b>throws</b> rather than reporting a count nobody reads. That is what makes a failed
+    /// pub/sub delivery reach the dead letter with 015's context instead of being acknowledged
+    /// and lost.</para>
+    ///
+    /// <para><b>Why this changed.</b> Until 018 the exceptions were swallowed here and the
+    /// message was acknowledged regardless, so a subscriber that failed every time was
+    /// invisible: no redelivery, no dead letter, nothing in any log but the application's own.
+    /// The publisher can do nothing about a subscriber's failure — they are different processes
+    /// in different places — which is exactly why the <i>subscriber's</i> side has to keep the
+    /// evidence. Its group has its own dead-letter list; the publisher is never involved.</para>
+    ///
+    /// <para><b>The cost, stated:</b> a redelivery re-runs the siblings that already succeeded.
+    /// At-least-once delivery already requires idempotent handlers, and <c>[Idempotent]</c> —
+    /// which became functional for subscribers in the same change — is the remedy for handlers
+    /// that cannot be.</para>
     /// </summary>
+    /// <exception cref="AggregateException">One or more subscribers threw.</exception>
     public async Task<ChannelResponse> ExecuteSubscribersAsync(string channelName, object message, CancellationToken ct = default)
     {
         var descriptor = _catalog.GetChannelDescriptor(channelName);
@@ -127,6 +145,7 @@ public sealed class ServiceExecutor
 
         var total = descriptor.Subscribers.Count;
         var success = 0;
+        List<Exception>? failures = null;
 
         foreach (var subscriber in descriptor.Subscribers)
         {
@@ -139,10 +158,27 @@ public sealed class ServiceExecutor
                 await subscriber.InvokeDelegate(instance, message, ct).ConfigureAwait(false);
                 success++;
             }
-            catch
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // Subscriber exceptions are swallowed — one failure doesn't abort siblings
+                // Shutdown, not failure. The message is simply not acknowledged and the lease
+                // sweep redelivers it — consuming an attempt here would punish a clean stop.
+                throw;
             }
+            catch (Exception ex)
+            {
+                // Collected, not rethrown yet: the remaining subscribers still get their turn.
+                (failures ??= []).Add(ex);
+            }
+        }
+
+        if (failures is not null)
+        {
+            // A single failure is surfaced as itself. Wrapping one exception in an aggregate
+            // buries the type and message that the dead letter exists to show.
+            throw failures.Count == 1
+                ? failures[0]
+                : new AggregateException(
+                    $"{failures.Count} of {total} subscribers for '{channelName}' failed.", failures);
         }
 
         return new ChannelResponse { TotalSubscribers = total, SuccessCalls = success };

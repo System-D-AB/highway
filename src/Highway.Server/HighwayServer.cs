@@ -59,6 +59,8 @@ public sealed class HighwayServer : IHighwayServer
         _started = true;
         _garnet.Start();
 
+        RejectPreUnificationData();
+
         foreach (var component in _components)
         {
             try { component.Start(); }
@@ -70,6 +72,77 @@ public sealed class HighwayServer : IHighwayServer
         }
 
         _logger.LogInformation("Highway server ready on {Endpoint}", Endpoint);
+    }
+
+    /// <summary>
+    /// Scans for any key matching the old group-queue pattern <c>hw:ch:*:grp:*</c>.
+    /// If found, the server refuses to start — pre-018 channel data would never be
+    /// delivered by the current code, so starting silently would lose every event.
+    /// Feature 013 established the precedent: refusing beats misparsing beats silence.
+    /// </summary>
+    private void RejectPreUnificationData()
+    {
+        // The scan runs over a loopback client connection to ourselves, so it has to mirror
+        // EVERY transport setting the server was just started with. Mirroring only the
+        // password broke TLS outright: a plaintext connect against a TLS listener fails, the
+        // exception escaped Start(), and no TLS server could start at all.
+        var config = new StackExchange.Redis.ConfigurationOptions
+        {
+            EndPoints = { { "localhost", _opts.Port } },
+            AllowAdmin = true,
+            AbortOnConnectFail = false,
+            ConnectTimeout = 5_000,
+        };
+
+        if (_opts.Authentication.IsConfigured)
+            config.Password = _opts.Authentication.Password;
+
+        if (_opts.Tls.IsConfigured)
+        {
+            config.Ssl = true;
+            config.SslHost = "localhost";
+
+            // We are the server. Validating our own certificate proves nothing, and a
+            // self-signed certificate — the common case for a loopback broker — would fail
+            // the default check and take the whole server down with it.
+            config.CertificateValidation += (_, _, _, _) => true;
+        }
+
+        using var mux = StackExchange.Redis.ConnectionMultiplexer.Connect(config);
+
+        if (!mux.IsConnected)
+        {
+            // Cannot check. Say so loudly rather than starting as though the check passed:
+            // mTLS is the known case — the server requires a client certificate that this
+            // self-connection has no way to present.
+            _logger.LogWarning(
+                "Could not open a loopback connection to check for pre-018 channel data{Reason}. " +
+                "The broker is starting WITHOUT that check: if this data directory contains " +
+                "channel data from before the 018 unification, those messages will never be " +
+                "delivered. Verify with 'SCAN 0 MATCH hw:ch:*:grp:*' before trusting this broker.",
+                _opts.Tls.ClientCertificateRequired
+                    ? " (the server requires a client certificate, which the check cannot present)"
+                    : "");
+            return;
+        }
+
+        var server = mux.GetServers()[0];
+
+        var count = 0;
+        foreach (var _ in server.Keys(pattern: "hw:ch:*:grp:*", pageSize: 100))
+        {
+            count++;
+            if (count >= 100) break; // no need to count every last one
+        }
+
+        if (count > 0)
+        {
+            Dispose();
+            throw new InvalidOperationException(
+                $"Channel data from before the 018 unification is present ({count} key(s) matching 'hw:ch:*:grp:*'). " +
+                "Drain these channels with the previous version, or delete the data directory. " +
+                "Refusing rather than starting with data that would never be delivered.");
+        }
     }
 
     /// <inheritdoc/>
@@ -146,8 +219,6 @@ public sealed class HighwayServer : IHighwayServer
         new("HW.SUBSCRIBE",   3, () => new HwSubscribeCommand(opts, recorder)),
         new("HW.UNSUBSCRIBE", 3, () => new HwUnsubscribeCommand(opts, recorder)),
         new("HW.PUBLISH",    -3, () => new HwPublishCommand(opts, doorbell, recorder)),
-        new("HW.RECEIVE",    -3, () => new HwReceiveCommand(opts, recorder)),
-        new("HW.RACK",        4, () => new HwRackCommand(opts, recorder)),
 
         // Registry commands (feature 006). Negative arity marks an optional
         // trailing argument: HW.HEARTBEAT's selects the form (absent = liveness,
