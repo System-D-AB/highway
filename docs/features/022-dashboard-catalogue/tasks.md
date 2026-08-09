@@ -11,43 +11,70 @@ the security matrix are the read path this feature reads through. Nothing here r
 
 ## Phase 1 — The model
 
-### - [ ] T1 — The server classifies entities
+### - [x] T1 — The server classifies entities
 
 `IBrokerState` gains a catalogue read returning `CatalogueEntryDto` — name, kind, parent
-channel, hosts, and whether any host is live.
+channel, hosts, and **entity state** (`Live | HostStale | NeverDeclared | Unknown`).
 
-*Requirements:* R1.1, R1.2, R1.4, Open Decision 2
-**Done when:** every entity carries a kind decided **on the server**, `Unknown` is a real member
-used for anything unclassifiable, and no browser code parses a name to decide what it is.
+*Requirements:* R1.1, R1.2, R1.4, Open Decision 2, Review R-2A
+**Done when:** every entity carries a kind and state decided **on the server**, `Unknown` is a
+real member used for anything unclassifiable, `NeverDeclared` covers entities seen in traffic
+but never registered by any node (R3.4's "no live host" case), and no browser code parses a
+name or infers provenance.
 
 `@` is reserved in user-declared names (018 T0) **because the server derives group-queue names
 with it**. That is a server fact, and a `name.includes('@')` in JavaScript is a second
 implementation of it that will be wrong the first time the convention moves.
 
-### - [ ] T2 — Read the catalogue out of the node registry
+### - [x] T2 — Read the catalogue as a union of registry + recorder + **structures**
 
-`hw:reg:nodelist` → `hw:reg:node:{nodeId}` → `[lastSeenTicks][catalog json]`, which already
-carries `services`, `channels` and `queues`.
+The catalogue is assembled from **two sources** (Review R-1A):
 
-*Requirements:* R3.1, R3.5
-**Done when:** the catalogue is assembled from what nodes have **declared**, and "declared" is
-distinguishable from "currently live".
+1. **Declared** — `hw:reg:nodelist` → `hw:reg:node:{nodeId}` → `[lastSeenTicks][catalog json]`,
+   which carries services, channels and queues each node hosts. Read via `IBrokerState`.
+2. **Observed** — the recorder's name index (in-process, needs no connection). Surfaces entities
+   that were addressed in traffic but never declared — precisely the "no live host" case.
 
-**No new storage.** Every heartbeat since feature 006 has carried this and nothing has ever read
-it back for display. That is the whole reason this feature is mostly rendering.
+*Requirements:* R3.1, R3.4, R3.5, Review R-1A
+**Done when:** an entity hosted by nobody but addressed in traffic (e.g. `payments.refund`
+called by callers but never deployed) is **visible** in the catalogue with state
+`NeverDeclared` — proven by a test that uses the existing samples' shape.
 
-### - [ ] T3 — A node's observed address
+**No new storage.** All sources already exist. The union is computed at read time.
 
-*Requirements:* R2.4, Open Decision 1
-**Done when:** the broker records the address it **observes** a node connecting from, and the
-view labels it as an observation — "seen from 10.1.4.22" — not as a property of the node.
+> **It is three sources, not two.** A **group queue** exists as a structure the moment a publish
+> fans out — but nothing *declares* it, because its name is derived (018), and the recorder does
+> not *observe* it until a subscriber claims from it. With only registry + recorder, a channel's
+> groups were invisible until consumed, which is exactly when an operator least needs to see them
+> and most needs to see them sitting there unconsumed. The live queue keys are the third source.
+>
+> Found by `AGroupNamesItsParentChannel` failing, not by reading the spec.
 
-A node behind NAT, in a container, or scaled horizontally under one name reports an address that
-is true and not useful. A field called `Address` implies otherwise; "seen from" does not.
+**A second finding, in the opposite direction:** a test asserting that a node with an unreadable
+catalog is still listed **could not be written**, because `HW.HEARTBEAT` refuses to register
+unparseable catalog JSON at the door. `Catalogue.ReadNode`'s tolerance is defence against a
+corrupted record, not a case an operator can cause. The test now asserts the refusal.
+
+Under mTLS (Review R-3A), the declared half is unavailable and the catalogue degrades to
+recorder-only, with a banner naming the setting and the consequence.
+
+### - [ ] T3 — ~~A node's observed address~~ **DEFERRED (review decision R-0A)**
+
+> **Moved out of scope.** Changes a persisted binary framing (`NodeRegistration`) with no
+> version byte and has unverified feasibility (commands have no access to session state).
+> Registered in `constraints.md` § Deferred as a candidate for its own feature with a spike.
 
 ---
 
 ## Phase 2 — The views
+
+> **Structural prerequisite (Review R-5A, R-6A, R-7A):** before building views, `app.js`
+> becomes an ES module router/scheduler. Each view is its own module (`nodes.js`,
+> `catalogue.js`, `entity.js`, `diagnostics.js`) with shared helpers (`fetch.js`,
+> `render.js`). No build step — `<script type="module">`. Routes use query params for names
+> (`#/entity?kind=service&name=…`) so `/` in identifiers is unambiguous (R-6A). One
+> `ViewScheduler` drives polling for the active view only, at `DashboardOptions.PollIntervalMs`
+> (default 3000) (R-7A). A keyed error region replaces the dual-purpose `#broker-info` (R-4A).
 
 ### - [ ] T4 — Nodes
 
@@ -107,12 +134,15 @@ node id. Once nodes are first-class (T4) they must not also appear as anonymous 
 
 ### - [ ] T8 — The banner tells the truth
 
-*Requirements:* R6.1, R6.2, R6.3
+*Requirements:* R6.1, R6.2, R6.3, Review R-4A
 **Done when:** "Connection error: Failed to fetch" cannot appear above a page that loaded, a
-failed fetch **names which** fetch failed, and a recovered failure clears the banner.
+failed fetch **names which** fetch failed, a recovered failure clears its own entry, and broker
+identity is never overwritten by a failure.
 
-It is on screen today above a fully-rendered page. **An error message that is wrong is worse
-than none** — it teaches the reader to ignore the banner that will one day be right.
+**Root cause (R-4A):** `#broker-info` holds both broker identity and error text, and only
+`loadRecorder` rewrites it. After navigation the error is permanently stale. The fix is a
+dedicated error region keyed by source — each poller (recorder, catalogue, nodes) owns an entry,
+success clears that entry.
 
 ---
 
@@ -144,12 +174,14 @@ did not do its job.
 ## Parallelization
 
 ```
-LANE 0   T1, T2, T3    the model            → blocks the views
-LANE 1   T4, T5, T6    the views            → needs lane 0
-LANE 2   T7, T8        leaks and honesty    → independent of lane 1, can run beside it
-LANE 3   T9, T10       conformance          → last
+LANE 0   T1, T2        the model (union + classify)    → blocks the views
+LANE 1   T4, T5, T6    the views                       → needs lane 0
+LANE 2   T7, T8        leaks, honesty and structure    → independent of lane 1, can run beside it
+LANE 3   T9, T10       conformance                     → last
 
 Order: 0 → (1 ∥ 2) → 3
+
+T3 is deferred (R-0A); it was the only protocol-changing task.
 ```
 
 ---

@@ -35,6 +35,17 @@ internal sealed record StateResult<T>(T? Value, string? Unavailable)
 internal interface IBrokerState
 {
     Task<StateResult<IReadOnlyList<QueueStateDto>>> QueuesAsync(CancellationToken ct = default);
+
+    /// <summary>Registered nodes and what each declared (022 T2).</summary>
+    Task<StateResult<IReadOnlyList<NodeDto>>> NodesAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// The catalogue: every entity, classified, as a union of what nodes declared and what the
+    /// recorder observed. <paramref name="observedNames"/> comes from the in-process recorder,
+    /// which is why an entity nobody declared can still appear.
+    /// </summary>
+    Task<StateResult<IReadOnlyList<CatalogueEntryDto>>> CatalogueAsync(
+        IReadOnlyCollection<string> observedNames, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -109,6 +120,130 @@ internal sealed class BrokerState : IBrokerState, IAsyncDisposable
             _logger.LogDebug(ex, "Reading queue state failed");
             return StateResult<IReadOnlyList<QueueStateDto>>.Fail($"could not read queue state: {ex.Message}");
         }
+    }
+
+    public async Task<StateResult<IReadOnlyList<NodeDto>>> NodesAsync(CancellationToken ct = default)
+    {
+        var db = await TryConnectAsync(ct).ConfigureAwait(false);
+        if (db is null)
+            return StateResult<IReadOnlyList<NodeDto>>.Fail(UnavailableReason());
+
+        try
+        {
+            return StateResult<IReadOnlyList<NodeDto>>.Ok(await ReadNodesAsync(db).ConfigureAwait(false));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Reading nodes failed");
+            return StateResult<IReadOnlyList<NodeDto>>.Fail($"could not read nodes: {ex.Message}");
+        }
+    }
+
+    public async Task<StateResult<IReadOnlyList<CatalogueEntryDto>>> CatalogueAsync(
+        IReadOnlyCollection<string> observedNames, CancellationToken ct = default)
+    {
+        var db = await TryConnectAsync(ct).ConfigureAwait(false);
+
+        // Under mTLS the declared half is unreachable, so the catalogue degrades to what the
+        // recorder observed rather than disappearing (022 review R-3A). Everything is then
+        // NeverDeclared, which is honest: nothing could be confirmed as declared.
+        var nodes = db is null ? [] : await ReadNodesAsync(db).ConfigureAwait(false);
+
+        var services = nodes.SelectMany(n => n.Services).ToHashSet(StringComparer.Ordinal);
+        var queues = nodes.SelectMany(n => n.Queues).ToHashSet(StringComparer.Ordinal);
+        var channels = nodes.SelectMany(n => n.Channels).ToHashSet(StringComparer.Ordinal);
+        var nodeNames = nodes.Select(n => n.Name).ToHashSet(StringComparer.Ordinal);
+
+        // Union of THREE sources, not two. A group queue exists as a structure the moment a
+        // publish fans out, but nothing declares it (its name is derived) and the recorder does
+        // not see it until a subscriber claims from it. Without the structures, a channel's
+        // groups are invisible until they are consumed — which is exactly when an operator most
+        // wants to see them sitting there unconsumed.
+        var names = new SortedSet<string>(StringComparer.Ordinal);
+        foreach (var n in services) names.Add(n);
+        foreach (var n in queues) names.Add(n);
+        foreach (var n in channels) names.Add(n);
+        foreach (var n in observedNames) names.Add(n);
+
+        if (db is not null)
+        {
+            foreach (var q in await ReadQueueNamesAsync(db).ConfigureAwait(false))
+                names.Add(q);
+        }
+
+        var entries = new List<CatalogueEntryDto>(names.Count);
+        foreach (var name in names)
+        {
+            var (kind, parent) = Catalogue.Classify(name, services, queues, channels, nodeNames);
+
+            var hosts = nodes
+                .Where(n => Declares(n, name, kind, parent))
+                .Select(n => n.Name)
+                .ToArray();
+
+            entries.Add(new CatalogueEntryDto(name, kind, StateOf(db, nodes, hosts), parent, hosts));
+        }
+
+        return StateResult<IReadOnlyList<CatalogueEntryDto>>.Ok(entries);
+    }
+
+    /// <summary>
+    /// Whether a node declared this entity. A group is declared by whoever declared its channel —
+    /// the group name is derived, so no node ever names it directly (018).
+    /// </summary>
+    private static bool Declares(NodeDto node, string name, EntityKind kind, string? parent)
+        => kind switch
+        {
+            EntityKind.Service => node.Services.Contains(name),
+            EntityKind.Queue => node.Queues.Contains(name),
+            EntityKind.Channel => node.Channels.Contains(name),
+            EntityKind.Group => parent is not null && node.Channels.Contains(parent),
+            EntityKind.Node => node.Name == name,
+            _ => false,
+        };
+
+    private static EntityState StateOf(IDatabase? db, IReadOnlyList<NodeDto> nodes, IReadOnlyList<string> hosts)
+    {
+        if (db is null) return EntityState.Unknown;      // registry unreadable (mTLS)
+        if (hosts.Count == 0) return EntityState.NeverDeclared;
+
+        return nodes.Any(n => hosts.Contains(n.Name) && n.IsLive)
+            ? EntityState.Live
+            : EntityState.HostStale;
+    }
+
+    /// <summary>Queue names that exist as structures, whether or not anyone declared them.</summary>
+    private async Task<IReadOnlyList<string>> ReadQueueNamesAsync(IDatabase db)
+    {
+        await Task.Yield();
+
+        var server = _mux!.GetServers()[0];
+        var names = new List<string>();
+
+        foreach (var key in server.Keys(pattern: "hw:q:*:q", pageSize: 250))
+        {
+            if (QueueNameFromKey(key.ToString()) is { } name)
+                names.Add(name);
+        }
+
+        return names;
+    }
+
+    private async Task<IReadOnlyList<NodeDto>> ReadNodesAsync(IDatabase db)
+    {
+        var raw = await db.StringGetAsync(HighwayKeys.RegistrationNodeList).ConfigureAwait(false);
+        if (!raw.HasValue) return [];
+
+        var nodes = new List<NodeDto>();
+        foreach (var id in raw.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var record = await db.StringGetAsync(HighwayKeys.RegistrationNode(id)).ConfigureAwait(false);
+            if (!record.HasValue) continue;
+
+            nodes.Add(Catalogue.ReadNode(id, (byte[])record!, _opts.NodeExpiry));
+        }
+
+        return nodes;
     }
 
     /// <summary>Extracts <c>{name}</c> from <c>hw:q:{name}:q</c>, tolerating names containing colons.</summary>

@@ -1,13 +1,21 @@
 # Design: Dashboard — A Catalogue, Not a List of Names
 
-> **Four open decisions, answered.**
+> **Four original decisions + eight engineering-review decisions, answered.**
 >
 > | | Decision | Chosen |
 > |---|---|---|
-> | 1 | Node address | **Record what the broker observes**, labelled as an observation |
+> | 1 | Node address | **Deferred to its own feature** (review 0A) — framing + feasibility risk |
 > | 2 | Where `kind` comes from | **The server classifies**; the browser never parses a name |
 > | 3 | The flat name list | **Removed from the main page**, kept under diagnostics |
 > | 4 | 020's remaining views | **Folded into entity pages** |
+> | R-0A | T3 scope | **Deferred** — unversioned `NodeRegistration` framing + unverified feasibility |
+> | R-1A | Catalogue data source | **Union: registry (declared) + recorder name index (observed)** |
+> | R-2A | `HasLiveHost` model | **Replaced by a state enum: Live \| HostStale \| NeverDeclared \| Unknown** |
+> | R-3A | mTLS navigation loss | **Catalogue degrades to recorder-only, with a banner naming the setting** |
+> | R-4A | Error banner mechanism | **Dedicated error region keyed by source, separate from broker identity** |
+> | R-5A | Front-end structure | **ES modules, one per view, shared fetch/render helpers — no build step** |
+> | R-6A | Routing with `/` in names | **Kind and name as query params: `#/entity?kind=service&name=…`** |
+> | R-7A | Polling architecture | **One scheduler; only the visible view polls; interval in `DashboardOptions`** |
 
 ## The model the product already has
 
@@ -174,3 +182,99 @@ maintains, read through the path 020 built.
 - `docs/features/015-recoverability/design.md` — why `hw.replies` exists
 - `docs/features/017-node-decommissioning/design.md` — the retirement countdown the nodes view surfaces
 - `docs/features/018-pubsub-unification/design.md` — the `{channel}@{group}` derivation R3.3 renders as nesting
+
+
+---
+
+## Engineering Review Findings (2026-08-09)
+
+Eight decisions resolved interactively, recorded here so a future implementer does not
+re-discover them.
+
+### R-0A — T3 deferred: the observed node address is a separate feature
+
+**Problem.** T3 changes a persisted binary framing (`NodeRegistration`) that has no version
+byte, touches the protocol, and has unverified feasibility — Highway registers commands as
+parameterless factories with no route to `RespServerSession.networkSender`.
+
+**Decision.** Defer to its own feature with a framing spike. 022 is rendering + read-path
+extension; no storage or protocol change.
+
+### R-1A — Catalogue is the union of registry + recorder name index
+
+**Problem.** `ToCatalogInfo()` reports only what a node hosts/subscribes/processes. An entity
+nobody hosts (R3.4's "no live host" case) appears in no catalog and would be invisible.
+
+**Decision.** Union of declared (registry, read via `IBrokerState`) and observed (recorder
+name index, in-process). The recorder needs no connection, so it also works under mTLS where
+the loopback path is unavailable.
+
+### R-2A — `HasLiveHost` replaced by a state enum
+
+```csharp
+internal enum EntityState
+{
+    Live,            // declared by at least one live node
+    HostStale,       // declared by a node, but all its nodes are stale/absent
+    NeverDeclared,   // observed in traffic only — no node ever registered it
+    Unknown          // unclassifiable
+}
+```
+
+**Why.** The last two have opposite remedies — restart a node vs deploy something that was
+never there — and a bool collapses them.
+
+### R-3A — mTLS: catalogue degrades to recorder-only, with a banner
+
+**Problem.** Under `ClientCertificateRequired` the loopback connection is unsupported, so the
+nodes and catalogue views lose host information. Since entity pages are the only route to
+events (R4.3), losing them would lose access to events too.
+
+**Decision.** The catalogue is still populated (from the recorder name index, which is
+in-process). Entities list and are navigable. Hosts and state show "unavailable — mTLS" with
+a reason. Events remain reachable.
+
+### R-4A — Error banner is a keyed error region, not `#broker-info`
+
+**Root cause.** `#broker-info` holds both broker identity and error text. Only `loadRecorder`
+rewrites it. After navigation (`showNameView` → `stopAutoRefresh`), a stale error remains
+permanently above a working page — the exact symptom R6.1 reports.
+
+**Fix.** A dedicated error region where each source (recorder, catalogue, nodes) owns an entry.
+Success clears that entry. Broker identity is separate and never overwritten by a failure.
+
+### R-5A — ES modules, one per view, shared helpers
+
+**Problem.** 022 roughly triples the JS and adds per-view mutable state. One IIFE with eight
+globals is the file that makes the next feature cost double.
+
+**Constraint.** Feature 011's "no build step" holds.
+
+**Shape.** `app.js` becomes the router/scheduler. Each view is an ES module (`nodes.js`,
+`catalogue.js`, `entity.js`, `diagnostics.js`) with its own state and lifecycle. Shared helpers
+(`fetch.js`, `render.js`) prevent DRY violations. `<script type="module">`.
+
+### R-6A — Routing: kind and name as query params
+
+**Problem.** `Identifier.IsValid` permits `/` (only rejects `< 0x20`, `0x7F`, `@`). So
+`orders/create` is a legal name and multi-segment path routes become ambiguous.
+
+**Fix.** `#/entity?kind=service&name=orders/create` — names never participate in path parsing.
+Kind travels explicitly, which also satisfies R1.2.
+
+Routes: `#/`, `#/nodes`, `#/catalogue`, `#/entity?kind=…&name=…`, `#/diagnostics`.
+
+### R-7A — One scheduler; only the visible view polls
+
+**Problem.** Three uncoordinated pollers (recorder, catalogue, nodes), each able to fire while
+their view is hidden. Interval hardcoded at 3 s despite 020 Open Decision 2 promising it
+configurable.
+
+**Fix.** One `ViewScheduler`: keeps one timer, calls `refresh()` on the active view only. The
+interval is configurable via `DashboardOptions.PollIntervalMs` (default 3000). Hidden views do
+not poll — navigation starts/stops cleanly.
+
+### Escape hatches taken
+
+- `esc()` will handle `0`/`false` explicitly rather than rendering them as blank.
+- An ASCII diagram will document entity assembly (registry → declared; recorder → observed; union → classify → state) in the catalogue reader's doc comment.
