@@ -445,3 +445,50 @@ for it. Doing it honestly needs a `--retirement-threshold` flag on the sample br
 to stop the order service without stopping the storefront — which the sample harness does not
 have. Recorded rather than faked with a shortened timer that proves nothing an operator would
 recognise.
+
+
+---
+
+## 2026-08-09 — samples stopped running, and why
+
+**Reported:** "the sample doesn't run anymore, nodes can't connect to server."
+
+**Cause:** the `data/` directory left behind by an earlier run. Garnet's AOF stores a
+**positional stored-procedure id** per record. Feature 018 removed `HW.RECEIVE` and `HW.RACK`,
+so every id after them shifted, and replaying that log fails:
+
+```
+fail: SingleDatabaseManager[0] An error occurred AofProcessor.RecoverReplay
+      GarnetException: Transaction procedure 17 not found
+```
+
+**Both outcomes were bad.** Recovery aborts and the broker carries on with an **empty store** —
+"Highway server ready", dashboard up, every message it was asked to keep silently gone, and the
+only evidence one `fail:` line among fifty `info:` ones. If recovery gets far enough to restore
+channel keys instead, 018's guard fires and the broker refuses to start at all: the reported
+symptom.
+
+**Feature 016 made this everyone's problem.** Durability became the default, so every broker now
+has a data directory, and the next command-set change would have done this silently to all of
+them.
+
+**Fixed:** the data directory carries a `highway.format` stamp, checked at `Build()` *before*
+Garnet attempts recovery. A mismatch refuses with a message naming the format found and the
+remedy. A fresh directory is stamped so the next start can check it.
+
+018's own guard scanned for leftover `hw:ch:*:grp:*` keys — a symptom that can only appear when
+recovery **succeeded**, which is precisely the case that did not need catching.
+
+### Findings
+
+**17. The samples' `data/` directory was never gitignored.** Added, along with the
+`highway-data*` shapes 016's default produces.
+
+**18. Builder unit tests were littering.** `HighwayServerBuilderTests` calls `Build()` for
+things like endpoint formatting, and after 016 each call created a `highway-data-{port}`
+directory beside the test binaries. They now use `Ephemeral()` — none of them needs durability,
+and the stale directories from earlier runs were what first made the suite fail.
+
+**19. `--no-build` hid the fix.** The first verification of the new stamp appeared to do nothing
+because `dotnet run --no-build` reused the sample's stale copy of `Highway.Server.dll`. Worth
+knowing before concluding a server change "did not take".

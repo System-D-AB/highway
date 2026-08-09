@@ -408,7 +408,69 @@ public sealed class HighwayServerBuilder
                 "Ephemeral().", ex);
         }
 
+        VerifyStorageFormat(dir);
+
         opts.DataDir = dir;
+    }
+
+    /// <summary>
+    /// The storage format a data directory was written by. Bumped whenever the <b>command set</b>
+    /// or an <b>entry framing</b> changes, because both are encoded in the AOF.
+    ///
+    /// <para>1 = pre-013. 2 = 013's versioned entry framings. 3 = 018, which removed
+    /// <c>HW.RECEIVE</c> and <c>HW.RACK</c> and thereby shifted every stored-procedure id.</para>
+    /// </summary>
+    private const int StorageFormatVersion = 3;
+
+    private const string StorageFormatFile = "highway.format";
+
+    /// <summary>
+    /// Refuses a data directory written by an incompatible build, before Garnet tries to
+    /// recover from it (feature 016 follow-up).
+    ///
+    /// <para><b>Why this is needed, and why the 018 check was not enough.</b> Garnet's AOF
+    /// stores a stored-procedure <i>id</i> per record, and those ids are positional. Feature 018
+    /// removed two commands, so every id after them shifted, and replaying an older AOF fails
+    /// with "Transaction procedure N not found". Recovery then aborts and the broker carries on
+    /// with an <b>empty store</b> — healthy-looking, and missing every message it was asked to
+    /// keep. The 018 check scanned for leftover <c>hw:ch:*:grp:*</c> keys, which can only be
+    /// found if recovery <i>succeeded</i>: it looked for a symptom that is absent in the worst
+    /// case.</para>
+    ///
+    /// <para>Feature 016 made this everyone's problem by turning durability on by default, so
+    /// the next command-set change would silently empty every existing broker.</para>
+    /// </summary>
+    private static void VerifyStorageFormat(string dir)
+    {
+        var stampPath = Path.Combine(dir, StorageFormatFile);
+        var hasData = Directory.Exists(Path.Combine(dir, "checkpoints"))
+                   || Directory.Exists(Path.Combine(dir, "log"));
+
+        if (File.Exists(stampPath))
+        {
+            var text = File.ReadAllText(stampPath).Trim();
+
+            if (int.TryParse(text, out var found) && found == StorageFormatVersion)
+                return;
+
+            throw new InvalidOperationException(
+                $"Highway's data directory '{dir}' was written in storage format '{text}', but this " +
+                $"build reads format {StorageFormatVersion}. Recovering it would fail part-way and " +
+                "leave the broker running with an empty store, which looks healthy and is not. " +
+                "Drain it with the previous version, or delete the directory to start fresh. " +
+                "Use Ephemeral() if this broker does not need to keep anything.");
+        }
+
+        if (hasData)
+        {
+            throw new InvalidOperationException(
+                $"Highway's data directory '{dir}' holds data written before storage formats were " +
+                $"stamped, and cannot be read by this build (format {StorageFormatVersion}). " +
+                "Drain it with the previous version, or delete the directory to start fresh. " +
+                "Use Ephemeral() if this broker does not need to keep anything.");
+        }
+
+        File.WriteAllText(stampPath, StorageFormatVersion.ToString(CultureInfo.InvariantCulture));
     }
 
     /// <summary>
