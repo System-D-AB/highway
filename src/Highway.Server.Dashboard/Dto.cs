@@ -112,3 +112,49 @@ internal sealed record NodeRowDto(
 internal sealed record NodesDto(
     IReadOnlyList<NodeRowDto> Nodes,
     string? Unavailable);
+
+
+// ---- feature 023: messages -------------------------------------------------
+
+/// <summary>
+/// One message as a developer thinks of it. <b>Both nodes</b>, because a message is usually
+/// produced on one and processed on another.
+/// </summary>
+internal sealed record MessageRowDto(
+    string Id,
+    string Outcome,
+    DateTimeOffset? StartedAt,
+    string? StartedOnNode,
+    DateTimeOffset? CompletedAt,
+    string? CompletedOnNode,
+    double? DurationMs,
+    string? FailureDetail);
+
+internal sealed record MessageListDto(
+    IReadOnlyList<MessageRowDto> Messages,
+    int Processed,
+    int Failed,
+    int DeadLettered,
+    int Refused,
+    int InFlight,
+    DateTimeOffset? WindowStart);
+
+internal sealed record MessageStepRowDto(
+    DateTimeOffset At,
+    string Type,
+    string Visibility,
+    string? Node,
+    double? SincePreviousMs,
+    string? Detail);
+
+/// <summary>
+/// One message's whole life. The body loads here and not in the list (023 R7.4): a list that
+/// ships every payload it names is a dashboard that becomes its own broker's heaviest client.
+/// </summary>
+internal sealed record MessageDetailDto(
+    string Id,
+    string Entity,
+    string Outcome,
+    IReadOnlyList<MessageStepRowDto> Steps,
+    string? Payload,
+    string PayloadState);

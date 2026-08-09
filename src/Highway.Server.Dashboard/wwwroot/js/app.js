@@ -8,12 +8,16 @@ import * as nodes from './nodes.js';
 import * as catalogue from './catalogue.js';
 import * as entity from './entity.js';
 import * as diagnostics from './diagnostics.js';
+import * as message from './message.js';
+import * as events from './events.js';
 
 const VIEWS = {
     '/nodes': nodes,
     '/catalogue': catalogue,
     '/entity': entity,
     '/diagnostics': diagnostics,
+    '/message': message,
+    '/events': events,
 };
 
 const options = { pollIntervalMs: 3000 };

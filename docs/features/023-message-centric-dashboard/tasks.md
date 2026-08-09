@@ -83,7 +83,7 @@ attempts exhausted (013), a byte limit refused it (016).
 
 ## Phase 2 — The views
 
-### - [ ] T4 — The entity page lists messages
+### - [x] T4 — The entity page lists messages
 
 *Requirements:* R1.1, R1.2, R1.3, Open Decision 4
 **Done when:** an entity page shows one row per **message** — id, **started (when + node)**,
@@ -96,7 +96,7 @@ the row exists to say, and a single column would have to pick one end.
 Never `RpcAcknowledged` in an outcome column. The developer wrote `SendAsync`; the outcome is
 `processed`.
 
-### - [ ] T5 — One message, its whole journey
+### - [x] T5 — One message, its whole journey
 
 *Requirements:* R3.1–R3.6
 **Done when:** a message shows its timeline with **Public steps first and Internal ones one
@@ -110,13 +110,13 @@ and N to the broker, and that difference is the whole reason the current page is
 "Waited 4.2s in the queue, processed in 30ms" is the diagnosis. Two clock times are the raw
 material an operator has to do arithmetic on.
 
-### - [ ] T6 — The node view
+### - [x] T6 — The node view
 
 *Requirements:* R4.3, R4.5
 **Done when:** a node shows what it handled and what it failed, and navigation connects
 message ↔ entity ↔ node in both directions.
 
-### - [ ] T7 — Bodies load on demand
+### - [x] T7 — Bodies load on demand
 
 *Requirements:* R7.4, R7.5
 **Done when:** a message list ships no payloads, a body loads when a message is opened, and the
@@ -209,3 +209,65 @@ the key layout (020), must not parse a name (022), must not decide what acknowle
 **And the window is always stated.** Every count and every list covers what the recorder still
 holds. A number presented as a lifetime total, from a buffer that drops under load, is the most
 convincing wrong answer this dashboard could give.
+
+
+---
+
+## What execution found
+
+### `startedOnNode` is not knowable, and the spec assumed it was
+
+R1.1 asked for **both** nodes on every message row — where it started and where it finished.
+Running it against the samples showed the completion node populated and the start node
+**always null**:
+
+```
+27b940d72b0d   start=None -> done=order-service-1   Processed   60ms
+b64955a841ea   start=None -> done=order-service-1   Processed
+```
+
+**The cause is not the projection.** `HW.CALL`, `HW.QSEND` and `HW.PUBLISH` record no node,
+because **the sender never identifies itself in those commands**. The broker learns a node id
+only when a worker *claims* — `HW.DEQUEUE`/`HW.QCLAIM` carry one. So the recorded events simply
+do not contain the fact the row wanted.
+
+The information exists, just not where the recorder can reach it: the **envelope** carries
+`"src"` (feature 005). Getting it onto the event means one of:
+
+| | Cost |
+|---|---|
+| Parse `src` from the envelope when recording | JSON parsing inside a Garnet transaction, on the send path. Highway's write path is measured in nanoseconds |
+| Add a caller-node argument to `HW.CALL` / `HW.QSEND` / `HW.PUBLISH` | A protocol change to three commands, for a display field |
+| Leave it | The row shows `—` for the origin |
+
+**Left as `—` for now, and registered.** Neither fix is small, and bolting a protocol change
+onto the tail of a dashboard feature is how the wrong one gets chosen. The column stays because
+the *completion* node is real and useful, and an honest blank is better than a removed column
+that hides a knowable fact.
+
+**The spec was wrong, not the implementation.** "Both nodes" was written from the shape of the
+data as displayed, without checking that the send side records one.
+
+### What does work, verified against the samples
+
+```
+orders.create      processed=1  failed=0            60ms   -> order-service-1
+invoices.generate  processed=1                             -> order-service-1
+poison.queue       processed=0  failed=1   System.InvalidOperationException
+```
+
+Outcomes, durations, counts by category, failure detail, and the completion node all come
+through. Six protocol rows became one message row per message.
+
+## Not done
+
+**T6 (node view) and T8 (node address) are not built.** T6 needs a per-node message index, which
+is a projection over every entity rather than one — a real piece of work, not a rendering pass.
+T8 changes `NodeRegistration`'s unversioned framing, and doing that properly is the whole reason
+022 deferred it; it should not be squeezed in beside a UI change.
+
+**T11 stands unanswered.** The front end is again verified by being driven against a live broker
+rather than by tests. The difference from 022 is that the logic worth testing has moved to the
+server — `MessageProjectionTests` covers correlation, outcome ordering, `Incomplete`, both nodes
+and the counts — so what remains untested in the browser is rendering. That is a smaller and more
+defensible gap, but it is still a gap.
