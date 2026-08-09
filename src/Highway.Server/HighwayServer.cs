@@ -40,8 +40,13 @@ public sealed class HighwayServer : IHighwayServer
         _logger.LogInformation("Highway commands registered.");
 
         // Create components after command registration (T4)
+        // The factory is nullable here and the existing line already guarded it; the state
+        // reader must use the SAME guarded instance, not the raw parameter.
+        var factory = loggerFactory ?? NullLoggerFactory.Instance;
+
         var context = new HighwayComponentContext(
-            opts, _recorder, loggerFactory ?? NullLoggerFactory.Instance, Endpoint);
+            opts, _recorder, factory, Endpoint,
+            new Observability.BrokerState(opts, factory.CreateLogger<Observability.BrokerState>()));
 
         _components = (componentFactories ?? [])
             .Select(f => f(context))
@@ -86,27 +91,9 @@ public sealed class HighwayServer : IHighwayServer
         // EVERY transport setting the server was just started with. Mirroring only the
         // password broke TLS outright: a plaintext connect against a TLS listener fails, the
         // exception escaped Start(), and no TLS server could start at all.
-        var config = new StackExchange.Redis.ConfigurationOptions
-        {
-            EndPoints = { { "localhost", _opts.Port } },
-            AllowAdmin = true,
-            AbortOnConnectFail = false,
-            ConnectTimeout = 5_000,
-        };
-
-        if (_opts.Authentication.IsConfigured)
-            config.Password = _opts.Authentication.Password;
-
-        if (_opts.Tls.IsConfigured)
-        {
-            config.Ssl = true;
-            config.SslHost = "localhost";
-
-            // We are the server. Validating our own certificate proves nothing, and a
-            // self-signed certificate — the common case for a loopback broker — would fail
-            // the default check and take the whole server down with it.
-            config.CertificateValidation += (_, _, _, _) => true;
-        }
+        // One shared builder (020 T3): the startup check and the dashboard must never drift
+        // apart on transport settings, which is exactly how 018 broke TLS.
+        var config = Internal.LoopbackConnection.Configure(_opts);
 
         using var mux = StackExchange.Redis.ConnectionMultiplexer.Connect(config);
 
@@ -120,9 +107,7 @@ public sealed class HighwayServer : IHighwayServer
                 "The broker is starting WITHOUT that check: if this data directory contains " +
                 "channel data from before the 018 unification, those messages will never be " +
                 "delivered. Verify with 'SCAN 0 MATCH hw:ch:*:grp:*' before trusting this broker.",
-                _opts.Tls.ClientCertificateRequired
-                    ? " (the server requires a client certificate, which the check cannot present)"
-                    : "");
+                Internal.LoopbackConnection.Unsupported(_opts) is { } why ? $" ({why})" : "");
             return;
         }
 
