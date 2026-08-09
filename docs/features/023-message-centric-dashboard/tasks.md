@@ -10,7 +10,7 @@ JavaScript — the mistake 022 avoided twice.
 
 ## Phase 1 — The projection
 
-### - [ ] T1 — Correlate events into messages, server-side
+### - [x] T1 — Correlate events into messages, server-side
 
 A projection over the recorder's buffers: group by id, scoped by entity, and derive an outcome.
 
@@ -35,7 +35,7 @@ R3.4 work is the one that crosses names.
 **Do not change what is recorded to make this easier.** That would be a protocol change for a
 display problem.
 
-### - [ ] T1a — Classify every event `Public` or `Internal`
+### - [x] T1a — Classify every event `Public` or `Internal`
 
 *Requirements:* R1.6, R1.7, R1.8, design Decision 5
 **Done when:** `HighwayEventType` carries a visibility, decided **on the server**, and a test
@@ -56,7 +56,7 @@ doorbells, sweeps, requeues, topology.
 The enumeration test is the same mechanism 016's `BoundedStructureTests` used, and it earned its
 keep on first contact in 017.
 
-### - [ ] T2 — `Incomplete` is an outcome, not a failure
+### - [x] T2 — `Incomplete` is an outcome, not a failure
 
 *Requirements:* R1.5
 **Done when:** a message whose early events have aged out of the bounded recorder reports
@@ -66,7 +66,7 @@ keep on first contact in 017.
 the normal state under load — exactly when the view is most needed. Reporting it as `Abandoned`
 would be a confident lie at the worst moment.
 
-### - [ ] T3 — Counts, with their window
+### - [x] T3 — Counts, with their window
 
 *Requirements:* R2.1, R2.2, R2.4, R2.5
 **Done when:** every entity reports processed / failed / dead-lettered / refused counts, **each
