@@ -171,10 +171,21 @@ wrong trade.
 gains a timestamp it should probably gain it alongside whatever else the next breaking change
 needs, so the format breaks once rather than twice.
 
-### - [ ] T13 — Losses are counted and visible — **partial**
+### - [x] T13 — Losses are counted and visible
 
 *Requirements:* R4.6, R5.4
-**Partial.** A refusal is visible where it matters most — the producer gets `HW_QUEUE_FULL`
+**Done.** `HW.STATS` reports `sendsRefused`, and every refusal — send or publish — records a
+`SendRefused` event naming the queue, or for a publish the **group** whose queue was full.
+Retention removals do not exist to count (T12 is blocked on the entry framing).
+
+> **A defect found by writing that test.** A refusal is decided in `Main`, which the command's
+> `Failed` flag does not cover — it only reflects `Prepare`-phase rejections. So a refused
+> publish fell straight through `if (Failed) return;`, **rang every subscriber's doorbell and
+> recorded itself as `Published`**. Workers woke for a message that did not exist and the replay
+> claimed a publish that never happened. Introduced by 016 and caught only when the counter gave
+> a reason to look at that path.
+
+Superseded text: *A refusal is visible where it matters most — the producer gets `HW_QUEUE_FULL`
 naming the queue or group, and `hw:q:{queue}:bytes` is readable, so an operator can see how
 close a queue is to its limit. A **counter of refusals** in `HW.STATS` and a recorder event are
 not built; retention removals do not exist to count (T12).

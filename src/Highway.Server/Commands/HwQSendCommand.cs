@@ -46,6 +46,11 @@ internal sealed class HwQSendCommand : HighwayCommandBase
     {
         _messageIdBytes = [];
         _payloadBytes = [];
+
+        // Must reset with the rest: a stale value would count a refusal that did not happen on
+        // the next invocation of this pooled instance -- exactly the leak feature 004.1's
+        // sealed Prepare was written to make structurally impossible.
+        _refusedReason = null;
         _deliverAtTicks = 0;
     }
 
@@ -110,6 +115,7 @@ internal sealed class HwQSendCommand : HighwayCommandBase
                 var current = ReadByteCounter(api, counterKey);
                 if (current + entry.Length > _opts.MaxQueueBytes)
                 {
+                    _refusedReason = $"queue '{_queue}' at {current}/{_opts.MaxQueueBytes} bytes";
                     WriteError(ref output, HighwayErrors.Format(
                         HighwayErrors.QueueFull,
                         $"queue '{_queue}' is at its limit ({current} of {_opts.MaxQueueBytes} bytes); " +
@@ -141,8 +147,19 @@ internal sealed class HwQSendCommand : HighwayCommandBase
         }
     }
 
+    /// <summary>Set when the byte limit refused this send, so Finalize can count it.</summary>
+    private string? _refusedReason;
+
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
     {
+        if (_refusedReason is not null)
+        {
+            _recorder.Record(
+                HighwayEventType.SendRefused, _queue ?? "?",
+                requestId: _messageId,
+                errorCode: _refusedReason);
+        }
+
         _recorder.Record(
             HighwayEventType.QueueSent, _queue ?? "?",
             requestId: _messageId,

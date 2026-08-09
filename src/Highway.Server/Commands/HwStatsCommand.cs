@@ -268,6 +268,9 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             // times has that happened here?" must be answerable without trawling a replay.
             ("groupsRetired", _recorder.GroupsRetired.ToString()),
             ("messagesDiscarded", _recorder.MessagesDiscarded.ToString()),
+
+            // Feature 016 R4.6. A producer sees its own refusal; an operator needs the rate.
+            ("sendsRefused", _recorder.SendsRefused.ToString()),
         ];
     }
 

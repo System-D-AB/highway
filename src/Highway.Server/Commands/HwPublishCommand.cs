@@ -38,6 +38,9 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
     /// <summary>Groups past HALF the threshold: not retired, but heading that way (017).</summary>
     private string[] _suspectGroups = [];
+
+    /// <summary>Set when a full group queue refused this publish, so Finalize can count it.</summary>
+    private string? _refusedReason;
     private long _messageId;
 
     public HwPublishCommand(HighwayServerOptions opts, DoorbellBridge doorbell, FlightRecorder recorder)
@@ -63,6 +66,7 @@ internal sealed class HwPublishCommand : HighwayCommandBase
     {
         _deadGroups = [];
         _suspectGroups = [];
+        _refusedReason = null;
         _retiredGroups = 0;
         _retiredMessages = 0;
         _retiredBytes = 0;
@@ -262,6 +266,7 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
                         if (used + rpcEntry.Length > _opts.MaxQueueBytes)
                         {
+                            _refusedReason = $"group '{group}' at {used}/{_opts.MaxQueueBytes} bytes";
                             WriteError(ref output, HighwayErrors.Format(
                                 HighwayErrors.QueueFull,
                                 $"channel '{_channel}' refused: group '{group}' is at its limit " +
@@ -291,6 +296,19 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
     public override void Finalize<TGarnetApi>(TGarnetApi api, ref CustomProcedureInput procInput, ref MemoryResult<byte> output)
     {
+        if (_refusedReason is not null)
+        {
+            _recorder.Record(
+                HighwayEventType.SendRefused, _channel ?? "?",
+                errorCode: _refusedReason);
+
+            // A refused publish wrote nothing, so it must not ring a doorbell or record itself
+            // as Published. `Failed` only covers Prepare-phase rejections, so a refusal decided
+            // in Main falls straight through it -- which would have woken every subscriber for
+            // a message that does not exist and logged a publish that never happened.
+            return;
+        }
+
         if (Failed) return; // a rejected command must never ring a doorbell
 
         // Loud, and in the replay (017 T7). An operator who later asks "where did my

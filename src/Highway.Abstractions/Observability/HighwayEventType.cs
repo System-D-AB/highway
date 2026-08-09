@@ -126,4 +126,13 @@ public enum HighwayEventType
     /// hung, and both are worth knowing before the dead letter appears.</para>
     /// </summary>
     ProcessingCapExceeded = 21,
+
+    /// <summary>
+    /// A send or publish was refused because a queue was at its byte limit (feature 016).
+    /// <c>ErrorCode</c> names the queue, or for a publish the group whose queue was full.
+    ///
+    /// <para>Counted as well as recorded: a limit nobody can observe being hit is a limit that
+    /// gets blamed on the network.</para>
+    /// </summary>
+    SendRefused = 22,
 }

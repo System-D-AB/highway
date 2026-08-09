@@ -215,6 +215,66 @@ public class ByteBudgetTests : IDisposable
             "a group queue is a queue, so it is accounted for like one");
     }
 
+    // ---- refusals are visible (016 R4.6) --------------------------------------
+
+    [Fact]
+    public void RefusalsAreCountedInStats()
+    {
+        var db = Db();
+        const string q = "bb.counted";
+
+        var refused = 0;
+        for (var i = 0; i < 50; i++)
+        {
+            try { db.Execute("HW.QSEND", q, $"m-{i}", Payload()); }
+            catch (RedisServerException) { refused++; }
+        }
+
+        refused.Should().BeGreaterThan(0);
+
+        var stats = (RedisResult[])db.Execute("HW.STATS")!;
+        var map = new Dictionary<string, string>();
+        for (var i = 0; i + 1 < stats.Length; i += 2)
+            map[stats[i].ToString()!] = stats[i + 1].ToString()!;
+
+        map.Should().ContainKey("sendsRefused");
+        int.Parse(map["sendsRefused"]).Should().Be(refused,
+            "a producer sees its own refusal; an operator needs the rate, or a full queue gets " +
+            "blamed on the network");
+    }
+
+    /// <summary>
+    /// A refusal is decided in <c>Main</c>, which the command's <c>Failed</c> flag does not
+    /// cover — so without an explicit return it fell through to the doorbell and recorded
+    /// itself as <c>Published</c>. Waking every subscriber for a message that does not exist.
+    /// </summary>
+    [Fact]
+    public void ARefusedPublish_IsNotRecordedAsPublished()
+    {
+        var db = Db();
+        const string channel = "bb.norecord";
+
+        db.Execute("HW.SUBSCRIBE", channel, "grp");
+        for (var i = 0; i < 50; i++)
+        {
+            try { db.Execute("HW.PUBLISH", channel, Payload()); }
+            catch (RedisServerException) { break; }
+        }
+
+        var replay = (RedisResult[])db.Execute("HW.REPLAY", channel)!;
+        var flat = replay
+            .SelectMany(e => ((RedisResult[])e!).Select(f => f.ToString() ?? ""))
+            .ToArray();
+
+        flat.Any(f => f.Contains("SendRefused")).Should().BeTrue("the refusal is recorded");
+
+        var published = flat.Count(f => f == "Published");
+        var queueLen = (long)db.Execute("LLEN", $"hw:q:{channel}@grp:q");
+        published.Should().Be((int)queueLen,
+            "exactly the publishes that were stored may be recorded as Published - a refused " +
+            "one wrote nothing");
+    }
+
     [Fact]
     public void ZeroDisablesTheLimit()
     {
