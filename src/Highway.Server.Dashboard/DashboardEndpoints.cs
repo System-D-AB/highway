@@ -58,9 +58,50 @@ internal static class DashboardEndpoints
                 // an operator do arithmetic; "stale 4m" does not (022 R2.2).
                 n.IsLive ? "live" : n.SinceLastSeen > TimeSpan.FromHours(1) ? "absent" : "stale",
                 n.SinceLastSeen.TotalSeconds,
-                n.Services, n.Queues, n.Channels)).ToArray();
+                n.Services, n.Queues, n.Channels, n.SeenFrom)).ToArray();
 
             return Results.Json(new NodesDto(rows, null));
+        });
+
+        // One node's work (023 T6). This is a projection across EVERY entity rather than one,
+        // which is why it did not come for free with the entity page: the recorder indexes by
+        // entity name, and no index maps a node to the messages it handled. Building one would
+        // be new storage for a view; scanning the bounded recorder is not.
+        app.MapGet("/api/node/{name}", async (string name, IBrokerState state, FlightRecorder recorder) =>
+        {
+            var result = await state.NodesAsync();
+            var node = result.Value?.FirstOrDefault(n => n.Name == name);
+
+            var messages = new List<NodeMessageRowDto>();
+            foreach (var entity in recorder.Names().Select(n => n.Name))
+            {
+                if (entity == "hw.replies") continue;
+
+                foreach (var m in MessageProjection.Summarise(entity, ReadAllFor(recorder, entity)))
+                {
+                    // Attributed by where the work FINISHED, which is the only node these
+                    // events name. The send side records none -- see 023's execution notes.
+                    if (m.CompletedOnNode == name)
+                        messages.Add(new NodeMessageRowDto(
+                            entity, m.Id, m.Outcome.ToString(), m.CompletedAt, m.DurationMs, m.FailureDetail));
+                }
+            }
+
+            messages.Sort((a, b) => Nullable.Compare(b.CompletedAt, a.CompletedAt));
+
+            // A node the registry cannot confirm may still have visible work, so the page is
+            // rendered either way and says which half is missing.
+            return Results.Json(new NodeDetailDto(
+                name,
+                node is null ? "unknown" : node.IsLive ? "live"
+                    : node.SinceLastSeen > TimeSpan.FromHours(1) ? "absent" : "stale",
+                node?.SinceLastSeen.TotalSeconds ?? 0,
+                node?.SeenFrom,
+                node?.Services ?? [], node?.Queues ?? [], node?.Channels ?? [],
+                messages,
+                messages.Count(m => m.Outcome == "Processed"),
+                messages.Count(m => m.Outcome is "Failed" or "DeadLettered"),
+                node is null ? result.Unavailable ?? "this node is not in the registry" : null));
         });
 
         app.MapGet("/api/catalogue", async (IBrokerState state, FlightRecorder recorder) =>

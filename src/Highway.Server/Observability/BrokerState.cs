@@ -130,7 +130,8 @@ internal sealed class BrokerState : IBrokerState, IAsyncDisposable
 
         try
         {
-            return StateResult<IReadOnlyList<NodeDto>>.Ok(await ReadNodesAsync(db).ConfigureAwait(false));
+            var nodes = await ReadNodesAsync(db).ConfigureAwait(false);
+            return StateResult<IReadOnlyList<NodeDto>>.Ok(WithObservedAddresses(nodes));
         }
         catch (Exception ex)
         {
@@ -244,6 +245,42 @@ internal sealed class BrokerState : IBrokerState, IAsyncDisposable
         }
 
         return nodes;
+    }
+
+    /// <summary>
+    /// Attaches each node's live peer address by joining the registry to CLIENT LIST on the
+    /// client name the node set when it connected (023 T8).
+    ///
+    /// <para>Nothing new is stored. The alternative was a field in the registration record,
+    /// which would have meant versioning an unversioned binary framing to carry a value that
+    /// goes stale the moment a node reconnects from a different port. The live socket is both
+    /// cheaper and more truthful.</para>
+    ///
+    /// <para>A node with several connections -- Highway opens more than one -- resolves to the
+    /// first, since they share a peer host.</para>
+    /// </summary>
+    private IReadOnlyList<NodeDto> WithObservedAddresses(IReadOnlyList<NodeDto> nodes)
+    {
+        if (nodes.Count == 0) return nodes;
+
+        Dictionary<string, string> byName;
+        try
+        {
+            byName = _mux!.GetServers()[0].ClientList()
+                .Select(c => (Name: c.Name, Address: c.Address?.ToString()))
+                .Where(c => !string.IsNullOrEmpty(c.Name) && !string.IsNullOrEmpty(c.Address))
+                .GroupBy(c => c.Name!, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.First().Address!, StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            // The node list is the answer; the address is a decoration on it. Losing the
+            // decoration must not lose the answer.
+            _logger.LogDebug(ex, "Reading the client list failed; node addresses omitted");
+            return nodes;
+        }
+
+        return [.. nodes.Select(n => byName.TryGetValue(n.Name, out var addr) ? n with { SeenFrom = addr } : n)];
     }
 
     /// <summary>Extracts <c>{name}</c> from <c>hw:q:{name}:q</c>, tolerating names containing colons.</summary>

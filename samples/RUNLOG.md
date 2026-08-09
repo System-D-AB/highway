@@ -512,3 +512,44 @@ demonstrate the wrong shape, so it is recorded instead.
 **21. Incremental builds were hiding a warning.** A `--no-incremental` build surfaced a nullable
 warning in 017's `CleanAndByeForeverAsync` that ordinary builds had been reporting as zero.
 Worth running clean before claiming "zero warnings".
+
+---
+
+## 2026-08-09 — feature 023 (message-centric dashboard)
+
+Broker, order service and storefront, then `order 3 widget` / `invoice` / `low widget 2` /
+`poison` driven through the storefront REPL.
+
+### What the dashboard showed
+
+`/api/nodes` — the address is joined from the live connection, not stored anywhere:
+
+```
+order-service-1   live   seen from 127.0.0.1:63619   2 services · 2 queues · 1 channel
+```
+
+`/api/node/order-service-1` — four entities in one list, attributed by completion:
+
+```
+poison.queue                    Failed      39ms   System.InvalidOperationException
+inventory.low@order-service-1   Processed
+invoices.generate               Processed    5ms
+orders.create                   Processed   41ms
+```
+
+### Findings
+
+**1 — the node link had been dead since 022** *(fixed, T6)*. The nodes list linked to
+`#/node?name=…`; no such route existed, so the router's default silently rendered the catalogue.
+Clicking a node showed a page that looked plausible and was about something else. Nothing failed,
+which is why it survived a release.
+
+**2 — the storefront exits immediately when stdin is not a terminal** *(recorded, not fixed)*.
+Backgrounding it with redirected output makes it read EOF and print `Stopping...`, so a run that
+looks started generates no traffic and every panel reads empty. Piping the commands in works
+(`printf 'order 3 widget\nquit\n' | dotnet run …`) and is now the documented way to drive it
+non-interactively. Worth knowing before concluding the dashboard is broken.
+
+**3 — group queues appear under their raw name** *(recorded, cosmetic)*. `inventory.low@order-service-1`
+is what a subscriber's queue is called, and it is truthful, but it reads as an implementation
+detail beside `orders.create`. The catalogue already classifies these; the node page does not.

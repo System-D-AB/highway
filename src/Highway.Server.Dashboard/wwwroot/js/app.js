@@ -5,6 +5,7 @@
 // ambiguous about where the name ends.
 import { getJson, setActiveView } from './shared.js';
 import * as nodes from './nodes.js';
+import * as node from './node.js';
 import * as catalogue from './catalogue.js';
 import * as entity from './entity.js';
 import * as diagnostics from './diagnostics.js';
@@ -13,6 +14,7 @@ import * as events from './events.js';
 
 const VIEWS = {
     '/nodes': nodes,
+    '/node': node,
     '/catalogue': catalogue,
     '/entity': entity,
     '/diagnostics': diagnostics,
