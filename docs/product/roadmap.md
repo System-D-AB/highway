@@ -299,15 +299,32 @@ the shape of the feature, so the design is not written until they are settled.
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
 
-### 017 — Node Decommissioning
+### 017 — Node Decommissioning  ← **next**
 
-A node that is never coming back can say so, and an operator can say it on the node's
-behalf. Closes C1.5's unbounded growth.
+**Specced** — `docs/features/017-node-decommissioning/`. A node that is never coming back can
+say so, an operator can say it on the node's behalf, and — the part that matters — **the broker
+works it out by itself**.
 
-- `IHighwayClient.CleanAndByeForever()` — stop the loops first (or the next heartbeat resurrects the node), drain in-flight work, then purge
-- `HW.HEARTBEAT <node> BYE PURGE` — the operator path, for the far more common case where the node is already gone
-- Unacknowledged **RPC** work is requeued, never deleted; queued **messages** are deleted — the subscriber has declared it no longer exists
-- Returns what it destroyed, so an irreversible operation appears in a log
+**Feature 016 turned a memory leak into an outage.** A crashed subscriber's group queue fills to
+`MaxQueueBytes`, and because a fan-out reaches every registered group or none (018), **every
+publish to that channel is then refused**. One dead subscriber takes down a live channel. 016's
+Open Decision 5 accepted that cost on the condition this feature would exist.
+
+**The embarrassing part:** the broker already knows. Feature 006's heartbeat registry tracks
+node liveness; 018 made a subscriber group *be* a node. The two facts sit in the same process
+and have never been introduced. Connecting them is the feature.
+
+- `CleanAndByeForever()` — the node says so. Stop the loops **first**, or the next heartbeat resurrects it
+- `HW.HEARTBEAT <node> BYE PURGE` — the operator says it, for the commoner case where the node is already gone
+- **Automatic retirement** after a configurable absence (24h default), riding on the heartbeat prune
+- Subscriber queues are **deleted**; queue and RPC work is **requeued** — it belongs to the queue, not the node
+- Every retirement is loud: node, absence, threshold, and how many messages and bytes were discarded
+
+**Driven by liveness evidence, not consumption gaps.** RabbitMQ's `x-expires` and Azure's
+`AutoDeleteOnIdle` only know "nobody consumed for N minutes" and cannot tell a dead subscriber
+from a nightly batch job. Because a Highway group is a node with a heartbeat, Highway can. It is
+the one place the product can be strictly better than its closest analogues, and it costs
+nothing to take.
 
 
 The next theme is **not** breadth. It is making the delivery Highway already
