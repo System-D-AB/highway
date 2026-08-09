@@ -198,9 +198,35 @@ exactly where the pain is felt.
 `name`**, not bare strings. A string array parses as "a pure caller with no services", so the
 RPC-requeue assertion failed against correct code.
 
-## Not done
+## T7, completed afterwards
 
-**`HW.STATS` does not count retirements.** R3.4 asks for the count alongside the log and the
-recorder event; the first two are in. Left rather than half-built, and it pairs naturally with
-016's outstanding refusal counter and 015's dashboard work — three observability items that
-belong in one change rather than three.
+`HW.STATS` now reports `groupsRetired` and `messagesDiscarded`, and a `NodeSuspect` event fires
+at half the threshold.
+
+**There is no Warning-level server log, and there cannot be one.** R3.4 asked for it, but a
+command runs inside a Garnet transaction and has no `ILogger` — a fact worth writing down,
+because the next feature that wants to log from a command will meet it too. The counters and
+the recorder event are the mechanisms that exist, so those are what carry the obligation.
+`CleanAndByeForeverAsync` *does* log at Warning, because it runs client-side where a logger is
+available.
+
+The counters increment **before** the recorder's enabled check. A retirement that happened must
+be countable on a broker whose recorder is switched off: the count is not diagnostics, it is the
+receipt for a destructive act.
+
+Two more defects found by writing those two tests:
+
+1. **The explicit path was not counted.** `GroupRetired` was recorded only by the automatic
+   retirement in `HW.PUBLISH`, so `BYE PURGE` — the case where somebody *deliberately* destroyed
+   a backlog — incremented nothing.
+2. **The first suspect test retired the group it was trying to catch.** At a 300 ms threshold,
+   the window between "half" and "whole" is shorter than the calls that must happen inside it.
+   Its own server with a 4-second threshold fixed it. A timing test whose margin is smaller than
+   its own setup cost is not testing what it names.
+
+## Still not done
+
+**The samples cannot demonstrate retirement** (R6.4). Doing it honestly needs a
+`--retirement-threshold` flag plus a way to stop the order service without stopping the
+storefront, which the sample harness does not have. Faking it with a shortened timer would
+demonstrate nothing an operator would recognise. Recorded in `samples/RUNLOG.md` finding 16.

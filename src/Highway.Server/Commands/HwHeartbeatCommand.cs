@@ -415,8 +415,23 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
     {
         if (_form == Form.Liveness && !Failed) return;
 
+        // A retirement is a retirement however it was asked for (017 R3.4). Recording it only
+        // on the automatic path would leave the two explicit ones uncounted, which is precisely
+        // the case where somebody deliberately destroyed a subscriber's backlog.
+        if (_form == Form.Purge && _retired.Groups > 0)
+        {
+            _recorder.Record(
+                HighwayEventType.GroupRetired, _nodeId ?? "?",
+                nodeId: _nodeId,
+                count: (int)_retired.Messages,
+                errorCode: $"retired {_retired.Groups} group(s), discarded {_retired.Messages} " +
+                           $"message(s) / {_retired.Bytes} byte(s) by explicit BYE PURGE");
+        }
+
         _recorder.Record(
-            _form == Form.Departure ? HighwayEventType.NodeDeparted : HighwayEventType.NodeRegistered,
+            _form is Form.Departure or Form.Purge
+                ? HighwayEventType.NodeDeparted
+                : HighwayEventType.NodeRegistered,
             _nodeId ?? "?",
             nodeId: _nodeId,
             errorCode: FailureCode);

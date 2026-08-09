@@ -306,6 +306,76 @@ public class NodeDecommissioningTests : IDisposable
         _ = channel;
     }
 
+    // ---- observability (T7) ---------------------------------------------------
+
+    /// <summary>
+    /// R3.4 — a retirement must be countable, not merely replayable. A command runs inside a
+    /// Garnet transaction and has no logger, so the recorder's counter is the mechanism that
+    /// exists, and <c>HW.STATS</c> is where an operator finds it.
+    /// </summary>
+    [Fact]
+    public void RetirementIsCountedInStats()
+    {
+        var db = Db();
+
+        Register(db, "counted-node");
+        db.Execute("HW.SUBSCRIBE", "dc.counted", "counted-node");
+        db.Execute("HW.PUBLISH", "dc.counted", Payload(64));
+        db.Execute("HW.PUBLISH", "dc.counted", Payload(64));
+
+        db.Execute("HW.HEARTBEAT", "counted-node", "BYE", "PURGE");
+
+        var stats = (RedisResult[])db.Execute("HW.STATS")!;
+        var map = new Dictionary<string, string>();
+        for (var i = 0; i + 1 < stats.Length; i += 2)
+            map[stats[i].ToString()!] = stats[i + 1].ToString()!;
+
+        map.Should().ContainKey("groupsRetired").WhoseValue.Should().Be("1");
+        map["messagesDiscarded"].Should().Be("2",
+            "an operator must be able to answer 'what did we lose?' without trawling a replay");
+    }
+
+    /// <summary>
+    /// Decision 4 — the warning that precedes a retirement, as an event rather than a stored
+    /// state. An operator replaying a channel that later went quiet sees this first.
+    /// </summary>
+    [Fact]
+    public async Task AGroupPastHalfTheThreshold_IsRecordedAsSuspect()
+    {
+        // Its own server with a roomier threshold: at 300ms the window between "half" and
+        // "whole" is smaller than the cost of the calls that have to happen inside it, so the
+        // first version of this test retired the group it was trying to catch as suspect.
+        using var slow = new HighwayTestServer(o =>
+        {
+            o.MaxQueueBytes = Limit;
+            o.SubscriberRetirementThreshold = TimeSpan.FromSeconds(4);
+        });
+        var db = ConnectionMultiplexer.Connect(slow.ConnectionString).GetDatabase();
+        const string channel = "dc.suspect";
+
+        Register(db, "fading-node");
+        db.Execute("HW.SUBSCRIBE", channel, "fading-node");
+
+        // Past half (2s) but comfortably inside the whole threshold (4s).
+        await Task.Delay(2_500);
+        db.Execute("HW.PUBLISH", channel, Payload(64));
+
+        ((long)db.Execute("LLEN", $"hw:q:{channel}@fading-node:q")).Should().Be(1,
+            "suspect is a warning, not a retirement - nothing is destroyed yet");
+
+        // HW.REPLAY returns an array of field/value arrays; ToString() on the outer entries
+        // yields "N element(s)", so they have to be flattened before anything can be matched.
+        var replay = (RedisResult[])db.Execute("HW.REPLAY", channel)!;
+        var flattened = replay
+            .SelectMany(entry => ((RedisResult[])entry!).Select(f => f.ToString() ?? ""))
+            .ToArray();
+
+        flattened.Any(f => f.Contains("NodeSuspect") || f.Contains("half the retirement threshold"))
+            .Should().BeTrue(
+                "the warning must be visible in the replay before the loss happens - that is the " +
+                "whole point of an event instead of a stored suspect state");
+    }
+
     // ---- the asymmetry (R4) ---------------------------------------------------
 
     /// <summary>

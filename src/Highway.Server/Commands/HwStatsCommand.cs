@@ -263,6 +263,11 @@ internal sealed class HwStatsCommand : HighwayCommandBase
             ("nodes", live.ToString()),
             ("services", services.Count.ToString()),
             ("channels", channels.Count.ToString()),
+
+            // Feature 017. A retirement destroys a subscriber's whole backlog, so "how many
+            // times has that happened here?" must be answerable without trawling a replay.
+            ("groupsRetired", _recorder.GroupsRetired.ToString()),
+            ("messagesDiscarded", _recorder.MessagesDiscarded.ToString()),
         ];
     }
 

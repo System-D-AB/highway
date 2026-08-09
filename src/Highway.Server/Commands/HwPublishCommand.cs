@@ -35,6 +35,9 @@ internal sealed class HwPublishCommand : HighwayCommandBase
     private int _retiredGroups;
     private long _retiredMessages;
     private long _retiredBytes;
+
+    /// <summary>Groups past HALF the threshold: not retired, but heading that way (017).</summary>
+    private string[] _suspectGroups = [];
     private long _messageId;
 
     public HwPublishCommand(HighwayServerOptions opts, DoorbellBridge doorbell, FlightRecorder recorder)
@@ -59,6 +62,7 @@ internal sealed class HwPublishCommand : HighwayCommandBase
     protected override void ResetState()
     {
         _deadGroups = [];
+        _suspectGroups = [];
         _retiredGroups = 0;
         _retiredMessages = 0;
         _retiredBytes = 0;
@@ -149,6 +153,8 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
             var now = DateTime.UtcNow.Ticks;
             var dead = new List<string>();
+            var suspect = new List<string>();
+            var halfThreshold = _opts.SubscriberRetirementThreshold / 2;
 
             foreach (var group in _groups)
             {
@@ -165,9 +171,17 @@ internal sealed class HwPublishCommand : HighwayCommandBase
                 {
                     dead.Add(group);
                 }
+                else if (record.Length >= NodeRegistration.HeaderSize
+                         && NodeRegistration.IsStale(record.ReadOnlySpan, now, halfThreshold))
+                {
+                    // Past half the threshold: still alive as far as this feature is concerned,
+                    // but worth seeing in a replay before its backlog disappears.
+                    suspect.Add(group);
+                }
             }
 
             _deadGroups = [.. dead];
+            _suspectGroups = [.. suspect];
         }
 
         return true;
@@ -281,6 +295,15 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
         // Loud, and in the replay (017 T7). An operator who later asks "where did my
         // subscriber's backlog go?" must be able to answer it without guessing.
+        foreach (var group in _suspectGroups)
+        {
+            _recorder.Record(
+                HighwayEventType.NodeSuspect, _channel ?? "?",
+                nodeId: group,
+                errorCode: $"node '{group}' has been absent past half the retirement threshold; " +
+                           "its subscriber queue will be destroyed if it does not return");
+        }
+
         if (_retiredGroups > 0)
         {
             _recorder.Record(
