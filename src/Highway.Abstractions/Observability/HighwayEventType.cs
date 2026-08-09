@@ -39,9 +39,23 @@ public enum HighwayEventType
     /// message: a batch of 500 is one operation.
     /// <c>Count</c> carries the batch size.
     /// </summary>
+    /// <remarks>
+    /// <b>Never recorded since feature 018.</b> HW.RECEIVE was removed when pub/sub unified onto
+    /// the queue engine; a subscriber group's dead letters now arrive as
+    /// <see cref="QueueDeadLettered"/> like any other queue's. The value is kept rather than
+    /// deleted because it is documented protocol surface, and reusing the number later would
+    /// make an old replay mean something new.
+    /// </remarks>
     MessagesReceived = 7,
 
     /// <summary><c>HW.RACK</c> — a consumed message was acknowledged.</summary>
+    /// <remarks>
+    /// <b>Never recorded since feature 018.</b> HW.RACK was removed when pub/sub unified onto
+    /// the queue engine; a subscriber group's dead letters now arrive as
+    /// <see cref="QueueDeadLettered"/> like any other queue's. The value is kept rather than
+    /// deleted because it is documented protocol surface, and reusing the number later would
+    /// make an old replay mean something new.
+    /// </remarks>
     MessageAcknowledged = 8,
 
     /// <summary><c>HW.HEARTBEAT</c> registration form — a node announced its catalog.</summary>
@@ -66,6 +80,13 @@ public enum HighwayEventType
     /// to that group's dead-letter list instead of being redelivered (feature 013).
     /// <c>Count</c> carries the attempt count, <c>ErrorCode</c> the reason.
     /// </summary>
+    /// <remarks>
+    /// <b>Never recorded since feature 018.</b> the pub/sub dead-letter path was removed when pub/sub unified onto
+    /// the queue engine; a subscriber group's dead letters now arrive as
+    /// <see cref="QueueDeadLettered"/> like any other queue's. The value is kept rather than
+    /// deleted because it is documented protocol surface, and reusing the number later would
+    /// make an old replay mean something new.
+    /// </remarks>
     MessageDeadLettered = 12,
 
     /// <summary><c>HW.QSEND</c> - work was enqueued (feature 014).</summary>
@@ -125,6 +146,14 @@ public enum HighwayEventType
     /// <para>Recorded because a handler that routinely exhausts its cap is either mis-sized or
     /// hung, and both are worth knowing before the dead letter appears.</para>
     /// </summary>
+    /// <remarks>
+    /// <b>Never recorded, and it cannot be without new protocol surface.</b> The cap is reached
+    /// <i>client-side</i>, inside the worker loop, and the flight recorder is a server-side
+    /// facility that only ever sees what crosses the wire. When renewal stops, nothing is sent —
+    /// so there is no command for the server to record. Feature 019 R3.3 asked for this event
+    /// and the requirement was not satisfiable as written; the cap is surfaced client-side
+    /// instead, at Warning and on the client's <c>ActivitySource</c>.
+    /// </remarks>
     ProcessingCapExceeded = 21,
 
     /// <summary>

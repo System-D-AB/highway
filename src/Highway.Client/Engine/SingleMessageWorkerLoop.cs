@@ -245,6 +245,9 @@ internal abstract class SingleMessageWorkerLoop
                 {
                     // Loud, and once: a handler that routinely exhausts its cap is either
                     // mis-sized or hung, and both are worth knowing BEFORE the dead letter.
+                    Observability.HighwayActivity.MarkProcessingCapExceeded(
+                        System.Diagnostics.Activity.Current, id, DateTime.UtcNow - started);
+
                     Logger.LogWarning(
                         "Message '{MessageId}' on {Kind} '{Target}' has run for {Elapsed} and reached " +
                         "MaxProcessingTime ({Cap}); its lease is no longer being renewed. It will be " +

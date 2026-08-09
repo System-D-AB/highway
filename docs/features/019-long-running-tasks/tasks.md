@@ -275,6 +275,29 @@ against an 800 ms lease, so nothing ever expired and the dead letter it read was
 A timing test whose interval is shorter than the timeout it is exercising tests nothing — the
 same shape of mistake as 017's first suspect test.
 
+## R3.3 was not satisfiable as written
+
+**Corrected after the fact.** T6 was marked done with only the Warning log; the recorder event
+R3.3 also asked for was never wired, and it turns out it could not be.
+
+**The cap is a client-side decision.** When renewal stops, *nothing is sent* — so there is no
+command for the server to record, and the flight recorder only ever sees what crosses the wire.
+Recording it would need new protocol surface: a command whose only purpose is "note that I gave
+up", issued at exactly the moment the client has decided to stop talking about this message.
+
+The cap is surfaced client-side instead — Warning log plus an
+`highway.processing_cap_exceeded` event on the client's `ActivitySource`, where a tracing
+backend can see it alongside the handler span it belongs to.
+
+`HighwayEventType.ProcessingCapExceeded` is kept and documented as never-recorded rather than
+deleted, because reusing the number later would make an old replay mean something new.
+
+> **The general fact worth carrying forward:** the flight recorder is a *server-side* facility.
+> Any requirement phrased as "record event X" for something the client decides is unsatisfiable
+> unless a command carries it. Three other event types are already in this state as 018
+> leftovers — `MessagesReceived`, `MessageAcknowledged` and `MessageDeadLettered` — all defined,
+> none recorded.
+
 ## Not done
 
 **T12 — the sample.** R6.6 asks for a runnable chunk-and-checkpoint demonstration across real
