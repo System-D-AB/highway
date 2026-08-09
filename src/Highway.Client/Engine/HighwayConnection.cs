@@ -270,7 +270,15 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-        options.AbortOnConnectFail = true;
+        options.AbortOnConnectFail = true;
+
+        // The node names its own connection, so the broker can answer "where is this node?"
+        // without the node ever declaring an address (023 T8). CLIENT SETNAME is a RESP
+        // built-in and the address on the other end is one the broker OBSERVED -- which is
+        // the only kind worth showing. A node behind NAT that reports its own IP reports a
+        // number nobody can reach.
+        if (credentials is { NodeName.Length: > 0 })
+            options.ClientName = Sanitise(credentials.NodeName);
 
 
 
@@ -1295,5 +1303,18 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
     }
 
+
+    /// <summary>
+    /// CLIENT SETNAME rejects spaces and newlines, and a rejected name would fail the whole
+    /// connection. A display field must never be able to stop a node connecting.
+    /// </summary>
+    private static string Sanitise(string name)
+    {
+        Span<char> buf = name.Length <= 128 ? stackalloc char[name.Length] : new char[name.Length];
+        for (var i = 0; i < name.Length; i++)
+            buf[i] = char.IsWhiteSpace(name[i]) || char.IsControl(name[i]) ? '_' : name[i];
+
+        return new string(buf);
+    }
 }
 

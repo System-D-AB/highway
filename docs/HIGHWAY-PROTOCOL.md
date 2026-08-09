@@ -902,6 +902,8 @@ A client built only from the `HW.*` commands cannot function. These stock comman
 | `SUBSCRIBE hw:door:...` | Observe doorbells. Optional — doorbells are a latency optimization and correctness never depends on them. |
 | `SET hw:idem:... NX EX` / `GET` / `DEL` | **Deduplication.** Optional — required only for a client that implements `[Idempotent]`-style at-most-once handler invocation. See below. |
 | `PING` / `ECHO` | Connection health, as with any RESP server. |
+| `CLIENT SETNAME <node>` | **Identifies the connection as a node.** Optional. Highway's own client sends its node name on connect so the broker can answer "where is this node connected from?" without the node ever declaring an address. A client that omits it works normally; its node simply shows no observed address. |
+| `CLIENT LIST` | Read the names above back, joined against the node registry. Used by the dashboard only. |
 | `AUTH <password>` or `AUTH <user> <password>` | **Required against a secured server.** Highway's own client sends the password alone; the username defaults to Garnet's `default`. |
 
 **The reply doorbell is node-global.** Every client subscribed to `hw:door:rep` receives a notification for **every** reply on the server, not just its own. A client must ignore request IDs it did not issue, and in particular must never `DEL` a slot it does not own — doing so destroys another caller's reply and hangs that call until its timeout. This is a real defect that occurred during development, not a hypothetical.

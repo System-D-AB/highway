@@ -64,14 +64,24 @@ internal sealed record CatalogueEntryDto(
     string? ParentChannel,
     IReadOnlyList<string> Hosts);
 
-/// <summary>One node, with what it declared and how long since it said so.</summary>
+/// <summary>
+/// One node, with what it declared, how long since it said so, and where the broker currently
+/// sees it from.
+///
+/// <para><c>SeenFrom</c> is an <b>observation, not a property</b> (023 T8). It is the peer
+/// address of the node's live connection, which is why it is null for a node that registered
+/// and then went away: the record outlives the socket. Behind NAT or a load balancer it is
+/// still true and still not the address you would dial -- the view labels it "seen from" for
+/// exactly that reason.</para>
+/// </summary>
 internal sealed record NodeDto(
     string Name,
     TimeSpan SinceLastSeen,
     bool IsLive,
     IReadOnlyList<string> Services,
     IReadOnlyList<string> Queues,
-    IReadOnlyList<string> Channels);
+    IReadOnlyList<string> Channels,
+    string? SeenFrom = null);
 
 /// <summary>
 /// Classifies broker entities, and assembles the catalogue from the two sources that know about

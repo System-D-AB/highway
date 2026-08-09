@@ -382,6 +382,18 @@ or `Off` has its failure detail withheld too, governed by feature 002's per-name
 The exception **type** survives every mode: it is metadata, and it is the one field that makes
 a dead letter diagnosable at all.
 
+### C7.3 — A node's address is an observation, never a declaration
+
+**Status: Met** — feature 023.
+
+The broker reports where it currently sees a node connected from, taken from the live connection
+(`CLIENT SETNAME` on connect, `CLIENT LIST` on read). It is labelled **"seen from"** everywhere it
+appears, and it is **absent** — not stale — for a node that is registered but not connected.
+
+Highway never asks a node what its address is, and never stores one. A node behind NAT, in a
+container, or scaled horizontally under one name would report a number nobody can reach, and
+storing it would mean a record that outlives the socket it describes.
+
 ---
 
 ## C6 — Security (feature 012)
@@ -495,6 +507,8 @@ get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the
 |---|---|---|
 | **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in `docs/features/015-recoverability/requirements.md` § Deferred |
 | **Polly / `Microsoft.Extensions.Resilience`** | 015 | The .NET built-in for retry pipelines and the obvious "does the framework already do this?" answer. Moot until the tiers return. Highway takes no dependency beyond Garnet and StackExchange.Redis, so it is a real trade rather than a free win |
+| **A longer-retention message index** | 023, Open Decision 3 | The dashboard's message view is bounded by the flight recorder's window, so history older than that is simply gone. A durable index would fix it and would be **new unbounded storage inside a diagnostic** — the exact cost feature 016 spent its length measuring. Registered, not built |
+| **A node → message index** | 023 T6 | The node page projects every entity and filters, because nothing maps a node to the messages it handled. Affordable only because the recorder is bounded. An index would be new storage for a view |
 | **`MaxDeliveryAttempts` off-by-one** | 013, then 015 | Belongs with the attempt-counting work, because that is what redefines what an attempt *is*. Also listed under Open Decisions above |
 
 ## Cross-references

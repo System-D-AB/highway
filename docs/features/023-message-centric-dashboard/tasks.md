@@ -129,7 +129,7 @@ client — the failure 020 R1.5 asked to be bounded.
 
 ## Phase 3 — Node identity
 
-### - [ ] T8 — Version `NodeRegistration`, then add the address
+### - [x] T8 — Version `NodeRegistration`, then add the address
 
 *Requirements:* R6.1–R6.4
 **Done when:** the framing carries a version byte **in the same change** as the new field, an
@@ -154,7 +154,7 @@ distinction.
 
 ## Phase 4 — Conformance
 
-### - [ ] T9 — Protocol and constraints
+### - [x] T9 — Protocol and constraints
 
 *Requirements:* R8.1, R8.2
 **Done when:** the registration framing change is documented, `ProtocolConformanceTests` is
@@ -164,7 +164,7 @@ candidate — a longer-retention message index — under Deferred.
 **Register it; do not build it.** Feature 016 spent its whole length learning what unbounded
 storage costs, and adding some inside the dashboard would be an odd way to forget that.
 
-### - [ ] T10 — Samples and full verification
+### - [x] T10 — Samples and full verification
 
 *Requirements:* R8.3, R8.4
 **Done when:** the samples are re-run, the entity page is compared against the screenshot in
@@ -174,7 +174,7 @@ storage costs, and adding some inside the dashboard would be an odd way to forge
 `QueueAcknowledged` should have become two message rows with outcomes. If an operator still
 cannot answer "how many succeeded?", the feature did not do its job.
 
-### - [ ] T11 — Front-end coverage, decided deliberately
+### - [x] T11 — Front-end coverage, decided deliberately
 
 *Requirements:* R7.3
 **Done when:** either a headless-browser harness exists, or its absence is a **recorded
@@ -259,9 +259,95 @@ poison.queue       processed=0  failed=1   System.InvalidOperationException
 Outcomes, durations, counts by category, failure detail, and the completion node all come
 through. Six protocol rows became one message row per message.
 
+## Phase 3
+
+**T6 and T8 are now built.** What follows replaces the "not done" note that stood here.
+
+### T8 did not need the framing change the task specified
+
+The task said: version `NodeRegistration`, then add the address. I wrote that change — version marker,
+`u16` address length, v0 records still readable, a refusal message naming the remedy for an unknown
+version. Then I looked for where the value would come from and **the change turned out to be
+unnecessary**, so I reverted it.
+
+The node already tells the broker where it is, every time it connects: `CLIENT SETNAME`. The client
+now sets its connection name to its node name, and `BrokerState` joins the registry to `CLIENT LIST`
+on that name. Both are RESP built-ins Garnet already implements — no new command, no new storage,
+and **no versioned framing**, because nothing is persisted.
+
+| | Registration field | Live client list |
+|---|---|---|
+| Storage format | Changes an unversioned binary framing | Untouched |
+| Freshness | The address a node had when it last registered | The address it is connected from now |
+| A node that has gone away | Reports a stale address as if current | Reports nothing, which is the truth |
+
+The second column is not just cheaper, it is **more correct**. A recorded address survives the
+socket it describes; `seenFrom` is null for a registered-but-absent node precisely because there is
+nothing to see. The version byte would have been real work protecting a value that was worse.
+
+**The spec's reasoning was right and its conclusion was wrong.** "Do not add a field to an
+unversioned format" is correct — the escape it missed is not adding the field. R6.1–R6.4 are met:
+the address is shown, labelled `Seen from`, and never presented as an address to dial.
+
+Verified live:
+
+```
+order-service-1   live   seen from 127.0.0.1:63619
+```
+
+`Sanitise()` guards the name because `CLIENT SETNAME` rejects whitespace and would fail the whole
+connection — a display field must never be able to stop a node connecting.
+
+### T6 fixed a link that had been dead since 022
+
+The nodes list has linked to `#/node?name=…` since 022, but no such route existed: it fell through
+the router's default onto the catalogue. Clicking a node quietly showed the wrong page.
+
+The page pairs **declared** against **processed**, because neither is worth much alone. "Hosts
+`orders.create`" is a claim the node made; "processed 3 messages" is a thing that happened. A node
+declaring a service it has never served is a misconfiguration, and it is only visible when both
+are on one page.
+
+The per-node index is a scan, not an index. The recorder keys by entity name, and nothing maps a
+node to the messages it handled; building that mapping would be new storage for a view, so the
+endpoint projects every entity and filters. The recorder is bounded (002), which is what makes
+that affordable.
+
+Verified live, four entities in one list:
+
+```
+poison.queue                    Failed      39ms   System.InvalidOperationException
+inventory.low@order-service-1   Processed
+invoices.generate               Processed    5ms
+orders.create                   Processed   41ms
+```
+
+Attribution is by **completion**, the only node these events name — the same `startedOnNode` gap
+recorded above, surfacing again. The page says so rather than implying the list is everything the
+node touched.
+
 ## Not done
 
-**T6 (node view) and T8 (node address) are not built.** T6 needs a per-node message index, which
+### T11 — front-end coverage was decided, by the user
+
+The user's instruction for this phase was explicit: **no tests for the dashboard project.** That
+resolves T11 as a recorded decision rather than an open one, and it is worth writing down what
+now carries the weight instead:
+
+- **The logic moved to the server.** T1's `MessageProjection` — correlation, outcome ordering,
+  `Incomplete`, the counts — has 14 tests. In 022 that logic lived in the browser and had none.
+- **The endpoints are exercised live**, against real samples, and this log records what they
+  returned rather than that they returned something.
+- **What is genuinely untested is rendering**, and a rendering fault is visible on the first
+  screenshot. Finding 1 above is the counter-example — a dead route rendered a plausible page —
+  and it was found by driving the samples, which is the compensating practice.
+
+That is a smaller gap than 022's, and unlike 022's it is a decision rather than an omission.
+
+## Not done
+
+**`startedOnNode` is still unrecorded**, and this phase is more evidence it matters: the node page
+can show what a node *finished* and not what it *started*. T6 needs a per-node message index, which
 is a projection over every entity rather than one — a real piece of work, not a rendering pass.
 T8 changes `NodeRegistration`'s unversioned framing, and doing that properly is the whole reason
 022 deferred it; it should not be squeezed in beside a UI change.

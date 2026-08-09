@@ -107,7 +107,10 @@ internal sealed record NodeRowDto(
     double SinceSeconds,
     IReadOnlyList<string> Services,
     IReadOnlyList<string> Queues,
-    IReadOnlyList<string> Channels);
+    IReadOnlyList<string> Channels,
+
+    /// <summary>Peer address of the node's live connection, or null if it has none right now.</summary>
+    string? SeenFrom);
 
 internal sealed record NodesDto(
     IReadOnlyList<NodeRowDto> Nodes,
@@ -158,3 +161,35 @@ internal sealed record MessageDetailDto(
     IReadOnlyList<MessageStepRowDto> Steps,
     string? Payload,
     string PayloadState);
+
+// ---- feature 023 T6: one node's work ---------------------------------------
+
+/// <summary>A message row that names its entity, because a node's list spans all of them.</summary>
+internal sealed record NodeMessageRowDto(
+    string Entity,
+    string Id,
+    string Outcome,
+    DateTimeOffset? CompletedAt,
+    double? DurationMs,
+    string? FailureDetail);
+
+/// <summary>
+/// One node: what it declared, where it is seen from, and what it has actually done.
+///
+/// <para>The declared list and the message list answer different questions. "Hosts orders.create"
+/// is a claim the node made; "processed 41 orders.create messages" is a thing that happened. A
+/// node that declares a service and has processed nothing through it is the exact shape of a
+/// misconfiguration, and it is only visible when both are on the same page.</para>
+/// </summary>
+internal sealed record NodeDetailDto(
+    string Name,
+    string State,
+    double SinceSeconds,
+    string? SeenFrom,
+    IReadOnlyList<string> Services,
+    IReadOnlyList<string> Queues,
+    IReadOnlyList<string> Channels,
+    IReadOnlyList<NodeMessageRowDto> Messages,
+    int Processed,
+    int Failed,
+    string? Unavailable);

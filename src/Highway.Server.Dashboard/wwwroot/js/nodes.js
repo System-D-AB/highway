@@ -18,6 +18,15 @@ function hostsSummary(node) {
     return parts.length ? parts.join(' · ') : '<span class="muted">declares nothing</span>';
 }
 
+// Labelled as an observation, never as an address to dial (023 T8). Behind NAT, in a
+// container, or under a load balancer the peer address is true and not reachable, and
+// "seen from" is the whole difference between honest and misleading here.
+function seenFrom(node) {
+    return node.seenFrom
+        ? `<span class="mono" title="Peer address of this node's connection, as the broker sees it">${esc(node.seenFrom)}</span>`
+        : '<span class="muted" title="Registered, but not connected right now">not connected</span>';
+}
+
 function row(node) {
     const state = node.state === 'live'
         ? '<span class="state-live">live</span>'
@@ -26,6 +35,7 @@ function row(node) {
     return `<tr>
         <td><a href="#/node?name=${encodeURIComponent(node.name)}">${esc(node.name)}</a></td>
         <td>${state}</td>
+        <td>${seenFrom(node)}</td>
         <td>${hostsSummary(node)}</td>
     </tr>`;
 }
@@ -44,8 +54,8 @@ export async function render(container, options) {
         container.innerHTML = `
             <h2>Nodes</h2>
             <table class="grid">
-                <thead><tr><th>Node</th><th>State</th><th>Hosts</th></tr></thead>
-                <tbody>${rows || '<tr><td colspan="3" class="muted">No nodes registered.</td></tr>'}</tbody>
+                <thead><tr><th>Node</th><th>State</th><th>Seen from</th><th>Hosts</th></tr></thead>
+                <tbody>${rows || '<tr><td colspan="4" class="muted">No nodes registered.</td></tr>'}</tbody>
             </table>`;
     };
 
