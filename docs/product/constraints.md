@@ -293,28 +293,39 @@ documented as true.
 
 ### C4.6 — Storage growth is bounded over time, not just in the moment
 
-**Status: Not met.** Feature 016 attempted it and **measured that it does not work**.
+**Status: Not met.** Investigated twice and **measured not to work** both times.
 
-`AofSizeLimitBytes` (512 MB default) is wired to Garnet's `AofSizeLimit` and its background
-enforcement task does run — checkpoints appear where none did before. The append-only log is
-nevertheless **never truncated on disk**:
+`AofSizeLimitBytes` (512 MB default) is configured and Garnet's background enforcement task
+runs — checkpoints appear where none did before, and the checkpoint path demonstrably calls
+`TruncateUntil`. The log nevertheless grows linearly in total history:
 
 | identical traffic | AOF on disk |
 |---|---|
-| 2,000 messages | 8.9 MB |
-| 4,000 messages | 17.8 MB |
+| 12,000 × 8 KB messages | 102 MB |
+| 24,000 × 8 KB messages | 205 MB |
 
-Linear in total history, which is exactly what this constraint exists to prevent. A broker that
-has run for a year still holds a year of log.
+Measured against a **32 MB** limit, so hundreds of checkpoints' worth of headroom.
 
-The test is kept and **skipped**, carrying the measurement, so the gap stays visible.
-`docs/features/016-retention-and-durability/tasks.md` T6 records what was learned — including
-that two earlier versions of that test were vacuous, one measuring the wrong directory
-entirely. Next step is investigation (Garnet compaction settings), not another attempt at the
-same setting.
+**Truncation is logical.** `TruncateUntil` moves the log's begin address; it does not return
+disk. Reclamation would need whole device segments to retire, and in this configuration they do
+not.
 
-Recovery *time* may still be bounded by checkpointing even while disk use is not. That is
-**unmeasured and not claimed**.
+> **A hypothesis tested and discarded, recorded so nobody repeats it.** The suspicion was that
+> Garnet's 32 MB `AofPageSize` was larger than the traffic between checkpoints, so no page ever
+> fully obsoleted. Lowering it is impossible — Garnet requires the AOF page to be at least twice
+> the 16 MB main-log page and refuses to start otherwise — and testing at a scale that crosses
+> several 32 MB pages showed exactly the same linear growth. The option added to configure it
+> was **removed rather than shipped**, because an option whose only stated purpose is a fix that
+> does not work is worse than no option.
+
+An earlier measurement (2,000 messages → 8.9 MB, 4,000 → 17.8 MB) was too small to distinguish
+"not reclaiming" from "reclaiming in 32 MB steps". This one is not.
+
+The test is kept and **skipped**, carrying the measurement.
+
+**What this costs in practice:** a broker's disk grows with everything it has ever written, and
+restart replays all of it. A busy broker needs its data directory watched, and a periodic
+planned restart against a fresh directory is currently the only remedy.
 
 ### C4.7 — The byte budget bounds a queue, not the process
 
@@ -444,7 +455,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C4.3 | Limits are never silent | ✅ **Met** (016) |
 | C4.4 | Every queue-like structure bounded | ✅ **Met** (016) |
 | C4.5 | Durable by default | ✅ **Met** (016) |
-| C4.6 | Bounded over time | ❌ Not met — measured broken (016) |
+| C4.6 | Bounded over time | ❌ Not met — measured twice, at scale |
 | C4.7 | Byte budget bounds a queue, not the process | ⚠️ **Deliberately unmet** (016 decision 1) |
 | C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
 | C7.2 | Diagnostic detail obeys the payload capture switch | ✅ Met (015) |
