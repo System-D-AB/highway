@@ -49,6 +49,21 @@ internal sealed class FlightRecorder : IDisposable
     /// <summary>Events reclaimed to stay inside the global byte budget. Cumulative.</summary>
     public long DroppedBudget => Interlocked.Read(ref _droppedBudget);
 
+    /// <summary>
+    /// Subscriber groups retired and messages discarded with them (feature 017). Cumulative.
+    ///
+    /// <para>Counted here rather than logged from the command, because a command runs inside a
+    /// Garnet transaction and has no logger. Retirement is the largest single loss Highway can
+    /// inflict, so it must be countable even when nobody was watching the replay.</para>
+    /// </summary>
+    public long GroupsRetired => Interlocked.Read(ref _groupsRetired);
+
+    /// <inheritdoc cref="GroupsRetired"/>
+    public long MessagesDiscarded => Interlocked.Read(ref _messagesDiscarded);
+
+    private long _groupsRetired;
+    private long _messagesDiscarded;
+
     /// <summary>Observer failure count, surfaced in snapshots.</summary>
     internal long ObserverFailures => Interlocked.Read(ref _observerFailures);
 
@@ -119,6 +134,16 @@ internal sealed class FlightRecorder : IDisposable
         string? errorCode = null,
         int? count = null)
     {
+        // Counted BEFORE the enabled check: a retirement that happened must be countable even
+        // on a broker whose recorder is switched off. The count is not diagnostics, it is the
+        // receipt for a destructive act.
+        if (eventType == HighwayEventType.GroupRetired)
+        {
+            Interlocked.Increment(ref _groupsRetired);
+            if (count is { } discarded)
+                Interlocked.Add(ref _messagesDiscarded, discarded);
+        }
+
         if (!_options.RecorderEnabled)
             return;
 

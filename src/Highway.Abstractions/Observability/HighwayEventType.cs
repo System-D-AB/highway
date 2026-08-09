@@ -99,4 +99,14 @@ public enum HighwayEventType
     /// past the retirement threshold.</para>
     /// </summary>
     GroupRetired = 18,
+
+    /// <summary>
+    /// A subscriber group's node has been absent past <b>half</b> the retirement threshold
+    /// (feature 017). Nothing has been destroyed yet — this is the warning that precedes it.
+    ///
+    /// <para>Deliberately an event rather than a stored "suspect" state: an operator replaying
+    /// a channel that later went quiet sees the warning that came before, which is most of the
+    /// value of a state machine with none of its maintenance.</para>
+    /// </summary>
+    NodeSuspect = 19,
 }
