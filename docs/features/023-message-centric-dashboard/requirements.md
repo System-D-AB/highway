@@ -70,11 +70,27 @@ the message model.
 
 #### Acceptance Criteria
 
-1. An entity's page lists **messages**, one row each: identifier, when it was sent, its outcome, and how long it took end to end
+1. An entity's page lists **messages**, one row each, carrying the whole story a summary can hold:
+
+   | | |
+   |---|---|
+   | identifier | which message |
+   | **started** | when, and **on which node** |
+   | **completed** | when, **on which node**, or why it did not |
+   | outcome | in developer words |
+   | duration | end to end |
+
+   **Both nodes, not one.** A message is usually produced on one node and processed on another,
+   and "shop-1 sent it, order-service-1 processed it" is the sentence the row exists to say. A
+   single "node" column would have to pick one and would pick the wrong one half the time.
 2. Protocol events are **not** the default view. They remain available — see R5 — because they are the truth underneath, but they are not what an operator is shown first
 3. A message row states its outcome in words a developer recognises: **processed**, **failed**, **dead-lettered**, **in flight**, or **abandoned** — never `RpcAcknowledged`
 4. Outcome is derived **on the server** from the event sequence. A browser inferring "acknowledged means success" is a second implementation of the protocol's semantics
 5. A message whose events have partly aged out of the recorder is shown as **incomplete**, explicitly, rather than as a wrong outcome. The recorder is bounded and volatile (002); pretending otherwise would make the view lie under exactly the load that matters
+6. **Every event type is classified `Public` or `Internal`, on the server.** *Public* is something the developer's code caused or needs to act on — an RPC was started, a response came back, a message was published or sent, a handler processed it, a handler failed, a message dead-lettered. *Internal* is the broker recognising its own work — a claim, an acknowledgement, a doorbell, a sweep, a requeue
+7. **A summary row is built from Public events only.** The list answers "what did my code do and what happened to it", and an internal step has never been the answer to that
+8. The classification lives with the event type, not with the view. A second implementation in JavaScript would be the same mistake this project has now refused three times (020: the key layout; 022: name parsing; 023: outcome derivation)
+9. **A Public fact may be evidenced by an Internal event, and the view shows the fact.** Highway has no "handler finished" event — an acknowledgement *is* that evidence. So the row says *processed at 8:35:47 on order-service-1*, derived from `QueueAcknowledged`, and never shows the word "acknowledged"
 
 ### Requirement 2: Counts That Answer The First Question
 
@@ -94,7 +110,7 @@ the message model.
 
 #### Acceptance Criteria
 
-1. Selecting a message shows its **timeline**: what happened, when, and **on which node**
+1. Selecting a message shows its **timeline**: what happened, when, and **on which node** — **Public steps first and by default, with the Internal ones one click away**. The whole lifecycle is there; the mechanics do not crowd out the meaning
 2. The timeline crosses nodes and entities. A published message shows the publisher and then **each subscriber group's** delivery, because that is one event from the developer's point of view and N from the broker's
 3. The **message body** is shown — the payload the developer sent — subject to feature 002's capture modes, saying so explicitly when withheld rather than showing blank
 4. For RPC, the **reply** is shown beside the request. The reply is recorded under `hw.replies`, so this requires joining two recorder names by `requestId` — the join that makes the whole feature work
