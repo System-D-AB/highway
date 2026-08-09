@@ -299,6 +299,28 @@ the shape of the feature, so the design is not written until they are settled.
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
 
+### 022 — Dashboard: A Catalogue, Not a List of Names
+
+**Specced** — `docs/features/022-dashboard-catalogue/`. Run against the samples, the dashboard's
+main page lists ten rows in one column called **Name**, containing **six different kinds of
+thing**: nodes (`shop-1`), services (`orders.get`), a queue (`invoices.generate`), channels
+(`orders.placed`), group queues (`orders.placed@shop-1`) and an internal bucket (`hw.replies`).
+Nothing distinguishes them.
+
+**The dashboard shows the flight recorder's index and calls it the system.** The recorder keys
+buffers by an arbitrary name because that is all it needs; rendering that dictionary directly is
+a faithful view of the recorder and a useless view of the broker.
+
+This introduces the entity model the product already has — nodes, services, queues, channels and
+their groups — and makes the dashboard navigate it: what is running, what serves what, and then
+one entity's state and events together.
+
+**The server already knows all of it.** `hw:reg:node:{nodeId}` holds `[lastSeen][catalog json]`
+with each node's services, channels and queues, written by every heartbeat since 006 and never
+read back for display. This is mostly a rendering problem.
+
+**Supersedes 020's view tasks** (T6–T9) while inheriting its Phase 0 read path unchanged.
+
 ### 020 — Dashboard: Operations Console  ← **next**
 
 **Specced** — `docs/features/020-dashboard-operations/`. Feature 011 built a dashboard for the
