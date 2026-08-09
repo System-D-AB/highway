@@ -246,6 +246,10 @@ public sealed class HighwayServer : IHighwayServer
         // two names, the message id, the exception type, and the detail blob. Every family
         // takes the same shape, which is what lets one command serve all three.
         new("HW.FAIL",        7, () => new HwFailCommand(opts, recorder)),
+
+        // Long-running tasks (feature 019). Arity 5: the name plus target kind, two names and
+        // the message id. Renews a claimed entry's lease without acknowledging it.
+        new("HW.TOUCH",       5, () => new HwTouchCommand(opts, recorder)),
     ];
 
     /// <summary>

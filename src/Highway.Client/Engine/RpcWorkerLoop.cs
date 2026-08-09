@@ -24,8 +24,10 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
         string nodeName,
         int concurrency,
         LoopWake wake,
-        ILogger logger)
-        : base(descriptor.RequestType, connection, executor, nodeName, concurrency, wake, logger)
+        ILogger logger,
+        TimeSpan renewalInterval = default,
+        TimeSpan maxProcessingTime = default)
+        : base(descriptor.RequestType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime)
     {
         _descriptor = descriptor;
     }

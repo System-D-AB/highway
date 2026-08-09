@@ -94,6 +94,38 @@ driven by worker polling rather than a timer — see C5.
 
 ---
 
+### C1.6 — A handler may run longer than the lease without being duplicated
+
+**Status: Met** — feature 019.
+
+A worker renews its claim while a handler runs, so slowness alone no longer causes duplicate
+execution. Before this, a handler outliving `Lease` had its message requeued **while it was
+still running** — a *concurrent* duplicate, not one after a failure. A twenty-minute job against
+a five-minute lease ran five times and then dead-lettered, having done the work five times and
+reported failure.
+
+The symptom was made worse by feature 015: that dead letter reads `MAX_ATTEMPTS` with
+`failure: not reported`, because the handler never threw. An operator reads *"failed five times,
+no exception"* about work that succeeded every time.
+
+**Renewal is bounded, and the bound is the point.** `MaxProcessingTime` (15 minutes) stops it.
+Unbounded renewal would delete lease recovery: a deadlocked handler would hold its message
+forever, never redelivered, never dead-lettered, never visible. Past the cap the message returns
+to exactly the behaviour it had before this feature.
+
+> **The one behaviour change, recorded.** A **hung** handler is now recovered after
+> `MaxProcessingTime` (15 min) rather than after `Lease` (5 min). Deliberate: a slow-but-working
+> handler executed five times and dead-lettered corrupts data, while a hung one taking ten
+> minutes longer to recover is a delay. `MaxProcessingTime = TimeSpan.Zero` restores the old
+> behaviour exactly.
+
+**For work measured in hours, renewal is the wrong tool** — see
+[`docs/cookbook/long-running-work.md`](../cookbook/long-running-work.md). Chunk and checkpoint:
+each message lives seconds while the job lives hours, and it survives deploys, parallelises for
+free, and dead-letters one bad slice without killing the job.
+
+---
+
 ## C2 — Pub/Sub (`PublishAsync`)
 
 ### C2.1 — A published message is delivered at least once to every group registered at publish time
@@ -398,6 +430,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C1.3 | Sending needs no running consumer | ✅ Met |
 | C1.4 | Unprocessable messages stop being retried, and say why | ✅ Met (013 + 015) |
 | C1.5 | Sends can be deferred | ✅ Machinery met (013) |
+| C1.6 | A handler may outlive the lease without duplication | ✅ Met (019) |
 | C2.1 | At-least-once per registered group | ✅ Met |
 | C2.2 | Acknowledged means gone | ✅ Met |
 | C2.3 | A down subscriber receives what it missed, until its node is declared gone | ✅ Met, bounded (017) |

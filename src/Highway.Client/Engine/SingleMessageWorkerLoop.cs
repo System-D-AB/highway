@@ -55,6 +55,9 @@ internal abstract class SingleMessageWorkerLoop
     /// </summary>
     protected TimeSpan? IdempotencyWindow { get; }
 
+    private readonly TimeSpan _renewalInterval;
+    private readonly TimeSpan _maxProcessingTime;
+
     protected SingleMessageWorkerLoop(
         Type contractType,
         IHighwayConnection connection,
@@ -62,8 +65,12 @@ internal abstract class SingleMessageWorkerLoop
         string nodeName,
         int concurrency,
         LoopWake wake,
-        ILogger logger)
+        ILogger logger,
+        TimeSpan renewalInterval = default,
+        TimeSpan maxProcessingTime = default)
     {
+        _renewalInterval = renewalInterval <= TimeSpan.Zero ? TimeSpan.FromMinutes(1) : renewalInterval;
+        _maxProcessingTime = maxProcessingTime;
         Connection = connection;
         Executor = executor;
         NodeName = nodeName;
@@ -210,8 +217,71 @@ internal abstract class SingleMessageWorkerLoop
         }
     }
 
+    /// <summary>
+    /// Renews this message's lease while its handler runs, and stops at
+    /// <c>MaxProcessingTime</c> (019).
+    ///
+    /// <para><b>Why it is bounded.</b> Unbounded renewal deletes lease recovery: a handler
+    /// stuck in a deadlock would hold its message forever — never redelivered, never
+    /// dead-lettered, never visible. Past the cap the message returns to exactly the behaviour
+    /// it had before this feature.</para>
+    ///
+    /// <para><b>A failed renewal is swallowed</b> (C7.1). A mechanism that exists to protect
+    /// delivery must never be able to break it; the ordinary sweep still recovers the message.
+    /// Individual renewals are not recorded — at this interval they would flood the recorder
+    /// with the least interesting thing it could hold.</para>
+    /// </summary>
+    private async Task RenewWhileRunningAsync(string id, CancellationToken stop)
+    {
+        var started = DateTime.UtcNow;
+
+        try
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                await Task.Delay(_renewalInterval, stop).ConfigureAwait(false);
+
+                if (DateTime.UtcNow - started >= _maxProcessingTime)
+                {
+                    // Loud, and once: a handler that routinely exhausts its cap is either
+                    // mis-sized or hung, and both are worth knowing BEFORE the dead letter.
+                    Logger.LogWarning(
+                        "Message '{MessageId}' on {Kind} '{Target}' has run for {Elapsed} and reached " +
+                        "MaxProcessingTime ({Cap}); its lease is no longer being renewed. It will be " +
+                        "redelivered when the lease expires and eventually dead-lettered. Either the " +
+                        "handler is hung, or this work should be chunked rather than run in one message.",
+                        id, TargetKind, TargetName, DateTime.UtcNow - started, _maxProcessingTime);
+                    return;
+                }
+
+                await Connection.TouchAsync(Target.WireKind, Target.Name, NodeName, id, stop)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The handler finished, or the engine is stopping. Neither is a problem.
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex,
+                "Could not renew the lease for '{MessageId}' on {Kind} '{Target}'; the message is " +
+                "unaffected and the ordinary sweep still recovers it, but a slow handler may now " +
+                "be duplicated",
+                id, TargetKind, TargetName);
+        }
+    }
+
     private async Task ProcessAndReleaseAsync(string id, byte[] payload, CancellationToken workToken)
     {
+        // Renewal is on by default (019 R2.2): a handler outliving the lease is a correctness
+        // failure with silent duplicate execution, and a developer should not have to opt in to
+        // not having it. Zero disables it, restoring pre-019 behaviour exactly.
+        using var renewalStop = CancellationTokenSource.CreateLinkedTokenSource(workToken);
+        var renewal = _maxProcessingTime > TimeSpan.Zero
+            ? RenewWhileRunningAsync(id, renewalStop.Token)
+            : Task.CompletedTask;
+
         try
         {
             await ProcessAsync(id, payload, workToken).ConfigureAwait(false);
@@ -229,6 +299,11 @@ internal abstract class SingleMessageWorkerLoop
         }
         finally
         {
+            // Stops the moment the handler completes, throws or is cancelled (R2.3). A
+            // completed message is never renewed.
+            await renewalStop.CancelAsync().ConfigureAwait(false);
+            try { await renewal.ConfigureAwait(false); } catch { /* already logged */ }
+
             _gate.Release();
         }
     }

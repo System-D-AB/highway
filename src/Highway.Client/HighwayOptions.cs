@@ -92,6 +92,32 @@ public sealed class HighwayOptions
     public int WorkerConcurrency { get; set; } = 8;
 
     /// <summary>
+    /// How often a running handler's lease is renewed. Default: 1 minute. Must be positive.
+    ///
+    /// <para>Against the server's 5-minute default <c>Lease</c> that is 5× headroom — the same
+    /// ratio the heartbeat keeps against <c>NodeExpiry</c>. <b>The client cannot read the
+    /// server's lease</b>, so the relationship is documented rather than validated: lowering
+    /// the server's <c>Lease</c> below roughly 3× this interval makes renewal unreliable.</para>
+    /// </summary>
+    public TimeSpan LeaseRenewalInterval { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How long a single message may have its lease renewed for. Default: 15 minutes.
+    /// <see cref="TimeSpan.Zero"/> disables renewal entirely, restoring pre-019 behaviour.
+    ///
+    /// <para><b>The cap is the feature, not a limitation of it.</b> Unbounded renewal would
+    /// delete lease recovery: a handler stuck in a deadlock or an infinite loop would hold its
+    /// message forever — never redelivered, never dead-lettered, never visible as a problem.
+    /// Past the cap the message returns to exactly the behaviour it has today.</para>
+    ///
+    /// <para><b>For work measured in hours, chunk instead.</b> Claim, process one slice,
+    /// checkpoint to your own database, enqueue the next slice, acknowledge. Each message lives
+    /// seconds while the job lives hours — and it survives deploys, parallelises for free, and
+    /// dead-letters one bad slice without killing the job.</para>
+    /// </summary>
+    public TimeSpan MaxProcessingTime { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
     /// Number of messages requested per <c>HW.RECEIVE</c> batch in consumer loops.
     /// Must be within the server's bounds (1..500). Default: 10.
     /// </summary>

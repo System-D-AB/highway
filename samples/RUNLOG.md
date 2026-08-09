@@ -492,3 +492,23 @@ and the stale directories from earlier runs were what first made the suite fail.
 **19. `--no-build` hid the fix.** The first verification of the new stamp appeared to do nothing
 because `dotnet run --no-build` reused the sample's stale copy of `Highway.Server.dll`. Worth
 knowing before concluding a server change "did not take".
+
+---
+
+## 2026-08-09 — feature 019 (long-running tasks)
+
+**Ran:** the integration suite. The samples have no long-running handler and no job table, so
+the scenario is covered by `LongRunningTaskTests` — including the headline: a 3-second handler
+against a 0.8-second lease runs **once**, where before it ran once per lease period and then
+dead-lettered.
+
+### Findings
+
+**20. No chunk-and-checkpoint sample.** R6.6 asks for one. The pattern is documented with
+working code in `docs/cookbook/long-running-work.md`, but a runnable version needs a job table
+and a progress command in the storefront. Faking it with a loop and no durable checkpoint would
+demonstrate the wrong shape, so it is recorded instead.
+
+**21. Incremental builds were hiding a warning.** A `--no-incremental` build surfaced a nullable
+warning in 017's `CleanAndByeForeverAsync` that ordinary builds had been reporting as zero.
+Worth running clean before claiming "zero warnings".

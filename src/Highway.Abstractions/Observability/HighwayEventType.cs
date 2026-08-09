@@ -109,4 +109,21 @@ public enum HighwayEventType
     /// value of a state machine with none of its maintenance.</para>
     /// </summary>
     NodeSuspect = 19,
+
+    /// <summary>
+    /// A lease renewal was rejected (feature 019). <b>Successful renewals are not recorded</b> —
+    /// at a one-minute interval across many in-flight messages they would flood the recorder
+    /// with the least interesting thing it could hold.
+    /// </summary>
+    LeaseRenewed = 20,
+
+    /// <summary>
+    /// A handler exceeded <c>MaxProcessingTime</c> and its lease is no longer being renewed
+    /// (feature 019). The message now returns to ordinary lease recovery: requeued, attempt
+    /// incremented, eventually dead-lettered.
+    ///
+    /// <para>Recorded because a handler that routinely exhausts its cap is either mis-sized or
+    /// hung, and both are worth knowing before the dead letter appears.</para>
+    /// </summary>
+    ProcessingCapExceeded = 21,
 }
