@@ -130,7 +130,21 @@ named `ErrorCode` since 016.
 
 ---
 
-## Phase 2 — The views
+## Phase 2 — The views  →  **superseded by feature 022**
+
+> **T6–T9 are re-framed, not cancelled.** They describe four flat views bolted beside the
+> existing name list. Seeing the dashboard against a real deployment showed the problem is one
+> level up: the page lists nodes, services, queues, channels, group queues and an internal
+> bucket in a single column called "Name", so nothing says what it is.
+>
+> The same information belongs on **entity pages** —
+> `docs/features/022-dashboard-catalogue/` — and building it flat first would mean
+> restructuring it immediately.
+>
+> **Phase 0 and Phase 1 of this feature stand unchanged.** The read path, the security matrix,
+> `HW.STATS`'s additions and the `Detail`/severity fix are the data layer 022 reads through.
+
+## Phase 2 — The views (superseded)
 
 > Each view lands separately and works on its own. A half-finished console that shows queues but
 > not dead letters is still worth more than none.
