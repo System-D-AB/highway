@@ -33,6 +33,22 @@ public interface IHighwayEngine
     /// Safe to call once; subsequent calls are no-ops.
     /// </summary>
     Task StopAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Retires this node permanently (feature 017): stops the loops, drains in-flight work,
+    /// then purges its registration and destroys its subscriber queues on the server.
+    ///
+    /// <para><b>This destroys data on purpose.</b> It is not <c>StopAsync</c> with tidying —
+    /// messages addressed to this node's subscriber groups are deleted, because the node has
+    /// declared it will never exist to process them. Use <c>StopAsync</c> for a restart.</para>
+    ///
+    /// <para><b>The loops stop first, and that is a correctness requirement.</b> The heartbeat
+    /// loop re-registers the node, so a purge issued while it still runs is undone moments
+    /// later and the node reappears with an empty catalog — which looks exactly like a purge
+    /// that worked and then silently did not.</para>
+    /// </summary>
+    /// <returns>What was destroyed, so an irreversible operation leaves a record.</returns>
+    Task<(int Groups, long Messages, long Bytes)> CleanAndByeForeverAsync(CancellationToken ct = default);
 }
 
 /// <summary>

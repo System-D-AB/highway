@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.1**
+**Current version: 4.2**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.2 | 017 | **Node decommissioning.** Adds `HW.HEARTBEAT <node> BYE PURGE` — a third form that retires a node permanently, destroying its subscriber queues and returning `[groups, messages, bytes]`. Plain `BYE` is unchanged and still preserves a subscriber's backlog: `BYE` is "I am stopping", `PURGE` is "I am never coming back". Adds the `hw:reg:node:{nodeId}:channels` mirror key and the `GroupRetired` recorder event. **A subscriber group whose node has been absent past `SubscriberRetirementThreshold` (24h default) is now retired automatically**, which is what stops one dead subscriber blocking a channel once its queue reaches `MaxQueueBytes`. Additive — no existing command, reply or entry framing changed. |
 | 4.1 | 016 | **Durable by default, and bounded.** No command changes. A server built with no configuration now creates a data directory beside the executable and enables AOF, so queued work survives a restart; memory-only is asked for by name (`Ephemeral()`). Adds the `HW_QUEUE_FULL` error and the `hw:q:{queue}:bytes` counter key. A full queue **refuses** rather than dropping its oldest entry, and a publish refuses in full when **any** group's queue is full, naming that group — a fan-out reaches every registered group or none. Additive: no existing command, reply or entry framing changed. |
 | 4.0 | 018 | **Pub/Sub Unification.** Removes `HW.RECEIVE` and `HW.RACK` — subscribers now consume through `HW.QCLAIM`/`HW.QACK` on derived queues named `{channel}@{group}`. Removes two entry framings (channel entry, group processing entry); `Envelope` is down to two. `HW.FAIL` and `HW.DLQ` lose the `CH` target — a group **is** a queue, targeted as `Q`. The `hw:ch:{channel}:grp:{group}:*` key space, `hw:ch:{channel}:delayed`, and the `hw:door:ch:{channel}:grp:{group}` doorbells are all gone. `@` is reserved in identifiers. **Three semantic changes (R5):** (1) batch consumption is lost — one claim per round trip replaces `HW.RECEIVE`'s batch; (2) subscriber ordering is preserved by default (concurrency 1 per group); (3) deferred publish resolves groups at **publish time**, not promotion time — a group registering during the delay does not receive the message. **Major**: removes two commands, two framings, one key space; existing channel data becomes unreachable. A broker started against pre-018 data refuses with a diagnostic message. |
 | 3.1 | 015 | **Diagnosable failures.** Adds `HW.FAIL`, which records the exception that caused a delivery to fail without acknowledging the message, and an optional **failure block** on every entry framing. Adds the `DeliveryFailed` recorder event and new dead-letter fields. Additive: the failure block is a *trailer*, so an entry written without one decodes byte-for-byte as before — unlike 013's attempt count, which changed the framings themselves. No existing command, reply or key changed. |
@@ -72,7 +73,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.PUBLISH` | -3 | 2 | Durable fan-out to every subscriber group, immediately or at a future time |
 | `HW.SUBSCRIBE` | 3 | 1 | Register a subscriber group |
 | `HW.UNSUBSCRIBE` | 3 | 1 | Remove a subscriber group and delete its state |
-| `HW.HEARTBEAT` | -2 | 3 | Register a catalog, prove liveness, or depart |
+| `HW.HEARTBEAT` | -2 | 4 | Register a catalog, prove liveness, depart, or retire permanently |
 | `HW.DISCOVER` | 2 | 1 | Live nodes hosting a service |
 | `HW.STATS` | -1 | 4 | Server, service, channel, or recorder counters |
 | `HW.REPLAY` | -2 | 1 | Recent recorded operations for one name |

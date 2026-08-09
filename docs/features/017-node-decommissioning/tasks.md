@@ -11,7 +11,7 @@ unverified until a blocked channel is seen recovering.
 
 ## Phase 1 — The join that has never existed
 
-### - [ ] T1 — A node's channel list, as a mirror key
+### - [x] T1 — A node's channel list, as a mirror key
 
 `hw:reg:node:{nodeId}:channels` — main store, newline-delimited, written by `HW.SUBSCRIBE` and
 `HW.UNSUBSCRIBE`.
@@ -25,7 +25,7 @@ mixed sequence including duplicate subscribes and unsubscribes of names that wer
 structure in `Prepare` registers a watch that later exclusive locks fail against (004.1). This
 is the same shape `hw:ch:{channel}:grplist` already uses, for the same reason.
 
-### - [ ] T2 — Retire one node's groups, as a shared operation
+### - [x] T2 — Retire one node's groups, as a shared operation
 
 The single implementation both the explicit paths and the automatic sweep call.
 
@@ -42,14 +42,14 @@ written once in T2 and called by T3, T4 and T6 cannot diverge the way those did.
 
 ## Phase 2 — The two explicit paths
 
-### - [ ] T3 — `HW.HEARTBEAT <node> BYE PURGE`
+### - [x] T3 — `HW.HEARTBEAT <node> BYE PURGE`
 
 *Requirements:* R2.1–R2.4
 **Done when:** it retires a node that cannot speak for itself, is idempotent, returns what it
 destroyed, and answers zero — not an error — for a node nobody has heard of. An operator
 cleaning up after an incident should not have to know which names still exist.
 
-### - [ ] T4 — `IHighwayClient.CleanAndByeForever()`
+### - [x] T4 — `IHighwayClient.CleanAndByeForever()`
 
 *Requirements:* R1.1–R1.5
 **Done when:** it stops the loops, drains in-flight work within the existing shutdown timeout,
@@ -65,7 +65,7 @@ purges, and returns what it destroyed.
 
 ## Phase 3 — The part nobody has to remember
 
-### - [ ] T5 — `SubscriberRetirementThreshold`
+### - [x] T5 — `SubscriberRetirementThreshold`
 
 *Requirements:* R3.2
 **Done when:** the option exists, defaults to **24 hours**, and `TimeSpan.Zero` disables
@@ -76,7 +76,7 @@ early loses messages a live subscriber would have processed (a **correctness** f
 C2.3); retiring too late leaves a channel blocked (an **availability** failure an operator can
 also fix by hand). When in doubt, wait longer.
 
-### - [ ] T6 — Retirement rides on the heartbeat prune
+### - [x] T6 — Retirement rides on the heartbeat prune
 
 *Requirements:* R3.1, R3.3, R3.6
 **Done when:** a group whose node has been absent beyond the threshold is retired automatically,
@@ -89,7 +89,7 @@ dead subscriber from a nightly batch job. If it does not exist, the advantage is
 **No timer per group** (R3.6). One extra registry walk on a path that already walks the
 registry, at a frequency the deployment already sets by heartbeating.
 
-### - [ ] T7 — Retirement is loud
+### - [x] T7 — Retirement is loud
 
 *Requirements:* R3.4, and R3.5's documentation
 **Done when:** every retirement logs at **Warning** naming the node, how long it was absent, the
@@ -107,7 +107,7 @@ applies here more than anywhere else in the product.
 
 ## Phase 4 — Proving it
 
-### - [ ] T8 — **A blocked channel recovers**
+### - [x] T8 — **A blocked channel recovers**
 
 *Requirements:* R5.1, R5.2, R5.3
 
@@ -122,7 +122,7 @@ applies here more than anywhere else in the product.
 **This is the feature.** T1–T7 are plumbing whose purpose is unverified without it, and it is
 the only test that proves 016's Open Decision 5 was safe to accept.
 
-### - [ ] T9 — The rest of the coverage
+### - [x] T9 — The rest of the coverage
 
 - `RetiredNodeStaysGone_AcrossAHeartbeatInterval` — T4's resurrection defect
 - `UnconsumedButLiveGroup_IsNotRetired` — evidence, not inference (T6)
@@ -136,14 +136,14 @@ the only test that proves 016's Open Decision 5 was safe to accept.
 
 ## Phase 5 — Conformance
 
-### - [ ] T10 — Protocol document
+### - [x] T10 — Protocol document
 
 *Requirements:* R6.1, R6.2
 **Done when:** `BYE PURGE`, the `hw:reg:node:{nodeId}:channels` key and the retirement events are
 documented, and `ProtocolConformanceTests` is green. Same change as the code — that gate has
 fired six times now.
 
-### - [ ] T11 — Constraints
+### - [x] T11 — Constraints
 
 *Requirements:* R6.3
 **Done when:** **C2.3 gains its limit** — "a subscriber that is down receives what it missed,
@@ -153,7 +153,7 @@ its mitigation.
 C2.3 has been unqualified since it was written, and it is no longer true without a bound. A
 guarantee with an unstated expiry is the kind of drift `constraints.md` exists to catch.
 
-### - [ ] T12 — Samples and full verification
+### - [x] T12 — Samples and full verification
 
 *Requirements:* R6.4, R6.5
 **Done when:** a sample shows a node retiring and a channel recovering, the samples are re-run
@@ -171,3 +171,36 @@ for convenience is trading C2.3 for tidiness.
 **And: retirement is never silent.** It destroys more data in one act than anything else in
 Highway. An operator who cannot answer "what did we lose?" afterwards has been failed by the
 feature even if the channel recovered.
+
+
+---
+
+## What execution changed
+
+**Automatic retirement rides on `HW.PUBLISH`, not the heartbeat prune.** The design said the
+prune, on the grounds that it already walks the registry. Building it showed publish is the
+better host: it *already* reads the channel's group list and *already* locks every group's
+queue, so the check costs one main-store GET per group on a path about to do N pushes — and the
+publish that would have been refused is the one that clears the blockage. Self-healing lands
+exactly where the pain is felt.
+
+**Two defects the tests found, neither visible by reading:**
+
+1. **The undeclared key, a fifth time.** `RetireGroup` removes the group from
+   `hw:ch:{channel}:groups` — an object-store set `HW.PUBLISH` had never touched, so it was not
+   declared in `Prepare` and Garnet rejected it in `Main`. 013, 014, 015 and now 017.
+2. **`CleanAndByeForeverAsync` had nothing to send on.** `StopAsync` disposes the connection, so
+   purging after it threw a `NullReferenceException`. The purge now opens its own connection —
+   after the loops stop, which is the ordering that matters, and before nothing, which is the
+   ordering that was wrong.
+
+**And one in the tests themselves:** a catalog's `services` array holds **objects with a
+`name`**, not bare strings. A string array parses as "a pure caller with no services", so the
+RPC-requeue assertion failed against correct code.
+
+## Not done
+
+**`HW.STATS` does not count retirements.** R3.4 asks for the count alongside the log and the
+recorder event; the first two are in. Left rather than half-built, and it pairs naturally with
+016's outstanding refusal counter and 015's dashboard work — three observability items that
+belong in one change rather than three.

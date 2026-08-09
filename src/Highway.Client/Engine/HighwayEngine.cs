@@ -232,6 +232,34 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         }
     }
 
+    /// <inheritdoc/>
+    public async Task<(int Groups, long Messages, long Bytes)> CleanAndByeForeverAsync(
+        CancellationToken ct = default)
+    {
+        // Order is the correctness requirement, not tidiness (017 T4). The purge must land
+        // AFTER the heartbeat loop stops — a purge issued while it still beats is undone by the
+        // next beat, and the node reappears with an empty catalog, which looks exactly like a
+        // purge that worked and then silently did not.
+        //
+        // But it must also land BEFORE the connection is torn down, and StopAsync disposes it.
+        // So: stop the loops, purge on a connection opened for the purpose, and let StopAsync
+        // have already done its own cleanup. Found by the test rather than by reading the code.
+        await StopAsync(ct).ConfigureAwait(false);
+
+        await using var purgeConnection = await HighwayConnection
+            .ConnectAsync(_options.Server, _options, ct).ConfigureAwait(false);
+
+        var destroyed = await purgeConnection.PurgeAsync(_options.NodeName, ct).ConfigureAwait(false);
+
+        _logger.LogWarning(
+            "Node '{Node}' retired permanently: {Groups} subscriber group(s) destroyed, " +
+            "{Messages} message(s) / {Bytes} byte(s) discarded. This is irreversible - a node " +
+            "that returns under this name starts with empty queues.",
+            _options.NodeName, destroyed.Groups, destroyed.Messages, destroyed.Bytes);
+
+        return destroyed;
+    }
+
     public async Task StopAsync(CancellationToken ct = default)
     {
         if (_disposed) return; // post-dispose calls are no-ops

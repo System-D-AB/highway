@@ -135,6 +135,19 @@ internal static class HighwayKeys
     /// </summary>
     public static string RegistrationService(string service) => $"hw:reg:svc:{service}";
 
+    /// <summary>
+    /// Channels a node subscribes to, newline-delimited in the main store (feature 017).
+    /// hw:reg:node:{nodeId}:channels
+    ///
+    /// <para><b>The join that lets a dead node be retired.</b> Retirement must delete keys
+    /// named <c>hw:q:{channel}@{group}:*</c>, and the channels a node subscribes to are not
+    /// derivable from a heartbeat's arguments — they must be read. Garnet rejects touching a
+    /// key not declared in <c>Prepare</c>, and reading an object-store structure there
+    /// registers a watch that later exclusive locks fail against (004.1). A main-store mirror
+    /// is the way through, exactly as <c>hw:ch:{channel}:grplist</c> is for the fan-out.</para>
+    /// </summary>
+    public static string NodeChannels(string nodeId) => $"hw:reg:node:{nodeId}:channels";
+
     // -------------------------------------------------------------------------
     // Doorbell channels (RESP pub/sub, rung via SubscribeBroker.PublishNow)
     // -------------------------------------------------------------------------
