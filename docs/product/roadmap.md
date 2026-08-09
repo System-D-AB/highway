@@ -263,9 +263,11 @@ time (not promotion time).
 
 ### 016 — Retention, Storage and Durability
 
-> **Runs after 018.** Several of the structures below stop existing when pub/sub unifies onto
-> the queue — in particular C4.4's unbounded group queues. Building byte budgets for them first
-> would be work thrown away.
+> **Runs after 018, and was rewritten once 018 shipped.** Requirement 3 halved — group queues
+> and queues were two bounding jobs because they were two implementations, and they are one now.
+> A fifth open decision appeared that did not exist before: publish fans out in one transaction,
+> so a single full group queue would fail the publish for **every** group, letting one stuck
+> subscriber block a channel for all the healthy ones.
 >
 > **Note (post-018):** Group queues no longer exist as a separate structure. They are now
 > ordinary queues under `hw:q:{channel}@{group}:*`, bounded by the same mechanism as every
@@ -275,14 +277,19 @@ time (not promotion time).
 remaining unmet constraints (C4.1–C4.6). One coherent piece of work rather than five
 problems.
 
+**018 delivered no durability in the sense this feature means.** Two things share the word:
+*retention until processed* (a consumer is down — built, 013/014/018) and *durability across a
+restart* (the broker process dies — not built). None of what 013–018 built survives `kill -9`.
+
 **C4.5 is the one that makes the others conditional:** `new HighwayServerBuilder().Build()`
 is memory-only, so every queue and pub/sub guarantee is false in the configuration a
 newcomer meets first. Feature 014 shipped a warning because a silent lie was unacceptable;
 this replaces the warning with the fix.
 
-**Four open decisions are recorded in the requirements rather than guessed** — what the byte
+**Five open decisions are recorded in the requirements rather than guessed** — what the byte
 budget is measured against, whether a full-queue refusal is permanent or transient, the
-`MaxDeliveryAttempts` off-by-one, and where the default data directory lives. Each changes
+`MaxDeliveryAttempts` off-by-one, where the default data directory lives, and what a fan-out
+does when one group's queue is full. Each changes
 the shape of the feature, so the design is not written until they are settled.
 
 - Byte-based caps with real accounting; 1 GB default, configurable
