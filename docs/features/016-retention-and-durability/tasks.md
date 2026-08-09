@@ -100,7 +100,7 @@ should not be claimed.
 
 ## Phase 3 — Byte budgets (Decision 1: per structure)
 
-### - [ ] T7 — The byte counter
+### - [x] T7 — The byte counter
 
 `hw:q:{name}:bytes`, maintained by the same transaction that pushes or pops.
 
@@ -113,7 +113,7 @@ trusts every writer, which is what T8 exists for.
 That is not a convenience; Garnet rejects touching an undeclared key, and this wall has been hit
 in 013, 014 and 015.
 
-### - [ ] T8 — Drift detection
+### - [x] T8 — Drift detection
 
 *Requirements:* R2.2
 **Done when:** a test recomputes each structure's true size and compares it to the counter after
@@ -121,7 +121,7 @@ a mixed workload of sends, claims, acks, redeliveries and dead-letters. **This i
 belt-and-braces**: the counter is only correct if *every* path maintains it, and the paths that
 forget are exactly the ones nobody thought about.
 
-### - [ ] T9 — `MaxQueueBytes` and refusal
+### - [x] T9 — `MaxQueueBytes` and refusal
 
 *Requirements:* R4.1, R4.2, R4.3
 **Done when:** an enqueue that would exceed the limit is refused with `HW_QUEUE_FULL` — a
@@ -129,7 +129,7 @@ forget are exactly the ones nobody thought about.
 surfaces it as a typed exception. Nothing is dropped: under C1.2 a queued message is one nobody
 has ever processed.
 
-### - [ ] T10 — Fan-out refuses as a whole, and names the group
+### - [x] T10 — Fan-out refuses as a whole, and names the group
 
 *Requirements:* R4.1, R4.4, Decision 5
 **Done when:** a publish where **any** group's queue is full writes **nothing** and returns an
@@ -140,7 +140,7 @@ honest; naming the group is what turns "one stuck subscriber blocked a channel" 
 session into a fix. A test must assert both — that the healthy groups received nothing, and that
 the error identifies the offending one.
 
-### - [ ] T11 — Every structure bounded, enumerated
+### - [x] T11 — Every structure bounded, enumerated
 
 *Requirements:* R3.1–R3.5
 **Done when:** a test **enumerates every list, set and sorted set Highway creates** and asserts
@@ -153,38 +153,54 @@ feature adding an unbounded structure is a test that fails when one appears.
 
 ## Phase 4 — Retention (R5)
 
-### - [ ] T12 — 100-day retention, per queue
+### - [ ] T12 — 100-day retention, per queue — **BLOCKED: needs a breaking framing change**
 
 *Requirements:* R5.1, R5.3
-**Done when:** the default is 100 days, configurable per structure, and it covers group queues
-because they are queues.
+**Not done, and the reason is structural.** A queue entry is
+`[ver][attempts][idLen][id][payload]` — it carries **no timestamp**, so there is nothing to age
+it against. Time-based retention needs either a fifth field in the framing (breaking, exactly
+like 013's attempt count) or a parallel time-keyed structure.
 
-### - [ ] T13 — Losses are counted and visible
+Deliberately not bolted on. R5.2 already says retention is the *secondary* limit: under C1.2
+only unprocessed work is stored, so in a healthy system neither limit binds and in an unhealthy
+one the byte budget arrives long before 100 days do. Shipping a breaking framing change for the
+limit that binds second, in a feature whose point was the limit that binds first, would be the
+wrong trade.
+
+**For whoever picks it up:** the framing change is the decision, not the sweep. If the entry
+gains a timestamp it should probably gain it alongside whatever else the next breaking change
+needs, so the format breaks once rather than twice.
+
+### - [ ] T13 — Losses are counted and visible — **partial**
 
 *Requirements:* R4.6, R5.4
-**Done when:** every refusal and every retention removal is counted in `HW.STATS` and recorded
-by the flight recorder. A limit nobody can observe being hit is a limit that gets blamed on the
-network.
+**Partial.** A refusal is visible where it matters most — the producer gets `HW_QUEUE_FULL`
+naming the queue or group, and `hw:q:{queue}:bytes` is readable, so an operator can see how
+close a queue is to its limit. A **counter of refusals** in `HW.STATS` and a recorder event are
+not built; retention removals do not exist to count (T12).
+
+Left undone rather than half-built: a refusal counter belongs with the recorder event, and both
+belong with whatever surfaces them in the dashboard — which is already outstanding from 015.
 
 ---
 
 ## Phase 5 — Conformance
 
-### - [ ] T14 — Protocol document
+### - [x] T14 — Protocol document
 
 *Requirements:* R7.1, R7.2
 **Done when:** `HW_QUEUE_FULL`, the changed option defaults and any new keys are documented, and
 `ProtocolConformanceTests` is green. Updated in the same change that adds the code — that gate
 has fired five times.
 
-### - [ ] T15 — Constraints
+### - [x] T15 — Constraints
 
 *Requirements:* R7.3
 **Done when:** C4.1–C4.6 move to **Met**, and **C4.7 is added**: the byte budget is per
 structure and does not bound the process. Decision 1 chose the shippable option; the gap is
 recorded as a constraint rather than left for someone to infer from a default.
 
-### - [ ] T16 — Samples and full verification
+### - [x] T16 — Samples and full verification
 
 *Requirements:* R7.4, R7.5, R7.6
 **Done when:** a sample demonstrates a refused send at a limit, the samples are re-run across

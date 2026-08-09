@@ -184,43 +184,54 @@ the current defaults.**
 
 ### C4.1 — Retention: 100 days
 
-**Status: Not met — default is 1 day.** Feature 016 (specced).
+**Status: Not met.** Feature 016 found it needs a breaking framing change first.
+
+A queue entry is `[ver][attempts][idLen][id][payload]` — it carries **no timestamp**, so there
+is nothing to age it against. Time-based retention therefore needs either a fifth field in the
+entry framing (breaking, like 013's attempt count) or a parallel structure keyed by time.
+
+Deliberately not bolted on: 016 shipped a byte budget instead, which is the limit that binds
+first anyway. R5.2 says so explicitly — under C1.2 only *unprocessed* work is stored, so in a
+healthy system neither limit binds, and in an unhealthy one the byte budget arrives long before
+100 days do.
 
 ### C4.2 — Size cap: 1 GB, configurable
 
-**Status: Not met — the cap is a count of 10,000 entries, not a size.** Feature 016 (specced).
+**Status: Met** — feature 016.
 
-What exhausts a server is bytes, not entries, and a count cannot express "as much memory as I
-am willing to give this".
+`MaxQueueBytes`, default 1 GB, measured in bytes rather than entries: what exhausts a server is
+bytes, and a count cannot express "as much memory as I am willing to give this". A running
+counter per queue is maintained inside the same transaction that pushes or pops, so the write
+path stays O(1). After 018 the one setting covers both verbs.
+
+**See C4.7** — this bounds a queue, not the process.
 
 ### C4.3 — Reaching a limit is never silent
 
-**Status: Not met.** Feature 016 (specced). The backlog that used to drop silently is gone; what remains is that group queues and queues have no refusal path.
+**Status: Met** — feature 016.
 
-**Intended: refuse the send or publish.** Under C1.2 a queued message is one nobody has ever
-processed; discarding it is losing data the queue exists to protect. A producer that receives
-an error can retry or shed load. One that receives silent success cannot.
+A full queue **refuses the producer** with `HW_QUEUE_FULL` — permanent under the 004.1 contract
+— naming the queue and the limit. Nothing is dropped: under C1.2 a queued message is one nobody
+has ever processed, so discarding the oldest to make room loses exactly the data the queue
+exists to protect.
+
+**A publish refuses in full when any one group's queue is full**, and the error names that
+group. Fan-out is atomic (018), so a partial delivery would quietly downgrade C2.1 from "at
+least once per registered group" to "at least once, unless full". The accepted cost is that one
+stuck subscriber blocks the channel for the healthy ones — made loud and attributable rather
+than hidden, so an operator fixes a subscriber instead of debugging a channel.
 
 ### C4.4 — Every queue-like structure is bounded
 
-**Status: Not met.** Feature 016 (specced).
+**Status: Met** — feature 016, and enforced by a test rather than by inspection.
 
-| Structure | Bounded? |
-|---|---|
-| Channel backlog | **Removed** (C2.4) |
-| Dead-letter queues | Yes — `MaxDeadLetterEntries` (feature 013) |
-| Delayed and retry sorted sets | Yes — bounded with their queue (feature 013) |
-| **Queues (C1) and subscriber group queues** | **Built (014/018) and still unbounded** |
+`BoundedStructureTests` enumerates every key shape `HighwayKeys` creates and requires each to
+name what bounds it — a real cap for anything that grows with **traffic**, an explicit exemption
+with a reason for anything that grows with **topology** (node counts, name counts).
 
-An orphaned group queue — a node decommissioned without unsubscribing — receives a copy of
-every subsequent publish forever. This, not the backlog, is what will actually consume a
-gigabyte. Bounding it is feature 016; letting a node retire cleanly so the queue never becomes
-an orphan is **feature 017 (node decommissioning)**.
-
-> Feature 018 unified group queues onto the queue engine. C4.4's former row
-> "Pub/Sub group queues — no bound at all" is now redundant: a group queue **is**
-> a queue, bounded (or not) by the same mechanism as every other queue. One
-> decision, not two.
+**The enumeration is the constraint, not the caps.** This entry read "pub/sub group queues: no
+bound at all" for three features because nothing forced the question to be asked. The test now
+fails the moment a new key helper appears without a row.
 
 ### C4.5 — Durability is the default, not an option
 
@@ -261,6 +272,21 @@ same setting.
 
 Recovery *time* may still be bounded by checkpointing even while disk use is not. That is
 **unmeasured and not claimed**.
+
+### C4.7 — The byte budget bounds a queue, not the process
+
+**Status: Deliberately unmet** — feature 016, decision 1.
+
+`MaxQueueBytes` is **per structure**. Ten queues at their limit is ten gigabytes; nothing bounds
+the process as a whole.
+
+This is recorded rather than implied because an operator reading "1 GB" will otherwise assume
+the wrong thing. A server-wide budget is what they actually mean, and it is materially more
+work: a global accountant on every enqueue, plus an eviction or refusal policy across unrelated
+structures deciding whose message loses. 016 shipped the bound that could be built without
+that, and named the gap instead of letting the default imply a guarantee it does not make.
+
+---
 
 ## C5 — What Highway does not guarantee
 
@@ -369,12 +395,13 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C3.1 | In-flight requests survive departure | ✅ Met |
 | C3.2 | An answer or a timeout, never silence | ✅ Met |
 | C3.3 | Retry budget may outlive the caller | ✅ Met |
-| C4.1 | Retention 100 days | ❌ Not met — 016 |
-| C4.2 | Size cap 1 GB | ❌ Not met — 016 |
-| C4.3 | Limits are never silent | ❌ Not met — 016 |
-| C4.4 | Every queue-like structure bounded | ❌ Not met — 016 |
+| C4.1 | Retention 100 days | ❌ Not met — needs a framing change |
+| C4.2 | Size cap 1 GB, in bytes | ✅ **Met** (016) |
+| C4.3 | Limits are never silent | ✅ **Met** (016) |
+| C4.4 | Every queue-like structure bounded | ✅ **Met** (016) |
 | C4.5 | Durable by default | ✅ **Met** (016) |
 | C4.6 | Bounded over time | ❌ Not met — measured broken (016) |
+| C4.7 | Byte budget bounds a queue, not the process | ⚠️ **Deliberately unmet** (016 decision 1) |
 | C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
 | C7.2 | Diagnostic detail obeys the payload capture switch | ✅ Met (015) |
 | C6.1 | Cannot reach the network unauthenticated by accident | ✅ Met |
@@ -383,8 +410,11 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C6.4 | TLS available, never required | ✅ Met |
 | C6.5 | The tested path is the secured path | ✅ Met |
 
-**Five unmet constraints remain, all in C4.** C4.5 — the one that made the others conditional —
-is met: a zero-configuration broker is now durable. **All six unmet constraints are in C4** — retention, storage and durability — which is one
+**Two unmet constraints remain, both in C4, and both are understood rather than merely
+outstanding:** C4.1 (retention) needs a breaking framing change first, and C4.6 (bounded
+storage growth) was attempted and **measured not to work**. C4.7 is unmet by choice.
+
+Feature 016 closed C4.2, C4.3, C4.4 and — the one that made the rest conditional — **C4.5** — retention, storage and durability — which is one
 coherent feature rather than six problems. Feature 014 delivered C1; feature 015 completed
 C1.4; feature 018 unified the two delivery engines.
 

@@ -85,6 +85,11 @@ internal sealed class HwQSendCommand : HighwayCommandBase
         // no watch conflict (004.1).
         AddKey(CreateArgSlice(HighwayKeys.Queue(_queue)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.QueueDelayed(_queue)), LockType.Exclusive, StoreType.Object);
+
+        // Byte accounting (016). Derived from the queue name alone, so it is declarable here —
+        // which is the whole reason the counter lives in the main store beside the queue
+        // rather than being computed from the structure in Main.
+        AddKey(CreateArgSlice(HighwayKeys.QueueBytes(_queue)), LockType.Exclusive, StoreType.Main);
         return true;
     }
 
@@ -95,6 +100,25 @@ internal sealed class HwQSendCommand : HighwayCommandBase
         try
         {
             var entry = Envelope.EncodeRpcEntry(_messageIdBytes, _payloadBytes);
+            var counterKey = HighwayKeys.QueueBytes(_queue);
+
+            // Refuse rather than drop (016 R4.1). Under C1.2 a queued message is one nobody has
+            // ever processed, so discarding the oldest to make room loses exactly the data the
+            // queue exists to protect. The producer is told; the stored messages are untouched.
+            if (_opts.MaxQueueBytes > 0)
+            {
+                var current = ReadByteCounter(api, counterKey);
+                if (current + entry.Length > _opts.MaxQueueBytes)
+                {
+                    WriteError(ref output, HighwayErrors.Format(
+                        HighwayErrors.QueueFull,
+                        $"queue '{_queue}' is at its limit ({current} of {_opts.MaxQueueBytes} bytes); " +
+                        "the message was not stored"));
+                    return;
+                }
+            }
+
+            AdjustByteCounter(api, counterKey, entry.Length);
 
             if (_deliverAtTicks > DateTime.UtcNow.Ticks)
             {

@@ -152,4 +152,58 @@ internal abstract partial class HighwayCommandBase
         => value.Length > 0
             ? Encoding.UTF8.GetString(value.ReadOnlySpan).Split('\n', StringSplitOptions.RemoveEmptyEntries)
             : [];
+    // -------------------------------------------------------------------------
+    // Byte accounting (016)
+    //
+    // A running counter per queue, held in the MAIN store beside the queue and
+    // updated inside the same transaction that pushes or pops the entry.
+    //
+    // Why a counter and not a measurement: asking Garnet for a structure's size
+    // on every enqueue is O(n); this is O(1) under a lock we already hold, which
+    // is what keeps R2.4 (no measurable cost on the write path) true.
+    //
+    // The price is that a counter trusts every writer. That is why the drift test
+    // exists — it recomputes the real size and compares, because the paths that
+    // forget to maintain a counter are exactly the ones nobody thought about.
+    //
+    // Scope: the LIVE QUEUE only. Processing lists are bounded by concurrency x
+    // nodes and dead-letter lists carry their own cap, so neither can grow without
+    // limit; the live queue is the structure that does when consumers are absent.
+    // -------------------------------------------------------------------------
+
+    /// <summary>Reads a queue's byte counter. Absent or unparsable reads as zero.</summary>
+    protected long ReadByteCounter<TGarnetApi>(TGarnetApi api, string counterKey)
+        where TGarnetApi : IGarnetApi
+    {
+        api.GET(CreateArgSlice(counterKey), out PinnedSpanByte current);
+
+        return current.Length > 0
+            && long.TryParse(
+                Encoding.UTF8.GetString(current.ReadOnlySpan),
+                System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var value)
+            ? value
+            : 0;
+    }
+
+    /// <summary>
+    /// Adds <paramref name="delta"/> to a queue's byte counter, deleting the key when it
+    /// reaches zero so an idle queue leaves nothing behind.
+    /// </summary>
+    protected void AdjustByteCounter<TGarnetApi>(TGarnetApi api, string counterKey, long delta)
+        where TGarnetApi : IGarnetApi
+    {
+        var slice = CreateArgSlice(counterKey);
+        var updated = ReadByteCounter(api, counterKey) + delta;
+
+        // Clamped at zero: a counter that goes negative would silently grant extra headroom,
+        // which is the failure mode hardest to notice and worst to debug.
+        if (updated <= 0)
+            api.DELETE(slice);
+        else
+            api.SET(slice, CreateArgSlice(
+                updated.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+    }
+
 }

@@ -59,7 +59,8 @@ internal abstract partial class HighwayCommandBase
         EntryDecoder decode,
         QueueEntryEncoder encodeQueueEntry,
         Func<byte[], string> idToString,
-        bool returnToHead = false)
+        bool returnToHead = false,
+        string? bytesCounterKey = null)
         where TGarnetApi : IGarnetApi
     {
         var deadLettered = new List<SweepOutcome>();
@@ -114,8 +115,17 @@ internal abstract partial class HighwayCommandBase
             // On the requeued entry too. Without this, `firstType` would be lost on the FIRST
             // redelivery and nothing would report it — the one silent failure mode in this
             // feature, which is why R4.4 calls it out.
-            var revived = CreateArgSlice(
-                Envelope.CarryFailureBlock(source, encodeQueueEntry(id, payload, next)));
+            var requeued = Envelope.CarryFailureBlock(source, encodeQueueEntry(id, payload, next));
+
+            // Byte accounting (016): the message is going back into the live queue, so the
+            // bytes go back onto its counter. The claim that took it out decremented them.
+            // Deliberately NOT checked against the limit — refusing here would strand a
+            // message that is already the broker's responsibility, which is worse than being
+            // briefly over budget. The limit governs what producers may ADD.
+            if (bytesCounterKey is not null)
+                AdjustByteCounter(api, bytesCounterKey, requeued.Length);
+
+            var revived = CreateArgSlice(requeued);
             if (returnToHead)
                 api.ListLeftPush(queueKey, revived, out _);
             else

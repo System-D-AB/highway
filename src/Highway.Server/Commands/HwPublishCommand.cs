@@ -110,6 +110,7 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             var derivedName = $"{_channel}@{group}";
             AddKey(CreateArgSlice(HighwayKeys.Queue(derivedName)), LockType.Exclusive, StoreType.Object);
             AddKey(CreateArgSlice(HighwayKeys.QueueDelayed(derivedName)), LockType.Exclusive, StoreType.Object);
+            AddKey(CreateArgSlice(HighwayKeys.QueueBytes(derivedName)), LockType.Exclusive, StoreType.Main);
         }
 
         return true;
@@ -158,11 +159,40 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             {
                 // Fan out to derived queue keys using RPC framing.
                 var rpcEntry = Envelope.EncodeRpcEntry(messageIdBytes, _payloadBytes);
+
+                // Check EVERY group before writing ANY of them (016 T10). Fan-out is atomic —
+                // 018 guarantees a publish reaches every registered group or none — so a full
+                // group queue has to fail the whole publish rather than deliver a partial one.
+                //
+                // The accepted cost is that one stuck subscriber blocks the channel for the
+                // healthy ones. The mitigation is not to hide it but to make it attributable:
+                // the error names the offending group, so an operator fixes a subscriber
+                // instead of debugging a channel.
+                if (_opts.MaxQueueBytes > 0)
+                {
+                    foreach (var group in _groups)
+                    {
+                        var name = $"{_channel}@{group}";
+                        var used = ReadByteCounter(api, HighwayKeys.QueueBytes(name));
+
+                        if (used + rpcEntry.Length > _opts.MaxQueueBytes)
+                        {
+                            WriteError(ref output, HighwayErrors.Format(
+                                HighwayErrors.QueueFull,
+                                $"channel '{_channel}' refused: group '{group}' is at its limit " +
+                                $"({used} of {_opts.MaxQueueBytes} bytes). No group received this " +
+                                "message - a publish reaches every registered group or none."));
+                            return;
+                        }
+                    }
+                }
+
                 foreach (var group in _groups)
                 {
                     var derivedName = $"{_channel}@{group}";
                     var derivedQueueKey = CreateArgSlice(HighwayKeys.Queue(derivedName));
                     api.ListRightPush(derivedQueueKey, CreateArgSlice(rpcEntry), out _);
+                    AdjustByteCounter(api, HighwayKeys.QueueBytes(derivedName), rpcEntry.Length);
                 }
 
                 WriteInt64(ref output, _groups.Length);
