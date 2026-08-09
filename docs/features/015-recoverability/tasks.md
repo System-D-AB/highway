@@ -408,12 +408,37 @@ break the recovery of a message, the design has inverted its priorities.
 
 ## Not done, and named rather than left to be discovered
 
-**The dashboard does not display the new fields.** R3.4 asks for `HW.DLQ PEEK` **and** the
-dashboard; PEEK is done and the CLI sample proves it end to end, but the dashboard's dead-letter
-view still shows the pre-015 columns. It is a separate package (`Highway.Server.Dashboard`,
-feature 011) with its own view code, and bolting a UI change onto the tail of a protocol feature
-is how both get done badly. **Registered as outstanding for the next dashboard change** — not
-silently dropped.
+**The dashboard shows the failure *events*, but not the dead-letter *contents*.** R3.4 asks for
+both `HW.DLQ PEEK` and the dashboard. PEEK is done and the sample proves it end to end. The
+dashboard's position is more specific than "not done", so, precisely:
+
+- ✅ **`DeliveryFailed` is visible.** The dashboard renders every recorder event with its
+  `ErrorCode`, and that is where the exception type is carried. The same is true of the events
+  added later — `SendRefused` (016), `GroupRetired` and `NodeSuspect` (017),
+  `ProcessingCapExceeded` (019).
+- ❌ **The dead letter itself is not.** There is no dead-letter view: the dashboard exposes
+  `/api/recorder`, `/api/events/{name}` and `/api/stream/{name}`, all reading the in-process
+  `FlightRecorder`. `failureType`, `failureFirstType` and `failureDetail` live in the DLQ entry
+  and are reachable only through `HW.DLQ PEEK`.
+
+**The design problem, so the next attempt does not walk into it.** The dashboard runs *inside*
+the server process with `FlightRecorder` injected — it has **no client connection**. A
+dead-letter view needs one, and opening a loopback connection is exactly what broke TLS in 018:
+the pre-018 startup check did that, mirrored the password but not the transport, and no
+TLS-enabled server could start. Either the dashboard gets a connection built from the server's
+own transport settings (auth, TLS, and mTLS, which the 018 fix still cannot cover), or the DLQ
+is exposed through an in-process API rather than the wire.
+
+**That is a feature, not a follow-up task**, and it should be specced as one.
+
+#### A wart introduced since, worth fixing with it
+
+Features 016, 017 and 019 all carry human-readable prose in `ErrorCode` — "retired 1 group(s),
+discarded 41 message(s)", "node 'x' has been absent past half the retirement threshold". The
+dashboard renders that column as **Error Code** and styles any event carrying one as a failure,
+so `NodeSuspect` — a warning — appears as an error. The field wanted a code; it is being used as
+a message. A dedicated `Detail` field on the recorder event would fix both the naming and the
+styling.
 
 **Two reply-shape warts, both pre-existing, both left alone:**
 
