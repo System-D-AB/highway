@@ -195,6 +195,12 @@ public sealed class HighwayServer : IHighwayServer
     /// that file's Command Index and asserts it against this table in both
     /// directions, so the two cannot drift.</para>
     /// </summary>
+    /// <summary>
+    /// <b>Append-only.</b> The order of this table defines the stored-procedure ids Garnet
+    /// writes into the AOF, so inserting, removing or reordering entries invalidates every
+    /// existing data directory. New commands go at the END. Enforced at startup by
+    /// <see cref="Internal.CommandManifest"/>.
+    /// </summary>
     internal static IReadOnlyList<HighwayCommandRegistration> CommandTable(
         HighwayServerOptions opts,
         DoorbellBridge doorbell,
@@ -254,7 +260,15 @@ public sealed class HighwayServer : IHighwayServer
         FlightRecorder recorder,
         HighwayServerOptions opts)
     {
-        foreach (var command in CommandTable(opts, doorbell, recorder))
+        var commands = CommandTable(opts, doorbell, recorder);
+
+        // Refuse BEFORE registration, and therefore before Start() can replay a single AOF
+        // record: the AOF stores procedures by registration position, so a changed order
+        // replays the wrong commands silently. This throw is the only thing standing between
+        // a reordered CommandTable and corrupted durable queues.
+        Internal.CommandManifest.Guard(opts.DataDir, commands.Select(c => c.Name).ToArray());
+
+        foreach (var command in commands)
         {
             server.Register.NewTransactionProc(
                 command.Name,

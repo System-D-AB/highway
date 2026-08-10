@@ -1,6 +1,8 @@
 using Highway.Abstractions;
 using Highway.Client.Scanning;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Highway.Client.Execution;
 
@@ -12,11 +14,16 @@ public sealed class ServiceExecutor
 {
     private readonly ICatalog _catalog;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<ServiceExecutor> _logger;
 
-    public ServiceExecutor(ICatalog catalog, IServiceScopeFactory scopeFactory)
+    public ServiceExecutor(
+        ICatalog catalog,
+        IServiceScopeFactory scopeFactory,
+        ILogger<ServiceExecutor>? logger = null)
     {
         _catalog = catalog;
         _scopeFactory = scopeFactory;
+        _logger = logger ?? NullLogger<ServiceExecutor>.Instance;
     }
 
     /// <summary>
@@ -75,7 +82,30 @@ public sealed class ServiceExecutor
         }
 
         await using var scope = _scopeFactory.CreateAsyncScope();
-        var serviceInstance = scope.ServiceProvider.GetRequiredService(descriptor.ImplementationType);
+
+        object serviceInstance;
+        try
+        {
+            serviceInstance = scope.ServiceProvider.GetRequiredService(descriptor.ImplementationType);
+        }
+        catch (Exception ex)
+        {
+            // A constructor throw or DI cycle is a PERMANENT configuration error. Before this
+            // boundary existed it escaped the mapping entirely: no reply, lease recovery,
+            // identical failure on every redelivery, and a caller staring at a timeout for
+            // something the first attempt already knew (concerns.md 9.1). Distinct code, so an
+            // operator reads "fix the container", not "investigate the broker".
+            return new GenericOutput
+            {
+                StatusCode = StatusCodes.Status500InternalServerError,
+                Error = new ErrorDetail
+                {
+                    Code = "SERVICE_ACTIVATION_FAILED",
+                    Message = $"Could not construct '{descriptor.ImplementationType.Name}' for " +
+                              $"service '{serviceName}': {ex.Message}",
+                }
+            };
+        }
 
         try
         {
@@ -100,14 +130,21 @@ public sealed class ServiceExecutor
         }
         catch (Exception ex)
         {
+            // The full exception -- stack and all -- belongs HERE, in the server's own log
+            // (concerns.md 9.3). It used to cross the wire in ErrorDetail.StackTrace, handing
+            // any remote caller source paths, internal class names and dependency versions.
+            // The caller gets the type and the message, which is what a caller can act on;
+            // note the asymmetry with HW.FAIL's diagnostic detail, which stays server-side and
+            // is governed by feature 002's capture modes.
+            _logger.LogError(ex, "Service '{Service}' threw", serviceName);
+
             return new GenericOutput
             {
                 StatusCode = StatusCodes.Status500InternalServerError,
                 Error = new ErrorDetail
                 {
                     Code = "SERVICE_EXCEPTION",
-                    Message = ex.Message,
-                    StackTrace = ex.StackTrace
+                    Message = $"{ex.GetType().Name}: {ex.Message}",
                 }
             };
         }

@@ -77,29 +77,32 @@ internal sealed class DefaultTypeScanner : ITypeScanner
 
         foreach (var type in allTypes)
         {
-            var impl = type.GetInterfaces()
-                .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == processInterface);
-
-            if (impl is null) continue;
-
-            var messageType = impl.GetGenericArguments()[0];
-
-            var attribute = messageType.GetCustomAttribute<QueueAttribute>()
-                            ?? throw new QueueAttributeMissingException(messageType);
-
-            RejectReservedCharacter("Queue", attribute.Name);
-
-            if (byMessageType.TryGetValue(messageType, out var existing))
-                throw new DuplicateQueueProcessorException(messageType, existing.ProcessorType, type);
-
-            byMessageType[messageType] = new QueueDescriptor
+            // EVERY closed IProcess<> interface, not the first. FirstOrDefault here silently
+            // dropped all but one queue from a class processing several -- no error, the
+            // second queue's messages just waited for a processor that never came. Both
+            // architecture reviews found it independently (F1; concerns.md 5.6).
+            foreach (var impl in type.GetInterfaces()
+                .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == processInterface))
             {
-                Name = attribute.Name,
-                MessageType = messageType,
-                ProcessorType = type,
-                Lifetime = type.GetCustomAttribute<ServiceLifetimeAttribute>()?.Lifetime
-                           ?? HighwayServiceLifetime.Scoped,
-            };
+                var messageType = impl.GetGenericArguments()[0];
+
+                var attribute = messageType.GetCustomAttribute<QueueAttribute>()
+                                ?? throw new QueueAttributeMissingException(messageType);
+
+                RejectReservedCharacter("Queue", attribute.Name);
+
+                if (byMessageType.TryGetValue(messageType, out var existing))
+                    throw new DuplicateQueueProcessorException(messageType, existing.ProcessorType, type);
+
+                byMessageType[messageType] = new QueueDescriptor
+                {
+                    Name = attribute.Name,
+                    MessageType = messageType,
+                    ProcessorType = type,
+                    Lifetime = type.GetCustomAttribute<ServiceLifetimeAttribute>()?.Lifetime
+                               ?? HighwayServiceLifetime.Scoped,
+                };
+            }
         }
 
         return [.. byMessageType.Values];
@@ -225,44 +228,45 @@ internal sealed class DefaultTypeScanner : ITypeScanner
 
         foreach (var type in allTypes)
         {
-            var iSubscribeImpl = type.GetInterfaces()
-                .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == subscribeInterface);
-
-            if (iSubscribeImpl is null) continue;
-
-            var messageType = iSubscribeImpl.GetGenericArguments()[0];
-
-            // Validate [Channel] attribute on message type
-            var channelAttr = messageType.GetCustomAttribute<ChannelAttribute>();
-            if (channelAttr is null)
-                throw new ChannelAttributeMissingException(messageType);
-
-            RejectReservedCharacter("Channel", channelAttr.Name);
-
-            // Read lifetime
-            var lifetimeAttr = type.GetCustomAttribute<ServiceLifetimeAttribute>();
-            var lifetime = lifetimeAttr?.Lifetime ?? HighwayServiceLifetime.Scoped;
-
-            var subscriber = new SubscriberDescriptor
+            // Same rule as queue processors: every closed ISubscribe<>, or a class listening
+            // to two channels silently hears one.
+            foreach (var iSubscribeImpl in type.GetInterfaces()
+                .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == subscribeInterface))
             {
-                ImplementationType = type,
-                Lifetime = lifetime
-            };
+                var messageType = iSubscribeImpl.GetGenericArguments()[0];
 
-            if (channelMap.TryGetValue(channelAttr.Name, out var existing))
-            {
-                // Validate same message type for same channel name
-                if (existing.MessageType != messageType)
-                    throw new ChannelAlreadyAddedException(channelAttr.Name);
+                // Validate [Channel] attribute on message type
+                var channelAttr = messageType.GetCustomAttribute<ChannelAttribute>();
+                if (channelAttr is null)
+                    throw new ChannelAttributeMissingException(messageType);
 
-                existing.Subscribers.Add(subscriber);
-            }
-            else
-            {
-                var isInternal = type.FullName?.Contains("Highway.Internal") == true
-                              || type.FullName?.Contains("Highway.Private") == true;
+                RejectReservedCharacter("Channel", channelAttr.Name);
 
-                channelMap[channelAttr.Name] = (messageType, new List<SubscriberDescriptor> { subscriber }, isInternal);
+                // Read lifetime
+                var lifetimeAttr = type.GetCustomAttribute<ServiceLifetimeAttribute>();
+                var lifetime = lifetimeAttr?.Lifetime ?? HighwayServiceLifetime.Scoped;
+
+                var subscriber = new SubscriberDescriptor
+                {
+                    ImplementationType = type,
+                    Lifetime = lifetime
+                };
+
+                if (channelMap.TryGetValue(channelAttr.Name, out var existing))
+                {
+                    // Validate same message type for same channel name
+                    if (existing.MessageType != messageType)
+                        throw new ChannelAlreadyAddedException(channelAttr.Name);
+
+                    existing.Subscribers.Add(subscriber);
+                }
+                else
+                {
+                    var isInternal = type.FullName?.Contains("Highway.Internal") == true
+                                  || type.FullName?.Contains("Highway.Private") == true;
+
+                    channelMap[channelAttr.Name] = (messageType, new List<SubscriberDescriptor> { subscriber }, isInternal);
+                }
             }
         }
 

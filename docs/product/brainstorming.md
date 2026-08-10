@@ -37,7 +37,7 @@ node is simultaneously host, publisher, subscriber, invoker and processor?*
 registers only one — no error, no warning, one channel never fires. Writing one handler class
 for several events is the natural thing to do at 10+ channels, and its failure mode is invisible
 even to the dashboard, because the node never declares the dropped subscription.
-→ **Open.** The one item the do-nothing discussion below refuses to defer.
+→ *Fixed 2026-08-10, with the failure-boundary set (no feature spec, by user instruction): the scanner now registers every closed interface, verified by tests run against the broken code first. Same change set fixed concerns.md 9.1 (DI activation outside the RPC error mapping), 9.2 (response-serialization failure re-running completed handlers), 9.3 (stack traces sent to remote callers), 5.7 (the `[Queue]` struct contradiction), and built the A1 AOF registration-manifest guard.*
 
 **F2 — Handler discovery is asymmetric.** RPC needs a **base class** (`AsyncService<TReq,TRes>`,
 burning the class's only C# base); subscribe and process are **interfaces**. Three roles, three
