@@ -148,7 +148,7 @@ internal abstract partial class HighwayCommandBase : CustomTransactionProcedure
     /// Produces the specific rejection reason so the operator sees whether the problem
     /// is a control character, the reserved <c>@</c>, a blank, or a length violation.
     /// </summary>
-    private static string IdentifierErrorDetail(ReadOnlySpan<byte> raw, string name, int maxBytes)
+    protected static string IdentifierErrorDetail(ReadOnlySpan<byte> raw, string name, int maxBytes)
     {
         if (raw.IsEmpty)
             return $"{name} is blank";

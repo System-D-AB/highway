@@ -1,61 +1,50 @@
 # Highway User Guide
 
-Highway provides a foundation for building event-driven, distributed
-microservices on .NET. It combines RPC, Pub/Sub and durable Queues into one
-programming model, backed by a single broker process you run alongside your
-services. The broker is itself a .NET process; there is no other infrastructure
-to install or operate.
+Highway provides a foundation for building distributed .NET applications. It
+combines RPC, Pub/Sub and durable Queues into one programming model backed by a
+single server process. You write plain C# objects — requests, responses, messages
+— and Highway handles discovery, routing, delivery, retries, serialization and
+load balancing.
 
-Three verbs, one rule for choosing between them:
+No external broker. No infrastructure decisions before your first message.
 
-- **Need the answer** → `ExecuteAsync`
-- **One handler** → `SendAsync`
-- **Many handlers** → `PublishAsync`
+---
+
+## Getting Started
+
+Three packages:
+
+| Package | What it is | Who references it |
+|---|---|---|
+| `Highway.Abstractions` | Contracts, interfaces, attributes. Zero dependencies. | Shared contract libraries |
+| `Highway.Client` | Assembly scanning, DI, engine, serialization. | Any application |
+| `Highway.Server` | The broker. Runs as a standalone process. | Deployed once |
+
+Register Highway in any .NET application:
 
 ```csharp
-services.AddHighway(o =>
+builder.Services.AddHighway(o =>
 {
     o.NodeName = "my-service-1";
     o.Server   = "127.0.0.1:6500";
 });
 ```
 
-Assembly scanning discovers your services, subscribers and processors at
-startup — it covers every referenced assembly that references
-`Highway.Abstractions`. Nothing is registered by hand.
-
-## The Four Rules
-
-The whole mental model, stated once:
-
-1. **Contracts are the schema.** They declare what exists, live in packages that reference
-   only `Highway.Abstractions`, and host nothing. Every process that references a contract
-   can address its route — in every configuration.
-2. **Handlers declare capability.** A process hosts the handlers in its scanned assemblies.
-   By default that includes referenced libraries (`HostingMode.Implicit` — Highway warns at
-   startup when a library contributes handlers by reference alone); switch to
-   `HostingMode.Declared` to host only the entry assembly plus libraries that consented via
-   `[assembly: HighwayHostModule]` or `options.HostAssembly(...)`.
-3. **The verb decides sharing.** `ExecuteAsync` and `SendAsync` handlers **compete** across
-   every node that hosts them — deploy more copies and they share the work. `PublishAsync`
-   delivers **one copy per subscriber group**. Today the group is the node name, so every
-   subscribing node gets its own copy; feature 025 separates the two so replicas can share.
-4. **Verbs declare semantics.** Need the answer → `ExecuteAsync`. One handler →
-   `SendAsync`. Every subscriber → `PublishAsync`.
-
-At startup every node logs its **topology manifest** — what it PROVIDES (hosted services,
-processors, subscriptions, each with its source assembly) and what it CAN USE (routes whose
-contracts it references). The same manifest is available in code via
-`IHighwayEngine.Topology`, and the dashboard's node page shows both halves.
+Assembly scanning discovers your services, processors and subscribers at startup.
+Nothing is registered by hand.
 
 ---
 
-## RPC — `ExecuteAsync`
+## RPC
 
-A typed request/response call routed through the broker. The caller waits and
-gets a response or an error — never a silent hang.
+Remote procedure calls between services. A caller sends a request and waits for
+a typed response. Highway routes the call through the broker to whichever node
+hosts the service.
 
-**Define a contract** (in a shared class library referencing only `Highway.Abstractions`):
+### The objects
+
+A **request** — a plain C# class with a `[Service]` attribute and `IReturn<T>`
+to declare the response type:
 
 ```csharp
 [Service("orders.create")]
@@ -65,7 +54,12 @@ public sealed class CreateOrder : IReturn<OrderResult>
     public string Item { get; set; } = "";
     public int Quantity { get; set; }
 }
+```
 
+A **response** — a class extending `Output`, which carries a status code and
+optional error detail:
+
+```csharp
 public sealed class OrderResult : Output
 {
     public string? OrderId { get; set; }
@@ -73,7 +67,8 @@ public sealed class OrderResult : Output
 }
 ```
 
-**Implement the service** (in whatever process hosts it):
+A **service** — a class extending `AsyncService<TRequest, TResponse>` that
+handles the request and returns the response:
 
 ```csharp
 public sealed class CreateOrderService(IHighwayClient client)
@@ -85,10 +80,6 @@ public sealed class CreateOrderService(IHighwayClient client)
         var orderId = GenerateId();
         var total = request.Quantity * 9.99m;
 
-        // A service can also publish events.
-        await client.PublishAsync(
-            new OrderPlaced { OrderId = orderId, Total = total }, ct);
-
         return new OrderResult
         {
             OrderId = orderId,
@@ -99,7 +90,7 @@ public sealed class CreateOrderService(IHighwayClient client)
 }
 ```
 
-**Call it** (from any other process — or the same one):
+### Calling a service
 
 ```csharp
 var result = await client.ExecuteAsync(new CreateOrder
@@ -113,22 +104,28 @@ if (result.StatusCode == StatusCodes.Status200OK)
     Console.WriteLine($"Order {result.OrderId} placed");
 ```
 
-Errors are data, not exceptions. A service returns a status code and an
-`ErrorDetail` on the response; the caller reads it like any other field.
-`ExecuteAsync` does not throw for a service-level outcome.
+### Behavior
 
-Multiple nodes hosting the same service share the work (competing consumers).
-Start two instances and Highway load-balances between them automatically.
+- **Errors are data.** A service returns a status code and an `ErrorDetail` on
+  the response. `ExecuteAsync` does not throw for service-level outcomes.
+- **Competing consumers.** Deploy multiple instances of the same service and
+  Highway load-balances between them automatically.
+- **Timeouts.** Callers get a response or an explicit timeout — never a silent
+  hang. Default: 30 seconds.
+- **Fast-fail.** Set `FastFailEnabled = true` to get an immediate 404 when no
+  node hosts the service, instead of waiting for the timeout.
 
 ---
 
-## Durable Queues — `SendAsync`
+## Durable Queues
 
 Fire-and-forget work handled by exactly one processor. The sender does not wait
-for a result. At-least-once delivery: the message is retried until acknowledged
-or dead-lettered.
+for a result. Messages are durable and survive broker restarts.
 
-**Define the message:**
+### The objects
+
+A **message** — a plain C# class (or record) with a `[Queue]` attribute and
+`ISend` marker:
 
 ```csharp
 [Queue("invoices.generate")]
@@ -139,62 +136,61 @@ public sealed record GenerateInvoice : ISend
 }
 ```
 
-**Implement the processor:**
+A **processor** — a class implementing `IProcess<T>` that handles the message:
 
 ```csharp
-public sealed class InvoiceProcessor(ILogger<InvoiceProcessor> logger)
-    : IProcess<GenerateInvoice>
+public sealed class InvoiceProcessor : IProcess<GenerateInvoice>
 {
     public Task ProcessAsync(GenerateInvoice message, CancellationToken ct = default)
     {
-        logger.LogInformation("Generating invoice for {OrderId}", message.OrderId);
-        // do the work...
+        // Generate the invoice...
         return Task.CompletedTask;
     }
 }
 ```
 
-**Send work to the queue:**
+### Sending work
 
 ```csharp
-var id = await client.SendAsync(new GenerateInvoice
+var messageId = await client.SendAsync(new GenerateInvoice
 {
     OrderId = "ORD-42",
     Total = 19.98m,
 });
 ```
 
-`SendAsync` returns a message ID you can use later to find it in the dead-letter
-queue if something goes wrong.
+`SendAsync` returns a message ID. Keep it — you can use it to find the message
+in the dead-letter queue if something goes wrong.
 
-Run multiple instances of the processor and they share the queue — work is
-distributed, not duplicated. A message that fails repeatedly is dead-lettered
-after `MaxDeliveryAttempts` rather than blocking the queue.
+### Behavior
 
-**Delayed send:**
-
-```csharp
-await client.SendAsync(message, delay: TimeSpan.FromMinutes(5));
-```
-
-The message becomes visible after the delay. Delivery is driven by workers
-polling, so it arrives on the first poll after its time.
-
-**Long-running work:** For jobs measured in hours, chunk them. Each message
-processes one slice, checkpoints progress to your database, then enqueues the
-next slice. Each message lives seconds; the job lives hours. This gives you
-progress visibility, deploy safety, parallelism, and per-slice failure isolation.
-See `docs/cookbook/long-running-work.md` for the full pattern.
+- **At-least-once delivery.** If a processor completes but the acknowledgment is
+  lost, the message is delivered again. Handlers should be idempotent.
+- **Multiple workers share the queue.** Deploy three instances and they compete
+  for work — no duplication, no configuration.
+- **Dead-lettering.** A message that fails repeatedly is moved to the dead-letter
+  queue after `MaxDeliveryAttempts`, rather than blocking everything behind it.
+- **Delayed send.** Schedule work for later:
+  ```csharp
+  await client.SendAsync(message, delay: TimeSpan.FromMinutes(5));
+  ```
+- **Long-running work.** For jobs measured in hours, chunk them: each message
+  processes one slice, checkpoints progress to your database, then enqueues the
+  next slice. Each message lives seconds; the job lives hours. See
+  `docs/cookbook/long-running-work.md`.
 
 ---
 
-## Pub/Sub — `PublishAsync`
+## Pub/Sub
 
-Broadcast an event to every subscriber. Each subscribing node gets its own copy.
-Delivery is durable: a node that is offline when the event is published receives
-it when it restarts under the same node name.
+Broadcast events to every subscriber. Each subscribing application gets its own
+copy of every message. Delivery is durable — a subscriber that is offline when
+the event is published receives it when it restarts.
 
-**Define a channel message:**
+### The objects
+
+A **message** — a plain C# class with a `[Channel]` attribute and `IPublish`
+marker:
 
 ```csharp
 [Channel("orders.placed")]
@@ -206,7 +202,8 @@ public sealed class OrderPlaced : IPublish
 }
 ```
 
-**Subscribe:**
+A **subscriber** — a class implementing `ISubscribe<T>` that reacts to the
+event:
 
 ```csharp
 public sealed class OrderPlacedSubscriber : ISubscribe<OrderPlaced>
@@ -219,7 +216,7 @@ public sealed class OrderPlacedSubscriber : ISubscribe<OrderPlaced>
 }
 ```
 
-**Publish:**
+### Publishing an event
 
 ```csharp
 await client.PublishAsync(new OrderPlaced
@@ -230,26 +227,72 @@ await client.PublishAsync(new OrderPlaced
 });
 ```
 
-The difference between `SendAsync` and `PublishAsync` is the deployment
-consequence: run three instances of a queue processor and they **share** the work;
-run three instances of a subscriber and each gets **its own copy**.
+### Behavior
 
-**Delayed publish:**
-
-```csharp
-await client.PublishAsync(message, delay: TimeSpan.FromMinutes(10));
-```
-
-Groups are resolved at delivery time, so a subscriber that registers during the
-delay still receives the message.
+- **Fan-out.** Every subscription group gets its own copy. By default each node
+  is its own group.
+- **Replicas.** To scale a subscriber horizontally *without* multiplying
+  deliveries, give the replicas one `SubscriptionGroup`:
+  ```csharp
+  services.AddHighway(o =>
+  {
+      o.NodeName = $"billing-{Environment.MachineName}";  // unique per process
+      o.SubscriptionGroup = "billing";                    // one logical consumer
+  });
+  ```
+  Replicas sharing a group **compete** for that group's single copy of each
+  event; other groups still receive their own.
+- **Durable.** Stop a subscriber, publish events, restart it. The missed events
+  arrive. A group's pending messages survive as long as **any** of its replicas
+  still heartbeats.
+- **Delayed publish.** Schedule an event for later:
+  ```csharp
+  await client.PublishAsync(message, delay: TimeSpan.FromMinutes(10));
+  ```
+- **At-least-once.** Delivery guarantees apply per subscriber group. Handlers
+  should be idempotent.
 
 ---
 
-## Redelivery Protection — `[Idempotent]`
+## Choosing Between Them
 
-Highway delivers at least once on every path. If a handler completes but the
-acknowledgment is lost, the message is delivered again. Mark a contract
-`[Idempotent]` to suppress that redelivery within a window:
+One sentence: **need the answer → RPC. One handler → Queue. Many handlers →
+Pub/Sub.**
+
+The deployment consequence is the difference between the last two: deploy three
+instances of a queue processor and they **share** the work. Deploy three
+instances of a subscriber and each gets **its own copy** — unless they share a
+`SubscriptionGroup`, in which case they share that copy too. The verb decides
+the semantics; the subscription group decides who counts as *one* subscriber.
+
+---
+
+## Shared Contracts
+
+Requests, responses and messages are plain C# objects. They live in a shared
+class library that references only `Highway.Abstractions` — a package with zero
+dependencies.
+
+```
+MyApp.Contracts/          → references Highway.Abstractions only
+MyApp.OrderService/       → references Highway.Client + MyApp.Contracts
+MyApp.Storefront/         → references Highway.Client + MyApp.Contracts
+```
+
+Route names are explicit (`[Service("orders.create")]`, `[Queue("invoices.generate")]`,
+`[Channel("orders.placed")]`). They survive class renames — a refactored type
+name does not break the wire.
+
+Both the caller and the service host reference the contracts library. Neither
+takes a dependency on the other.
+
+---
+
+## Redelivery Protection
+
+Highway delivers at least once. If a handler completes but the acknowledgment is
+lost, the message is delivered again. Mark a contract `[Idempotent]` to suppress
+that redelivery within a window:
 
 ```csharp
 [Service("payments.charge")]
@@ -257,33 +300,15 @@ acknowledgment is lost, the message is delivered again. Mark a contract
 public sealed class ChargeCard : IReturn<ChargeResult> { ... }
 ```
 
-This deduplicates redeliveries of the same Highway message ID. It does not
-deduplicate two clicks, caller retries, or separately-issued sends — those
-produce different message IDs. For those, guard with your own domain key at the
-start of the handler.
-
----
-
-## Shared Contracts
-
-Contracts live in a class library that references only `Highway.Abstractions` —
-a package with zero dependencies. Both the caller and the service host reference
-this library and neither takes a dependency on the other.
-
-```
-MyApp.Contracts/          → references Highway.Abstractions
-MyApp.OrderService/       → references Highway.Client + MyApp.Contracts
-MyApp.Storefront/         → references Highway.Client + MyApp.Contracts
-```
-
-Route names are explicit (`[Service("orders.create")]`) and survive CLR type
-renames. A refactored class name does not break the wire.
+This deduplicates redeliveries of the same message ID. It does not deduplicate
+two separate sends of logically identical work — for that, guard with your own
+domain key at the start of the handler.
 
 ---
 
 ## Running the Broker
 
-Highway.Server is the broker. Run it as a standalone process:
+Highway.Server is the single broker process. Run it standalone:
 
 ```csharp
 var server = new HighwayServerBuilder()
@@ -291,10 +316,15 @@ var server = new HighwayServerBuilder()
     .WithDataDir("./data")
     .Build();
 
-await server.RunAsync(cancellationToken);   // returns when the token fires
+await server.RunAsync();
 ```
 
-For integration tests, embed it in-process with no external infrastructure:
+The broker is durable by default — messages survive restart via append-only file
+persistence. Use `.Ephemeral()` for tests that need a disposable broker.
+
+### For integration tests
+
+Embed the broker in-process with no external infrastructure:
 
 ```csharp
 using var server = new HighwayTestServer();
@@ -306,38 +336,26 @@ services.AddHighway(o =>
 });
 ```
 
-The broker is durable by default — messages survive restart via AOF. Use
-`.Ephemeral()` for tests that need a throwaway broker.
-
 ---
 
-## What Developers Can Do
+## Additional Capabilities
 
-- **Competing consumers** — run multiple instances of a service or processor to
-  share work. No configuration, just deploy more copies.
-- **Durable delivery across downtime** — stop a subscriber, publish events, restart
-  the subscriber. The missed events arrive.
-- **Fast-fail discovery** — set `FastFailEnabled = true` to get an immediate 404
-  when no node hosts a service, instead of waiting 30 seconds.
-- **Delayed messages** — schedule work or events for later delivery.
+- **Competing consumers** — deploy multiple instances of any service or processor
+  to share work. No configuration needed.
+- **Durable delivery across downtime** — messages queue for absent subscribers
+  and drain when they return.
 - **Dead-letter inspection** — failed messages land in a dead-letter queue with
-  full failure context, inspectable via `HW.DLQ`.
+  full failure context (`HW.DLQ`).
 - **Flight recorder** — `HW.REPLAY` queries recent operations by name and time
-  range. Always on, no external observability stack needed.
-- **Authentication** — set a password on the broker and pass it in the connection
-  string. Required when binding beyond loopback.
+  range. Always on, no external observability stack required.
+- **Authentication** — set a password on the broker; required when binding beyond
+  loopback.
+- **TLS** — opt-in transport encryption.
 - **OpenTelemetry** — Highway emits `System.Diagnostics.Activity` with no OTEL
-  dependency. Subscribe with your own pipeline if you want distributed traces.
-
----
-
-## Package Summary
-
-| Package | Purpose | Who references it |
-|---|---|---|
-| `Highway.Abstractions` | Contracts, interfaces, attributes. Zero dependencies. | Shared contract libraries |
-| `Highway.Client` | Assembly scanning, DI, engine, serialization. | Any application that hosts or calls services |
-| `Highway.Server` | The broker. Garnet extension with custom HW.* commands. | Deployed as a standalone process |
+  dependency. Subscribe with your own pipeline for distributed traces.
+- **Delayed delivery** — schedule messages and events for future processing.
+- **Lease renewal** — handlers running up to 15 minutes are safe without
+  configuration.
 
 ---
 
@@ -354,6 +372,6 @@ dotnet run --project samples/Highway.Samples.OrderService
 dotnet run --project samples/Highway.Samples.Storefront
 ```
 
-At the storefront prompt, type `order 2 widget`: an RPC call crosses three
-processes, returns a typed response, and delivers a pub/sub event — all through
-the one broker.
+At the storefront prompt type `order 2 widget` and watch an RPC call cross three
+processes, return a typed response, and deliver a pub/sub event — all through one
+server, with three lines of setup.

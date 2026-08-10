@@ -5,6 +5,7 @@
   <ItemGroup>
     <!-- Client dependencies -->
     <PackageVersion Include="StackExchange.Redis" Version="2.8.24" />
+    <PackageVersion Include="Microsoft.Extensions.Caching.Abstractions" Version="10.0.0-preview.4.25258.110" />
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0-preview.4.25258.110" />
     <!-- 10.0.5 (not the preview) because Microsoft.Garnet requires >= 10.0.5 -->
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.5" />

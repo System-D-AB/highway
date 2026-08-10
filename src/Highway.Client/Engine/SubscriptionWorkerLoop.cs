@@ -16,7 +16,12 @@ namespace Highway.Client.Engine;
 ///   <item>Uses <see cref="ChannelDescriptor"/> instead of <see cref="QueueDescriptor"/>.</item>
 ///   <item>Dispatches to ALL local subscribers via <see cref="ServiceExecutor.ExecuteSubscribersAsync"/>
 ///         instead of a single processor.</item>
-///   <item>Uses the derived queue name <c>{channel}@{nodeName}</c> for claim/ack.</item>
+///   <item>Uses the derived queue name <c>{channel}@{group}</c> for claim/ack, where the
+///         group is the node's <c>SubscriptionGroup</c> (feature 025) — <c>NodeName</c> by
+///         default. <b>The claimant IS the group</b>: replicas sharing a group compete
+///         through one queue and one processing list, which is exactly what keeps every
+///         group key derivable from <c>{channel}@{group}</c> and therefore declarable in
+///         the server's <c>Prepare</c>.</item>
 ///   <item>Does NOT use idempotency — pub/sub messages carry no <c>[Idempotent]</c> attribute.</item>
 /// </list>
 /// </para>
@@ -35,16 +40,19 @@ internal sealed class SubscriptionWorkerLoop : SingleMessageWorkerLoop
         ChannelDescriptor descriptor,
         IHighwayConnection connection,
         ServiceExecutor executor,
-        string nodeName,
+        string group,
         int concurrency,
         LoopWake wake,
         ILogger logger,
         TimeSpan renewalInterval = default,
         TimeSpan maxProcessingTime = default)
-        : base(descriptor.MessageType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime)
+        // The base's identity is the GROUP, not the physical node (025): every wire call this
+        // loop makes — claim, ack, touch, fail — must name the same party, or lease renewal
+        // and dead letters would target a processing list that no claim ever wrote to.
+        : base(descriptor.MessageType, connection, executor, group, concurrency, wake, logger, renewalInterval, maxProcessingTime)
     {
         _descriptor = descriptor;
-        _derivedQueueName = $"{descriptor.Name}@{nodeName}";
+        _derivedQueueName = $"{descriptor.Name}@{group}";
     }
 
     public string ChannelName => _descriptor.Name;

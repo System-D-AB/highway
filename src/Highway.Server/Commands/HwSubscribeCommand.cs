@@ -9,11 +9,13 @@ using Tsavorite.core;
 namespace Highway.Server.Commands;
 
 /// <summary>
-/// HW.SUBSCRIBE &lt;channel&gt; &lt;group&gt; → +OK
+/// HW.SUBSCRIBE &lt;channel&gt; &lt;group&gt; &lt;node&gt; → +OK
 ///
-/// Registers a subscriber group for a channel. If there are backlog entries
-/// within the retention window, they are copied (not drained) to the new
-/// group's queue. Idempotent.
+/// Registers a subscriber group for a channel, and the node's membership in it
+/// (feature 025). A group may be backed by several nodes — replicas of one
+/// logical subscriber — which compete for its queue; membership is what lets
+/// retirement count the youngest member instead of assuming group == node.
+/// Idempotent.
 /// </summary>
 internal sealed class HwSubscribeCommand : HighwayCommandBase
 {
@@ -22,6 +24,7 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
 
     private string _channel = null!;
     private string _group = null!;
+    private string _node = null!;
 
     public HwSubscribeCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
@@ -36,14 +39,36 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
             return true;
         if (!TryReadIdentifier(ref procInput, ref idx, "group", _opts.MaxIdentifierBytes, out _group))
             return true;
+        // 025: the node argument is OPTIONAL (arity -3). Absent means the pre-025 identity --
+        // the group IS the node -- so an old client's two-argument subscribe keeps meaning
+        // exactly what it always meant, and membership degrades to {group}.
+        var nodeArg = GetNextArg(ref procInput, ref idx);
+        if (nodeArg.Length == 0)
+        {
+            _node = _group;
+        }
+        else if (Identifier.IsValid(nodeArg.ReadOnlySpan, _opts.MaxIdentifierBytes))
+        {
+            _node = Encoding.UTF8.GetString(nodeArg.ReadOnlySpan);
+        }
+        else
+        {
+            return Fail(HighwayErrors.InvalidArg,
+                IdentifierErrorDetail(nodeArg.ReadOnlySpan, "node", _opts.MaxIdentifierBytes));
+        }
 
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(_channel)), LockType.Exclusive, StoreType.Main);
 
-        // 017: the reverse index. A group IS a node (018), so this records which channels a
-        // node subscribes to — the only way retirement can derive, and therefore declare, the
-        // keys it must delete.
+        // 017: the reverse index — which channels this group subscribes to, so retirement can
+        // derive, and therefore declare, the keys it must delete. Since 025 the claimant IS
+        // the group (no longer "a group IS a node"), so this is keyed by group.
         AddKey(CreateArgSlice(HighwayKeys.NodeChannels(_group)), LockType.Exclusive, StoreType.Main);
+
+        // 025: membership — the nodes backing this group — and the node's own reverse index,
+        // which is what BYE PURGE walks now that a node can back groups not named after it.
+        AddKey(CreateArgSlice(HighwayKeys.GroupMembers(_channel, _group)), LockType.Exclusive, StoreType.Main);
+        AddKey(CreateArgSlice(HighwayKeys.NodeSubs(_node)), LockType.Exclusive, StoreType.Main);
         return true;
     }
 
@@ -86,6 +111,10 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
             // fatal at any serious size. A new group starts empty (feature 014 follow-up).
 
             AddToMirrorList(api, HighwayKeys.NodeChannels(_group), _channel);
+
+            // 025: membership, in both directions. Idempotent like every mirror write.
+            AddToMirrorList(api, HighwayKeys.GroupMembers(_channel, _group), _node);
+            AddToMirrorList(api, HighwayKeys.NodeSubs(_node), $"{_channel}@{_group}");
 
             WriteSimpleString(ref output, "OK");
         }

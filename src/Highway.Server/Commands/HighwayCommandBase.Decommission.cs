@@ -36,10 +36,10 @@ internal abstract partial class HighwayCommandBase
     {
         var derived = $"{channel}@{group}";
 
-        // The processing list is derivable rather than discovered, because a group IS a node
-        // (018): the only worker that ever claims from a group's queue is the node that owns
-        // the group. That is what keeps every key declarable in Prepare without reading an
-        // object-store set — which would register a watch and fail the exclusive locks (004.1).
+        // The processing list is derivable rather than discovered, because the claimant IS
+        // the group (018, restated by 025): every replica claims with the group's name, so
+        // one shared processing list serves them all. That is what keeps every key
+        // declarable in Prepare without reading an object-store set — which would register a watch and fail the exclusive locks (004.1).
         return (
             [
                 HighwayKeys.Queue(derived),
@@ -51,6 +51,9 @@ internal abstract partial class HighwayCommandBase
             [
                 HighwayKeys.QueueBytes(derived),
                 HighwayKeys.QueueNodeList(derived),
+
+                // 025: membership dies with the group -- a retired group has no members.
+                HighwayKeys.GroupMembers(channel, group),
             ]);
     }
 

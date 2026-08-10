@@ -182,10 +182,29 @@ internal sealed class BrokerState : IBrokerState, IAsyncDisposable
                 .Select(n => n.Name)
                 .ToArray();
 
+            // 025: a group's hosts are its MEMBERS — the nodes backing it, from the membership
+            // mirror — not "whoever declared the channel". Before subscription groups the two
+            // were the same set; with replicas they are the answer to different questions, and
+            // the members are the one an operator scaling a subscriber actually asks.
+            if (kind == EntityKind.Group && parent is not null && db is not null)
+            {
+                var members = await ReadGroupMembersAsync(db, name).ConfigureAwait(false);
+                if (members.Length > 0) hosts = members;
+            }
+
             entries.Add(new CatalogueEntryDto(name, kind, StateOf(db, nodes, hosts), parent, hosts));
         }
 
         return StateResult<IReadOnlyList<CatalogueEntryDto>>.Ok(entries);
+    }
+
+    /// <summary>Members of a derived group, from the 025 membership mirror. Empty pre-025.</summary>
+    private static async Task<string[]> ReadGroupMembersAsync(IDatabase db, string derivedName)
+    {
+        var raw = await db.StringGetAsync($"hw:grp:members:{derivedName}").ConfigureAwait(false);
+        return raw.HasValue
+            ? raw.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            : [];
     }
 
     /// <summary>

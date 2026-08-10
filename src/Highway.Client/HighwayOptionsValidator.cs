@@ -21,6 +21,12 @@ internal static class HighwayOptionsValidator
     {
         ValidateNodeName(options.NodeName);
 
+        // The subscription group is embedded in {channel}@{group} keys, so it obeys the same
+        // identifier rules as NodeName — including '@', which would make the derived queue
+        // name ambiguous (feature 025). Null is valid and means "group = NodeName".
+        if (options.SubscriptionGroup is { } group)
+            ValidateIdentifier(group, "SubscriptionGroup");
+
         if (options.CallTimeout <= TimeSpan.Zero)
             throw new InvalidOperationException(
                 $"HighwayOptions.CallTimeout must be positive, but was {options.CallTimeout}.");
@@ -54,6 +60,26 @@ internal static class HighwayOptionsValidator
     /// Validates a node name against the server's identifier rules: non-empty,
     /// at most 256 bytes, no character below U+0020, no U+007F.
     /// </summary>
+    /// <summary>Feature 025: the NodeName rules, applied to any option that becomes a key segment.</summary>
+    internal static void ValidateIdentifier(string value, string optionName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new InvalidOperationException($"HighwayOptions.{optionName} must not be blank when set.");
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+        if (bytes.Length > MaxNodeNameBytes)
+            throw new InvalidOperationException(
+                $"HighwayOptions.{optionName} '{value}' is {bytes.Length} bytes; the server's identifier cap is {MaxNodeNameBytes} bytes.");
+
+        if (value.Any(char.IsControl))
+            throw new InvalidOperationException(
+                $"HighwayOptions.{optionName} '{value}' contains a control character; the server rejects such identifiers.");
+
+        if (value.Contains('@'))
+            throw new InvalidOperationException(
+                $"HighwayOptions.{optionName} '{value}' contains '@' which is reserved for internal group-queue routing (feature 018).");
+    }
+
     public static void ValidateNodeName(string? nodeName)
     {
         if (string.IsNullOrWhiteSpace(nodeName))
