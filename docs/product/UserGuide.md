@@ -1,9 +1,10 @@
 # Highway User Guide
 
-Highway provides a foundation for building distributed .NET applications. It
-combines RPC, Pub/Sub and durable Queues into one programming model, backed by a
-single server process you run alongside your services. No external broker. No
-infrastructure decisions before your first message.
+Highway provides a foundation for building event-driven, distributed
+microservices on .NET. It combines RPC, Pub/Sub and durable Queues into one
+programming model, backed by a single broker process you run alongside your
+services. The broker is itself a .NET process; there is no other infrastructure
+to install or operate.
 
 Three verbs, one rule for choosing between them:
 
@@ -19,8 +20,9 @@ services.AddHighway(o =>
 });
 ```
 
-Assembly scanning discovers your services, subscribers and processors at startup.
-Nothing is registered by hand.
+Assembly scanning discovers your services, subscribers and processors at
+startup — it covers every referenced assembly that references
+`Highway.Abstractions`. Nothing is registered by hand.
 
 ---
 
@@ -221,7 +223,7 @@ delay still receives the message.
 
 ## Redelivery Protection — `[Idempotent]`
 
-Highway delivers at least once on both paths. If a handler completes but the
+Highway delivers at least once on every path. If a handler completes but the
 acknowledgment is lost, the message is delivered again. Mark a contract
 `[Idempotent]` to suppress that redelivery within a window:
 
@@ -265,7 +267,7 @@ var server = new HighwayServerBuilder()
     .WithDataDir("./data")
     .Build();
 
-await server.RunAsync();
+await server.RunAsync(cancellationToken);   // returns when the token fires
 ```
 
 For integration tests, embed it in-process with no external infrastructure:
@@ -328,6 +330,6 @@ dotnet run --project samples/Highway.Samples.OrderService
 dotnet run --project samples/Highway.Samples.Storefront
 ```
 
-At the storefront prompt type `order 2 widget` and watch an RPC call cross three
-processes, return a typed response, and deliver a pub/sub event — all through one
-server, with three lines of setup.
+At the storefront prompt, type `order 2 widget`: an RPC call crosses three
+processes, returns a typed response, and delivers a pub/sub event — all through
+the one broker.
