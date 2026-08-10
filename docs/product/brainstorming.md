@@ -234,3 +234,40 @@ conflict → same native driver; production shows AOF cost → commit knobs, the
 storage in v2. The endgame, if ever triggered, is the client-first server: `HW.*` over RESP
 framing, push delivery, two-tier storage, over Tsavorite-as-NuGet — reachable as a two-adapter
 swap precisely because of the seams above.
+
+
+---
+
+## 2026-08-10 — The third review, its verdicts, and the two specs it produced
+
+*A third independent review (pasted during UserGuide work) re-derived the hosting and
+identity findings and added five proposals. Verdicts, recorded so they are not re-argued:*
+
+- **Adopted into `024-hosting-boundaries`**: contracts-only scanning (it is the hosting
+  opt-in mechanism); the topology manifest — with the honesty rule that the consumption half
+  is labelled *"can use"*, since a referenced contract proves addressability, not calling.
+- **Adopted, already established**: `SubscriptionGroup` split → `025-subscription-groups`;
+  hop-count TTL + causation id → message-safety register; DAG-for-`ExecuteAsync` as a
+  documented rule.
+- **Rejected — `[assembly: HighwayRole(...)]`**: outbound roles are unenforceable (any code
+  holding `IHighwayClient` can publish) and the enforceable fraction is the hosting modes.
+- **Rejected — `[ProducedBy]`/`[ConsumedBy]` markers**: deployment facts asserted in
+  contract assemblies drift and then lie with authority; the runtime derives the truth
+  (catalogue declared-vs-observed) and the manifest generates diagrams from code.
+- **Rejected — static RPC-cycle detection at startup**: not knowable from the catalog.
+  Referencing a contract is not calling it; every process referencing a shared contracts
+  package would flag as calling everything. Cycle detection needs the causation id, a
+  runtime fact.
+
+**The best evidence in the review was its own error.** It stated Highway's identity rule as
+*"same NodeName = compete, different = replicate"* — wrong on both halves: Execute/Send
+compete across distinct names automatically; subscribers always replicate per name; sharing
+a name is invalid (it collides processing lists, leases, heartbeats, 017 retirement). A
+careful reviewer mis-learning the rule *while writing about the mental model* is the
+argument for 025 — which makes the rule they assumed actually true — and for writing the
+four rules into the UserGuide with rule 3 corrected (024 T7).
+
+**Specs produced:** `docs/features/024-hosting-boundaries/` (consent-based handler hosting,
+Implicit-mode accident warning, topology manifest, can-use half to the dashboard, the four
+rules) and `docs/features/025-subscription-groups/` (claimant-is-the-group design forced by
+Prepare-declarability, membership mirror, group-aware retirement, last-member purge).
