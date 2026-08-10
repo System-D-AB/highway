@@ -55,7 +55,9 @@ the same near-zero ceremony as the rest of Highway.
 #### Acceptance Criteria
 
 1. A recurring job SHALL be declared against a `[Queue]` message contract (an `ISend` type):
-   the schedule names *when*, the existing contract and its `IProcess<T>` name *what*.
+   the schedule names *when*, the existing contract and its `IProcess<T>` name *what*. The
+   fired payload is a **template** serialized at registration (design D8) — occurrences carry
+   identical bytes, and manual triggering via `SendAsync(new T())` works by construction.
 2. The declaration API SHALL be the one settled by **OD1**; the requirement is
    shape-agnostic beyond: declaring a job MUST NOT require touching the broker, and the
    declaration MUST be discoverable by the topology manifest (024) and the dashboard.

@@ -201,6 +201,29 @@ converge on the new schedule (which is what a deploy *means*), and the event mak
 conflict visible instead of silent. Refuse-and-log would leave rolling deploys permanently
 half-updated.
 
+## D8 — The payload template: the message is a signal, not a datum
+
+The fire is server-side, but the payload is a client envelope of type `T`, and the server
+cannot construct .NET objects. So registration stores a **template**: the client serializes
+`new T()` once, `HW.JOB SET` carries those bytes, and every fire enqueues the same template.
+
+Three consequences, stated rather than discovered:
+
+1. **Every occurrence carries identical bytes.** A handler wanting occurrence-specific data
+   ("which night is this run for?") derives it (`DateTime.UtcNow.Date`) — the server will not
+   patch JSON inside a transaction (the same refusal as `startedOnNode`, for the same
+   reason). The UserGuide documents the one trap: after a catch-up fire (OD3), *now* is later
+   than the occurrence was scheduled.
+2. **Scheduled contracts should be parameterless records.** The analyzer-someday and the docs
+   say so; a contract with meaningful properties scheduled as a job is a smell (whose values
+   would they be?).
+3. **Manual trigger is free by construction**: `client.SendAsync(new GenerateStatements())`
+   is the same contract, processor, and observability as a scheduled fire — "run it now"
+   needs no API.
+
+If demand for occurrence metadata in the payload materialises, it is an envelope-framing
+addition later (versioned, per house rule) — not a v1 blocker.
+
 ## Error handling
 
 | Condition | Behavior |
