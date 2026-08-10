@@ -21,6 +21,13 @@ public interface IHighwayEngine
     EngineState State { get; }
 
     /// <summary>
+    /// What this process provides and can use (feature 024). Available from construction —
+    /// the manifest describes the scan, not the connection — and logged at
+    /// <see cref="StartAsync"/>.
+    /// </summary>
+    TopologyManifest Topology { get; }
+
+    /// <summary>
     /// Connects to the server (fail fast), subscribes doorbells, registers all
     /// catalog channels, starts loops and the sweeper. Throws when already started.
     /// </summary>

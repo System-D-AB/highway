@@ -2,7 +2,7 @@
 
 ## Phase 0 — the partition
 
-### - [ ] T1 — Split contract and handler assembly sets
+### - [x] T1 — Split contract and handler assembly sets
 
 *Requirements:* R1.1, R1.4
 **Done when:** `DefaultTypeScanner` accepts a contract set and a handler set; contracts are
@@ -12,7 +12,7 @@ set; all existing tests pass with both sets equal (the `Implicit` wiring).
 > The scanner's discovery methods already split by kind — this task must not change any
 > discovery rule, only which type list each group receives.
 
-### - [ ] T2 — `HostingMode`, `[HighwayHostModule]`, `HostAssembly(...)`
+### - [x] T2 — `HostingMode`, `[HighwayHostModule]`, `HostAssembly(...)`
 
 *Requirements:* R1.1–R1.3
 **Done when:** the three modes select the handler set as designed (D1, D2); the attribute and
@@ -20,7 +20,7 @@ the option are equivalent and idempotent; `Declared`-mode tests declare their fi
 explicitly and prove entry-plus-declared selection; the test-host caveat (D2) is documented on
 the option's XML doc.
 
-### - [ ] T3 — Skipped handlers are reported
+### - [x] T3 — Skipped handlers are reported
 
 *Requirements:* R1.5
 **Done when:** in `Declared`/`ExplicitOnly`, an excluded assembly containing handlers produces
@@ -30,14 +30,14 @@ and zero-module warnings exist and are tested.
 
 ## Phase 1 — visibility
 
-### - [ ] T4 — Implicit-mode accident warning
+### - [x] T4 — Implicit-mode accident warning
 
 *Requirements:* R2.1–R2.3
 **Done when:** a handler discovered outside the entry assembly and declarations logs one
 warning per assembly (D4); the samples boot with zero such warnings; a test proves the warning
 names assembly, handlers, and remedy.
 
-### - [ ] T5 — `TopologyManifest`: built, logged, exposed
+### - [x] T5 — `TopologyManifest`: built, logged, exposed
 
 *Requirements:* R3.1–R3.4
 **Done when:** the manifest is built from the scan result, logged at `StartAsync` in D6's
@@ -46,7 +46,7 @@ tests asserting content (not log text) — including that a subscriber line carr
 
 ## Phase 2 — the broker's half
 
-### - [ ] T6 — Catalog carries `Uses`; node page shows it
+### - [x] T6 — Catalog carries `Uses`; node page shows it
 
 *Requirements:* R4.1–R4.3
 **Done when:** `CatalogInfo.Uses` round-trips through registration additively (an old record
@@ -57,21 +57,21 @@ tests, per standing instruction.
 
 ## Phase 3 — the model on paper
 
-### - [ ] T7 — UserGuide: the four rules, hosting section, corrected rule 3
+### - [x] T7 — UserGuide: the four rules, hosting section, corrected rule 3
 
 *Requirements:* R5.1–R5.3
 **Done when:** the UserGuide states the four rules with rule 3 as *the verb decides sharing*
 (and today's group = node name, pointing at 025); the hosting section names Implicit's
 reference-equals-hosting behavior and both remedies.
 
-### - [ ] T8 — product.md G3 annotation, deferred register
+### - [x] T8 — product.md G3 annotation, deferred register
 
 *Requirements:* R5.4
 **Done when:** G3 distinguishes contracts (unconditional) from handlers (per `HostingMode`);
 the default-flip-to-`Declared` candidate is added to `constraints.md`'s Deferred table with
 its trigger (a major version).
 
-### - [ ] T9 — Samples and full verification
+### - [x] T9 — Samples and full verification
 
 *Requirements:* R6.1–R6.3
 **Done when:** samples run unchanged and their boot logs show the manifest (captured in the
@@ -97,3 +97,23 @@ Order: 0 → 1 → 2 → 3
 - **Roslyn analyzer** enforcing inert contracts at build time — the analyzer package remains
   a future feature; this feature's enforcement is startup-time.
 - **Flow-diagram generation from the manifest** — becomes possible once T5 exists; not built.
+
+
+---
+
+## What execution found
+
+- **The Implicit warning and the skip report share one shape** (`SkippedHandlerAssembly`),
+  because they are the same fact — "this assembly's handlers were decided about" — with
+  opposite decisions. One record type, two log messages.
+- **Skip detection had to be structural, not the discovery pipeline**: an excluded assembly
+  whose processor's message type lacks `[Queue]` would have *thrown* under full discovery —
+  an excluded assembly's mistakes are not this process's errors. `LooksLikeHandler` names
+  without validating, and a test proves it does not throw where discovery would.
+- **CAN USE proved itself on first contact**: the order service's manifest showed
+  `orders.cancel` (a contract nobody hosts — the fast-fail demo) and `orders.placed` (the
+  channel it publishes but does not subscribe to). Reference-derived addressability is
+  exactly the half of topology the catalogue never had.
+- **One unattributed test flake**: a single client-test failure in one full-solution run,
+  name not captured, not reproduced in four subsequent runs (3 isolated + 1 full). Recorded
+  rather than hidden; if it reappears, the name comes first.

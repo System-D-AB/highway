@@ -1,3 +1,4 @@
+using System.Reflection;
 using Highway.Abstractions;
 using Highway.Client.Engine;
 using Highway.Client.Execution;
@@ -43,9 +44,25 @@ public static class ServiceCollectionExtensions
         var assemblySource = new DefaultAssemblySource(options);
         var assemblies = assemblySource.GetAssemblies();
 
-        // 2. Scan for services and channels
+        // 2. Scan — contracts from the full closure ALWAYS (that reach fixed the caller-only
+        // defect and stays); handlers only from assemblies the process consented to host
+        // (feature 024). Under the Implicit default the two sets are identical.
+        var entry = Assembly.GetEntryAssembly();
+        var handlerAssemblies = HostingBoundary.SelectHandlerAssemblies(
+            options.HostingMode, assemblies, entry, options.HostAssemblies);
+
         var typeScanner = new DefaultTypeScanner();
-        var scanResult = typeScanner.Scan(assemblies);
+        var scanResult = typeScanner.Scan(assemblies, handlerAssemblies);
+
+        // What the boundary decided, for the engine to report at startup: skipped handlers in
+        // the declared modes, unconsented-but-hosted ones under Implicit. Both lists exist so
+        // neither outcome is ever silent.
+        var hostingReport = new HostingReport(
+            options.HostingMode,
+            scanResult.SkippedHandlerAssemblies,
+            options.HostingMode == HostingMode.Implicit
+                ? HostingBoundary.ReferenceHostedAssemblies(scanResult, entry, options.HostAssemblies)
+                : []);
 
         // 3. Compile dispatch delegates
         var delegateCompiler = new ExpressionDelegateCompiler();
@@ -83,6 +100,8 @@ public static class ServiceCollectionExtensions
 
         // 6. Register Highway infrastructure
         services.AddSingleton(options);
+        services.AddSingleton(hostingReport);
+        services.AddSingleton(TopologyManifest.Build(options.NodeName, catalog, scanResult));
         services.AddSingleton<ICatalog>(catalog);
         services.TryAddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.TryAddSingleton<ServiceExecutor>();
