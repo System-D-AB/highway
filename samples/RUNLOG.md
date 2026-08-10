@@ -14,6 +14,55 @@ documentation defect and loses it.
 
 ---
 
+## 2026-08-10 — feature 026 (Distributed Cache)
+
+**Libraries:** everything through feature 026.
+**Ran:** broker + order service + storefront as three processes, `cache` commands driven
+over stdin.
+
+### Cache demonstration
+
+```
+storefront> cache ORD-1
+  cache MISS — calling orders.get
+  {"orderId":null,"total":0,"statusCode":404,"error":"ORDER_NOT_FOUND: Order 'ORD-1' does not exist"}
+  (cached for next time — try 'cache ORD-1' again)
+
+storefront> cache ORD-1
+  cache HIT — served from cache
+  {"orderId":null,"total":0,"statusCode":404,"error":"ORDER_NOT_FOUND: Order 'ORD-1' does not exist"}
+
+storefront> cache-clear ORD-1
+  removed 'order:ORD-1' from cache
+
+storefront> cache ORD-1
+  cache MISS — calling orders.get
+  {"orderId":null,"total":0,"statusCode":404,"error":"ORDER_NOT_FOUND: Order 'ORD-1' does not exist"}
+  (cached for next time — try 'cache ORD-1' again)
+```
+
+The first `cache ORD-1` calls the service (cache miss). The second serves from cache (hit).
+`cache-clear` removes the entry, and the third call misses again — proving removal works.
+
+`IDistributedCache` is resolved from the same DI container that `AddHighway` registered,
+with zero additional configuration. The cache uses the existing Garnet connection — no
+second connection string, no extra infrastructure.
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| All previous commands (order, get, cancel, low, invoice, etc.) | ✅ unchanged |
+| `cache ORD-1` — first call (miss) | ✅ calls service, caches result |
+| `cache ORD-1` — second call (hit) | ✅ served from cache, no service call |
+| `cache-clear ORD-1` — removes entry | ✅ subsequent `cache` misses again |
+| `help` shows new commands | ✅ |
+
+**No existing commands changed.** The `cache` and `cache-clear` commands are purely additive;
+`get`, `order`, and all other existing commands behave identically.
+
+---
+
 ## 2026-08-08 — feature 018 (Pub/Sub Unification)
 
 **Libraries:** everything through feature 018.
@@ -637,3 +686,20 @@ dedicated fixture type — the same rule the loop tests already followed, for th
 rules reject `@`, so claims recorded under `{channel}@{group}` are reachable in-process (the
 dashboard) but not over the wire. The idempotency test reads the recorder directly for this
 reason.
+
+---
+
+## 2026-08-10 — feature 028 (recurring jobs)
+
+Broker + order service, which now declares `o.Jobs.Every<ReconcileOrders>(1 minute)`.
+Observed over 75 seconds:
+
+```
+boot manifest:   job    orders.reconcile  ReconcileOrders  (...)  reconcileorders every:60
+service log:     [job] reconciling orders (scheduled run)      × exactly 1
+/api/jobs:       { job: reconcileorders, expression: every:60,
+                   lastFire: 13:37:30, nextFire: 13:38:30, hosted: true }
+```
+
+One fire in one interval, processed by the ordinary queue machinery, visible in the manifest
+at boot and on the dashboard with next/last fire. Nothing else in the samples changed.

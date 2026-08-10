@@ -46,6 +46,7 @@ public class BoundedStructureTests
         ("hw:reg:node:{nodeId}:channels",   "EXEMPT: one line per channel a node subscribes to; entries removed on unsubscribe and the whole key on retirement (017)"),
         ("hw:grp:members:{channel}@{group}", "EXEMPT: one line per node backing the group (025); shrunk by BYE PURGE, deleted with the group"),
         ("hw:reg:node:{nodeId}:subs",       "EXEMPT: one line per {channel}@{group} a node subscribes through (025); the whole key deleted by BYE PURGE"),
+        ("hw:job:{queue}:schedules",        "EXEMPT: one member per declared job (028) — topology-bounded; removed by HW.JOB DEL, replaced (never grown) by each fire. Its index mirror hw:job:index (a const, uncounted here) shrinks with it"),
 
         // --- scalars: fixed size by construction ---
         ("hw:q:{queue}:bytes",              "SCALAR: one integer, deleted when it reaches zero"),

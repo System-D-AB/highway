@@ -1,4 +1,5 @@
 using Highway.Client;
+using Highway.Samples.Contracts;
 using Highway.Samples;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -36,6 +37,10 @@ builder.Services.AddHighway(o =>
     // Delete this line and each instance becomes its own group: every instance
     // then gets every event, which is right for things like cache invalidation.
     o.SubscriptionGroup = "order-service";
+
+    // 028: a recurring job. The broker fires ONE ReconcileOrders per minute, whichever
+    // and however many instances are running; processing competes like any queue work.
+    o.Jobs.Every<ReconcileOrders>(TimeSpan.FromMinutes(1));
 });
 
 Console.WriteLine($"""

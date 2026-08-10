@@ -53,6 +53,16 @@ public sealed record GenerateInvoice : ISend
 }
 
 /// <summary>
+/// Fired by a schedule, not by code (feature 028): the order service declares
+/// <c>o.Jobs.Every&lt;ReconcileOrders&gt;(TimeSpan.FromMinutes(1))</c> and the broker
+/// enqueues one of these every minute — exactly one, however many instances run.
+/// Parameterless on purpose: the type is the signal, and the processor derives
+/// what to reconcile from state. See the UserGuide's Recurring Jobs section.
+/// </summary>
+[Queue("orders.reconcile")]
+public sealed record ReconcileOrders : ISend;
+
+/// <summary>
 /// Deliberately fails every time, to demonstrate dead-lettering (feature 013).
 /// After MaxDeliveryAttempts the message leaves the queue and lands in the DLQ, where
 /// <c>HW.DLQ PEEK Q poison.queue</c> can find it — instead of looping forever.

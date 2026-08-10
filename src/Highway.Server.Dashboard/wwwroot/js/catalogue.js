@@ -63,6 +63,7 @@ export async function render(container, options) {
     const refresh = async () => {
         const data = await getJson('catalogue', 'api/catalogue');
         if (!data) return;
+        const jobsData = await getJson('jobs', 'api/jobs');
 
         const entries = data.entries || [];
         const groups = entries.filter((e) => e.kind === 'Group');
@@ -84,6 +85,27 @@ export async function render(container, options) {
                 : `<tr><td>${link(e)}</td><td>${stateBadge(e)}</td>${metrics(e) || '<td></td>'}</tr>`).join('');
 
             html += `<h3>${heading}</h3><table class="grid"><tbody>${body}</tbody></table>`;
+        }
+
+        // Recurring jobs (028). "Never fires — no node processes this queue" is the state
+        // this section exists for: a schedule with nothing polling accumulates nothing,
+        // silently, and silence is the one thing the dashboard is not allowed to render.
+        const jobs = jobsData?.jobs || [];
+        if (jobs.length > 0) {
+            const body = jobs.map((j) => `<tr>
+                <td>${esc(j.job)}</td>
+                <td><a href="#/entity?kind=Queue&name=${encodeURIComponent(j.queue)}">${esc(j.queue)}</a></td>
+                <td><span class="mono">${esc(j.expression)}</span></td>
+                <td>${esc(new Date(j.nextFire).toLocaleString())}</td>
+                <td>${j.lastFire ? esc(new Date(j.lastFire).toLocaleString()) : '<span class="muted">never</span>'}</td>
+                <td>${j.hosted
+                    ? '<span class="state-live">hosted</span>'
+                    : '<span class="state-absent">never fires — no node processes this queue</span>'}</td>
+            </tr>`).join('');
+
+            html += `<h3>Schedules</h3><table class="grid">
+                <thead><tr><th>Job</th><th>Queue</th><th>Schedule</th><th>Next fire</th><th>Last fire</th><th></th></tr></thead>
+                <tbody>${body}</tbody></table>`;
         }
 
         if (entries.filter((e) => e.kind !== 'Internal' && e.kind !== 'Node').length === 0)

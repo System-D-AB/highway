@@ -1,9 +1,11 @@
 using System.Reflection;
 using Highway.Abstractions;
+using Highway.Client.Caching;
 using Highway.Client.Engine;
 using Highway.Client.Execution;
 using Highway.Client.Hosting;
 using Highway.Client.Scanning;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -101,7 +103,8 @@ public static class ServiceCollectionExtensions
         // 6. Register Highway infrastructure
         services.AddSingleton(options);
         services.AddSingleton(hostingReport);
-        services.AddSingleton(TopologyManifest.Build(options.NodeName, catalog, scanResult));
+        services.AddSingleton(TopologyManifest.Build(
+            options.NodeName, catalog, scanResult, options.Jobs.Registrations));
         services.AddSingleton<ICatalog>(catalog);
         services.TryAddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
         services.TryAddSingleton<ServiceExecutor>();
@@ -116,6 +119,19 @@ public static class ServiceCollectionExtensions
             Microsoft.Extensions.DependencyInjection.ServiceDescriptor.Singleton<IHostedService, HighwayEngineHostedService>());
 
         services.TryAddSingleton<IHighwayClient, HighwayClient>();
+
+        // 8. Register distributed cache (feature 026). TryAdd semantics — defers
+        // to an existing IDistributedCache registration. The cache creates its own
+        // connection from the same server string so it is available immediately —
+        // before the engine's hosted service starts. SE.Redis multiplexes on one
+        // TCP socket regardless of how many IDatabase instances exist, so two
+        // ConnectionMultiplexer instances to the same endpoint share the server's
+        // resources efficiently.
+        var cacheOptions = new HighwayCacheOptions { Server = options.Server };
+        var cacheMux = StackExchange.Redis.ConnectionMultiplexer.Connect(cacheOptions.Server!);
+        var hwCache = new HighwayCache(cacheMux, cacheOptions);
+        services.TryAddSingleton<HighwayCache>(hwCache);
+        services.TryAddSingleton<IDistributedCache>(sp => sp.GetRequiredService<HighwayCache>());
 
         return services;
     }

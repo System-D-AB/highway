@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.4**
+**Current version: 4.5**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +47,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.5 | 028 | **Recurring jobs.** Adds `HW.JOB SET\|DEL\|LIST` (appended to the command table) and two keys: `hw:job:{queue}:schedules` (sorted set: score = nextFireTicks, member = a versioned schedule record carrying job name, expression, lastFire, nextFire and the template payload) and `hw:job:index` (main-store mirror of queues with schedules). **Firing lives in `HW.QCLAIM`**: the promotion sweep enqueues exactly one occurrence for each due schedule and re-arms it — one member replaced at a new score — atomically inside the claim transaction. Occurrence ids are `job:{name}:{ticks}`. Missed occurrences catch up as ONE fire with the next computed from now; a full queue refuses the fire without consuming it (`JobFireRefused`). Expressions: `daily:HH:mm`, `every:{seconds}`, `cron:{5-field}`, all UTC. Adds four recorder events (`JobFired`, `JobScheduleChanged`, `JobScheduleRemoved`, `JobFireRefused`). Additive. |
 | 4.4 | 025 | **Subscription groups.** `HW.SUBSCRIBE` gains an optional third argument (arity 3 → -3): the subscribing **node**, so the server can track which nodes back a group. Absent means the pre-025 identity — the group is the node — so an old client's two-argument subscribe is unchanged in meaning. Adds two mirror keys: `hw:grp:members:{channel}@{group}` (nodes backing a group) and `hw:reg:node:{nodeId}:subs` (`{channel}@{group}` entries a node subscribes through). **Two behaviour changes:** automatic retirement now measures a group by its **youngest member's** heartbeat (a group with no membership record falls back to the 017 rule — group name as node name), and `HW.HEARTBEAT BYE PURGE` destroys a group's queue only when the departing node was its **last member** — otherwise it removes the membership and the group lives on for the siblings. Client-side, replicas sharing a `SubscriptionGroup` claim with the **group** as the claimant, competing through the ordinary queue machinery; the default (group = node name) is byte-identical to 018's wire traffic. Additive. |
 | 4.3 | 019 | **Long-running tasks.** Adds `HW.TOUCH SVC/Q`, which moves a claimed entry's timestamp forward so a handler that outlives `Lease` is not duplicated while it is still running. No new field, framing or key — the sweep already decides expiry from that timestamp. Adds the `ProcessingCapExceeded` recorder event. **One behaviour change:** the client renews automatically by default, so a **hung** handler is now recovered after `MaxProcessingTime` (15 min) rather than after `Lease` (5 min). Deliberate: a slow-but-working handler executed five times and dead-lettered corrupts data, while a hung one taking ten minutes longer to recover is a delay. `MaxProcessingTime = TimeSpan.Zero` restores the old behaviour exactly. |
 | 4.2 | 017 | **Node decommissioning.** Adds `HW.HEARTBEAT <node> BYE PURGE` — a third form that retires a node permanently, destroying its subscriber queues and returning `[groups, messages, bytes]`. Plain `BYE` is unchanged and still preserves a subscriber's backlog: `BYE` is "I am stopping", `PURGE` is "I am never coming back". Adds the `hw:reg:node:{nodeId}:channels` mirror key and the `GroupRetired` recorder event. *(Since 4.4/025: a purge destroys only groups whose **last member** is departing — a shared group loses the membership and lives on.)* **A subscriber group whose node has been absent past `SubscriberRetirementThreshold` (24h default) is now retired automatically**, which is what stops one dead subscriber blocking a channel once its queue reaches `MaxQueueBytes`. Additive — no existing command, reply or entry framing changed. |
@@ -84,6 +85,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.QCLAIM` | 3 | 1 | Claim the next queued message for a worker; promotes deferred work and sweeps expired leases |
 | `HW.QACK` | 4 | 1 | Acknowledge a claimed queued message |
 | `HW.FAIL` | 7 | 2 | Record why a handler failed, without acknowledging the message |
+| `HW.JOB` | -2 | 3 | Register, remove, or list recurring-job schedules; firing rides `HW.QCLAIM` |
 | `HW.TOUCH` | 5 | 2 | Renew a claimed message's lease, without acknowledging it |
 
 ---
@@ -656,6 +658,8 @@ A name is a service name, a channel name, a node ID, or one of the reserved name
 | `HW.ACK` | `RpcAcknowledged` | |
 | `HW.PUBLISH` | `Published` | `count` carries the group count |
 | `HW.SUBSCRIBE` / `HW.UNSUBSCRIBE` | `GroupRegistered` / `GroupRemoved` | |
+| `HW.JOB SET` / `HW.JOB DEL` | `JobScheduleChanged` / `JobScheduleRemoved` | `errorCode` carries the change detail |
+| `HW.QCLAIM` (fire) | `JobFired`, `JobFireRefused` | `requestId` = occurrence id; `errorCode` = job name |
 | `HW.RECEIVE` | `MessagesReceived` | one event per **batch**; `count` carries the batch size |
 | `HW.RACK` | `MessageAcknowledged` | |
 | `HW.DEQUEUE` sweep | `RpcDeadLettered` | a request exhausted its attempts; `count` carries the attempt count, `errorCode` the reason |
@@ -835,6 +839,38 @@ HW.QACK <queue> <nodeId> <messageId>   →   :1 removed   |   :0 not found
 
 Until this arrives the message remains in the worker's processing list and will be redelivered once its lease expires — that is what makes delivery at least once. Acknowledging an unknown message returns `:0` rather than an error: a worker retrying an acknowledgement is doing the right thing.
 
+### HW.JOB
+
+```
+HW.JOB SET <queue> <job> <expression> <template>   →   +OK
+HW.JOB DEL <queue> <job>                            →   :1 | :0
+HW.JOB LIST                                         →   [[queue, job, expression, nextFireTicks, lastFireTicks], ...]
+```
+
+Recurring-job schedule management (feature 028). A schedule fires **exactly one** occurrence
+message onto its queue at each due time and re-arms — but the firing itself happens inside
+`HW.QCLAIM`'s promotion sweep, not here: due-ness is decided by the broker's clock on the
+poll path, exactly as delayed delivery is. **No timer runs in the broker.**
+
+| | |
+|---|---|
+| **Arguments** | `queue`, `job` — identifiers. `expression` — `daily:HH:mm`, `every:{seconds}` (≥ 1), or `cron:{m h dom mon dow}` (standard 5-field), all UTC. `template` — the occurrence payload, stored verbatim and replayed on every fire; up to `MaxPayloadBytes`. |
+| **Reply** | SET `+OK`; DEL `:1` removed / `:0` unknown (idempotent); LIST an array of 5-field rows. |
+| **Errors** | `HW_INVALID_ARG` for a malformed expression (the message names the accepted forms); `HW_PAYLOAD_TOO_LARGE`. Both permanent. |
+| **Keys** | `hw:job:{queue}:schedules`, `hw:job:index` |
+| **Idempotency** | **SET is last-registration-wins**: re-registering replaces expression and template, preserves `lastFire`, and records `JobScheduleChanged` naming both expressions when they differ. |
+
+**Fire semantics** (in `HW.QCLAIM`): each due schedule enqueues one occurrence with id
+`job:{name}:{ticks}` and re-arms with `nextFire` computed **from now** — a schedule due five
+times while nothing polled fires once (catch-up-one). A queue at `MaxQueueBytes` refuses the
+fire without consuming it: `nextFire` is unchanged, `JobFireRefused` is recorded, and a later
+poll retries. A schedule whose record cannot be decoded is removed rather than retried
+forever, loudly (`JobScheduleRemoved`).
+
+*Exactly one fire, at-least-once processing.* The fired occurrence is an ordinary queue
+message with ordinary redelivery semantics; the exactly-once claim applies to the enqueue,
+never to the handler.
+
 ### HW.FAIL
 
 ```
@@ -1000,6 +1036,8 @@ Every key Highway creates lives under the `hw:` namespace and cannot collide wit
 | `hw:ch:{channel}:groups` | Object | Set | Registered subscriber groups |
 | `hw:ch:{channel}:grplist` | Main | String | Newline-delimited mirror of the groups set |
 | `hw:ch:{channel}:seq` | Main | Integer | Message-ID counter |
+| `hw:job:{queue}:schedules` | Object | Sorted set | Recurring-job schedules (028): score = nextFireTicks, member = versioned record (name, expression, lastFire, nextFire, template) |
+| `hw:job:index` | Main | String | Newline-delimited mirror of queues holding schedules, read in `Prepare` |
 | `hw:grp:members:{channel}@{group}` | Main | String | Newline-delimited node IDs backing the group (025). Deleted with the group |
 
 A subscriber group's queue, processing list, dead letters and delayed set all live under `hw:q:{channel}@{group}:*` — the standard queue key space. The derived queue name `{channel}@{group}` is what makes the `@` reservation mandatory (see [Identifiers](#identifiers)).
@@ -1096,6 +1134,15 @@ A consumer must send `HW.QACK` only **after** the message has been fully dispatc
 Acknowledging first turns a crash mid-dispatch into silent loss. Acknowledging last turns it into redelivery, which at-least-once permits.
 
 *Enforced by* `SubscriptionWorkerLoop`'s structure: `ProcessAsync` calls `ExecuteSubscribersAsync` first, then `QAckAsync` only if all handlers succeed.
+
+### A schedule fires exactly once per occurrence (028)
+
+The fire — enqueue one occurrence, advance `nextFire`, replace the schedule member — is one
+transaction inside `HW.QCLAIM`'s exclusive locks. However many workers poll at the due
+instant, one fires; the others find the schedule already re-armed. The claim is the election.
+
+*Enforced by* `RecurringJobTests.DueSchedule_FiresExactlyOneOccurrence_UnderRacingPollers`,
+verified against deliberately broken re-arm.
 
 ### A group dies only when its last member is gone (025)
 

@@ -228,6 +228,9 @@ public sealed class HighwayOptions
     /// <summary>The group pub/sub actually uses: <see cref="SubscriptionGroup"/> or <see cref="NodeName"/>.</summary>
     internal string EffectiveSubscriptionGroup => SubscriptionGroup ?? NodeName;
 
+    /// <summary>Recurring-job declarations (feature 028). See <see cref="JobsOptions"/>.</summary>
+    public JobsOptions Jobs { get; } = new();
+
     /// <summary>
     /// Which assemblies may contribute <b>handlers</b> to this process (feature 024).
     /// Contract discovery ignores this setting — see <see cref="Client.HostingMode"/>.

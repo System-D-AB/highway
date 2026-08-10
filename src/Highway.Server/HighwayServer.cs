@@ -244,6 +244,10 @@ public sealed class HighwayServer : IHighwayServer
         // Long-running tasks (feature 019). Arity 5: the name plus target kind, two names and
         // the message id. Renews a claimed entry's lease without acknowledging it.
         new("HW.TOUCH",       5, () => new HwTouchCommand(opts, recorder)),
+
+        // Recurring jobs (feature 028). APPENDED — the table is append-only (A1 guard).
+        // Arity -2: SET has 6 args, DEL 4, LIST 2.
+        new("HW.JOB",        -2, () => new HwJobCommand(opts, recorder)),
     ];
 
     /// <summary>

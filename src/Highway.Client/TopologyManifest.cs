@@ -8,6 +8,9 @@ public enum CapabilityKind
     RpcService,
     QueueProcessor,
     Subscriber,
+
+    /// <summary>A recurring-job schedule this process declares (feature 028).</summary>
+    RecurringJob,
 }
 
 /// <summary>One hosted handler: the route, who implements it, and where that type came from.</summary>
@@ -18,7 +21,10 @@ public sealed record ProvidedCapability(
     string SourceAssembly,
 
     /// <summary>The subscriber group, for <see cref="CapabilityKind.Subscriber"/> entries only.</summary>
-    string? Group = null);
+    string? Group = null,
+
+    /// <summary>Kind-specific detail — the schedule expression, for <see cref="CapabilityKind.RecurringJob"/>.</summary>
+    string? Detail = null);
 
 /// <summary>
 /// Routes this process can address because it references their contracts. <b>Addressability,
@@ -43,7 +49,9 @@ public sealed record TopologyManifest(
     IReadOnlyList<ProvidedCapability> Provides,
     CanUseContracts CanUse)
 {
-    internal static TopologyManifest Build(string nodeName, ICatalog catalog, ScanResult scan)
+    internal static TopologyManifest Build(
+        string nodeName, ICatalog catalog, ScanResult scan,
+        IReadOnlyList<JobsOptions.Registration>? jobs = null)
     {
         List<ProvidedCapability> provides =
         [
@@ -63,6 +71,16 @@ public sealed record TopologyManifest(
                     CapabilityKind.Subscriber, c.Name,
                     sub.ImplementationType.Name, AssemblyOf(sub.ImplementationType),
                     Group: nodeName))),
+
+            // Declared schedules (028): route = the contract's queue. An unresolvable
+            // contract is skipped here — engine start reports it properly, and a manifest
+            // that throws would hide every other line behind one mistake.
+            .. (jobs ?? []).Select(j => (Job: j, Queue: scan.QueueContracts.GetValueOrDefault(j.ContractType)))
+                .Where(x => x.Queue is not null)
+                .Select(x => new ProvidedCapability(
+                    CapabilityKind.RecurringJob, x.Queue!,
+                    x.Job.ContractType.Name, AssemblyOf(x.Job.ContractType),
+                    Detail: $"{x.Job.JobName} {x.Job.Expression}")),
         ];
 
         provides.Sort((a, b) => (a.Kind, a.Route, a.ImplementationType)
@@ -95,10 +113,12 @@ public sealed record TopologyManifest(
             {
                 CapabilityKind.RpcService => "rpc  ",
                 CapabilityKind.QueueProcessor => "queue",
+                CapabilityKind.RecurringJob => "job  ",
                 _ => "sub  ",
             };
             var group = p.Group is { } g ? $"  group={g}" : "";
-            lines.Add($"    {kind}  {p.Route}  {p.ImplementationType}  ({p.SourceAssembly}){group}");
+            var detail = p.Detail is { } d ? $"  {d}" : "";
+            lines.Add($"    {kind}  {p.Route}  {p.ImplementationType}  ({p.SourceAssembly}){group}{detail}");
         }
 
         lines.Add("  CAN USE (references the contract; not proof of calling)");

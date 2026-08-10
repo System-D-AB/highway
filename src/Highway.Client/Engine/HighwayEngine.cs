@@ -3,6 +3,7 @@ using Highway.Client.Scanning;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using StackExchange.Redis;
 
 namespace Highway.Client.Engine;
 
@@ -90,6 +91,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
     IHighwayConnection? IHighwayEngineInternals.Connection => _connection;
     PendingCallRegistry? IHighwayEngineInternals.PendingCalls => _pendingCalls;
     ServiceDiscoveryCache? IHighwayEngineInternals.Discovery => _discovery;
+    IConnectionMultiplexer? IHighwayEngineInternals.Multiplexer => _connection?.Multiplexer;
 
     public async Task StartAsync(CancellationToken ct = default)
     {
@@ -224,6 +226,24 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             foreach (var channel in _catalog.AllChannels)
             {
                 await _connection.SubscribeGroupAsync(channel.Name, group, _options.NodeName, ct).ConfigureAwait(false);
+            }
+
+            // 3b. Recurring jobs (028): the declarations become durable schedules on the
+            // broker. The template — the developer's registered instance — is serialized
+            // once HERE and replayed by the broker on every fire (D8). The queue name comes
+            // from the CONTRACT (its [Queue]), never from the declaration: addressing
+            // derives from contracts, the 010 lesson.
+            foreach (var job in _options.Jobs.Registrations)
+            {
+                var queueName = _catalog.GetQueueNameForMessageType(job.ContractType)
+                    ?? throw new InvalidOperationException(
+                        $"Job '{job.JobName}' declares {job.ContractType.Name}, but no [Queue] contract " +
+                        "for that type was discovered. A job contract is an ordinary ISend with [Queue] " +
+                        "— the schedule names when, the contract names where.");
+
+                var template = Wire.HighwayJson.EncodeEnvelope(_options.NodeName, job.Template);
+                await _connection.JobSetAsync(queueName, job.JobName, job.Expression, template, ct)
+                    .ConfigureAwait(false);
             }
 
             // 4. Sweeper last — once everything can be woken.

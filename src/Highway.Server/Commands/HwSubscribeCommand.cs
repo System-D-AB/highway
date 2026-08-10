@@ -53,8 +53,12 @@ internal sealed class HwSubscribeCommand : HighwayCommandBase
         }
         else
         {
-            return Fail(HighwayErrors.InvalidArg,
+            // Fail returns false; returning it directly would abort as a bare transient
+            // error and invite retries of a permanently invalid identifier (028 found this
+            // same slip in HW.JOB — the convention is Fail(...) then return true).
+            Fail(HighwayErrors.InvalidArg,
                 IdentifierErrorDetail(nodeArg.ReadOnlySpan, "node", _opts.MaxIdentifierBytes));
+            return true;
         }
 
         AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(_channel)), LockType.Exclusive, StoreType.Object);

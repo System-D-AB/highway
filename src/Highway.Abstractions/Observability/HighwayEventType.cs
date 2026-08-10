@@ -164,4 +164,25 @@ public enum HighwayEventType
     /// gets blamed on the network.</para>
     /// </summary>
     SendRefused = 22,
+
+    /// <summary>
+    /// A recurring-job schedule fired: exactly one occurrence message was enqueued and the
+    /// schedule re-armed (feature 028). <c>Name</c> is the queue, <c>RequestId</c> the
+    /// occurrence's message id — which is what joins the fired message's timeline to its
+    /// schedule.
+    /// </summary>
+    JobFired = 23,
+
+    /// <summary>A schedule was registered or its expression changed (028, OD5: last wins, loudly).</summary>
+    JobScheduleChanged = 24,
+
+    /// <summary>A schedule was removed (028). Removal is loud, like every destruction.</summary>
+    JobScheduleRemoved = 25,
+
+    /// <summary>
+    /// A due schedule could NOT fire because the target queue is at its byte limit (028).
+    /// The occurrence is not consumed: nextFire is unchanged and the fire retries on a later
+    /// poll — backpressure reaches the scheduler instead of being absorbed silently.
+    /// </summary>
+    JobFireRefused = 26,
 }

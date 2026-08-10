@@ -39,6 +39,9 @@ internal interface IBrokerState
     /// <summary>Registered nodes and what each declared (022 T2).</summary>
     Task<StateResult<IReadOnlyList<NodeDto>>> NodesAsync(CancellationToken ct = default);
 
+    /// <summary>Recurring-job schedules, from HW.JOB LIST (feature 028).</summary>
+    Task<StateResult<IReadOnlyList<JobScheduleDto>>> JobsAsync(CancellationToken ct = default);
+
     /// <summary>
     /// The catalogue: every entity, classified, as a union of what nodes declared and what the
     /// recorder observed. <paramref name="observedNames"/> comes from the in-process recorder,
@@ -119,6 +122,39 @@ internal sealed class BrokerState : IBrokerState, IAsyncDisposable
             // is worse than a dashboard that shows one empty panel.
             _logger.LogDebug(ex, "Reading queue state failed");
             return StateResult<IReadOnlyList<QueueStateDto>>.Fail($"could not read queue state: {ex.Message}");
+        }
+    }
+
+    public async Task<StateResult<IReadOnlyList<JobScheduleDto>>> JobsAsync(CancellationToken ct = default)
+    {
+        var db = await TryConnectAsync(ct).ConfigureAwait(false);
+        if (db is null)
+            return StateResult<IReadOnlyList<JobScheduleDto>>.Fail(UnavailableReason());
+
+        try
+        {
+            var raw = (StackExchange.Redis.RedisResult[])(await db.ExecuteAsync("HW.JOB", "LIST").ConfigureAwait(false))!;
+            var rows = new List<JobScheduleDto>(raw.Length);
+
+            foreach (var entry in raw)
+            {
+                var f = (StackExchange.Redis.RedisResult[])entry!;
+                rows.Add(new JobScheduleDto(
+                    (string)f[0]!,
+                    (string)f[1]!,
+                    (string)f[2]!,
+                    new DateTimeOffset(long.Parse((string)f[3]!, System.Globalization.CultureInfo.InvariantCulture), TimeSpan.Zero),
+                    long.Parse((string)f[4]!, System.Globalization.CultureInfo.InvariantCulture) is > 0 and var lf
+                        ? new DateTimeOffset(lf, TimeSpan.Zero)
+                        : null));
+            }
+
+            return StateResult<IReadOnlyList<JobScheduleDto>>.Ok(rows);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Reading job schedules failed");
+            return StateResult<IReadOnlyList<JobScheduleDto>>.Fail($"could not read schedules: {ex.Message}");
         }
     }
 

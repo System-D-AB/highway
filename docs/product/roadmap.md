@@ -431,15 +431,21 @@ per event (the claimant IS the group); retirement counts the youngest member; `B
 destroys a queue only for the last member. Protocol 4.4. The default (group = node name) is
 the pre-025 behavior exactly.
 
-### 026 — Distributed Cache  ⏳ in progress
+### 026 — Distributed Cache  ✅
 
-**Specced** — `docs/features/026-distributed-cache/`, implementation underway. Garnet is
+**Status:** Complete
+
+**Shipped** — `docs/features/026-distributed-cache/`. Garnet is
 natively a cache-store; this exposes it through `IDistributedCache` / `IBufferDistributedCache`
 so `HybridCache` layers on top — standard interfaces, standard Redis commands, no `HW.*`
-surface, no new package. Review conditions to land with it: the AOF/memory-cohabitation
-section (cache traffic shares the durable broker's log and memory with the queues), a
-`constraints.md` C4 row (cache growth is bounded by application TTLs, not by Highway), and a
-4-byte sliding window in the metadata header.
+surface, no new package. Review conditions to land with it met: AOF/memory cohabitation
+documented, `constraints.md` C4 row added, and sliding window metadata header implemented.
+
+### 028 — Recurring Jobs  ✅
+
+**Status:** Complete
+
+**Shipped** — `docs/features/028-recurring-jobs/`. Adds recurring job scheduling (`Daily`, `Every`, and cron schedules) to `ISend` contracts without external schedulers like Hangfire or Quartz. Schedule state and promotion ride durable broker storage with `HW.JOB` commands (`HW.JOB SET|DEL|LIST`), exactly-one-fire atomicity inside `HW.QCLAIM`, and client-side options and manifest integration.
 
 ---
 
@@ -449,7 +455,7 @@ Settled 2026-08-10 (discussion recorded in [`brainstorming.md`](brainstorming.md
 
 1. **The verb set is frozen.** *Execute a verb, Publish a fact, Send a job* is the complete
    model. Proposals for a fourth verb are rejected by default.
-2. **v1.0 is defined**: everything shipped above, plus 026 with its review conditions, plus
+2. **v1.0 is defined**: everything shipped above (including 026 and 028), plus
    the pre-production hardening set — protocol completion (RESP + `HW.*` declared native,
    per-node reply doorbells), a `Meter` beside the `ActivitySource`, and the assurance rig
    (crash-recovery, disk-full, connection-churn, soak). Then production, for months, on
@@ -459,7 +465,7 @@ Settled 2026-08-10 (discussion recorded in [`brainstorming.md`](brainstorming.md
      through a standard .NET interface, with zero Highway protocol surface and zero new
      guarantees.* This lane is finite and visibly ends (027, 029, 030 below — then closed).
    - **Connective-tissue lane** — gated by: *closes a recorded gap or strengthens an existing
-     guarantee; never adds a paradigm.* (028 below; causation ids / hop count; outbox as
+     guarantee; never adds a paradigm.* (028 shipped; causation ids / hop count; outbox as
      cookbook; retry tiers if production votes them back.)
 
 Not a freeze — a constitution. Freezes break at the first customer ask; a constitution says
@@ -467,7 +473,7 @@ which asks to take seriously.
 
 ---
 
-## Planned: 027–030
+## Planned: 027, 029–030
 
 Registered 2026-08-10 as empty feature folders; each gets the full requirements → design →
 tasks treatment when its discussion happens. Order within the list is not commitment order.
@@ -479,25 +485,11 @@ abstraction — never a bespoke `CheckRateLimitAsync`) over `INCR`+`EXPIRE`. The
 remaining substrate fit: event-driven apps throttle third-party APIs constantly, and the
 interface is Microsoft's, not ours. 026's sibling in every way.
 
-### 028 — Recurring Jobs
-
-**Lane:** connective tissue — the most valuable unbuilt feature. Highway has *delay* but not
-*recurrence*; "every night at 23:59" currently means deploying Hangfire or a cron container
-beside the broker — the second infrastructure Highway exists to delete. **Seed idea (to
-discuss):** a high-level declaration like `[Job(...)]` on a contract, riding delayed delivery
-plus a durable schedule record. Known discussion points, recorded now so they are not
-rediscovered: attribute arguments must be compile-time constants, so `Time.DailyAt(23,59,0)`
-cannot be an attribute argument as written — a cron/time string (`[Job("23:59")]`) or named
-integer arguments can; and F3's lesson applies (a schedule is *tuning* — freezing it into the
-contract assembly means redeploying every referencing node to move a job by an hour), so the
-attribute-vs-options placement is the first design decision, not a detail. Also: singleton
-semantics per schedule (exactly one node fires it) likely depends on 029's primitive.
-
 ### 029 — Singleton Runner
 
 **Lane:** substrate (borderline — no standard interface exists, so Highway would own the
 API). **Seed:** "at most one replica runs this" — `SET NX PX` + heartbeat, the natural
-companion to 025's replicas and probably a prerequisite for 028's fire-exactly-once. Must be
+companion to 025's replicas (feature 028 decoupled fire-exactly-once via queue promotion). Must be
 named honestly: *at most one*, never *exactly one*. API shape (an attribute? an
 `IHostedService` wrapper?) is the discussion.
 

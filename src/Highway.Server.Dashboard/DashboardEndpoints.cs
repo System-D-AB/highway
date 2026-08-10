@@ -105,6 +105,28 @@ internal static class DashboardEndpoints
                 node?.Uses is { } u ? new NodeCanUseDto(u.Services, u.Queues, u.Channels) : null));
         });
 
+        // Recurring-job schedules (028). Hosted-ness is computed HERE: the browser must not
+        // learn what "no hosting node" means, only render it.
+        app.MapGet("/api/jobs", async (IBrokerState state) =>
+        {
+            var jobs = await state.JobsAsync();
+            if (jobs.Value is null)
+                return Results.Json(new JobsDto([], jobs.Unavailable));
+
+            var nodes = await state.NodesAsync();
+            var hostedQueues = (nodes.Value ?? [])
+                .SelectMany(n => n.Queues)
+                .ToHashSet(StringComparer.Ordinal);
+
+            return Results.Json(new JobsDto(
+                jobs.Value
+                    .Select(j => new JobRowDto(
+                        j.Queue, j.Job, j.Expression, j.NextFire, j.LastFire,
+                        hostedQueues.Contains(j.Queue)))
+                    .ToArray(),
+                null));
+        });
+
         app.MapGet("/api/catalogue", async (IBrokerState state, FlightRecorder recorder) =>
         {
             // The recorder is in-process and needs no connection, so the observed half survives

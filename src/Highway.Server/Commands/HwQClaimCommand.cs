@@ -5,6 +5,7 @@ using Garnet.server;
 using Highway.Server.Internal;
 using Highway.Server.Observability;
 using Highway.Abstractions.Observability;
+using Highway.Abstractions.Scheduling;
 using Tsavorite.core;
 
 namespace Highway.Server.Commands;
@@ -35,7 +36,10 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
     private string _nodeId = null!;
     private string[] _knownNodes = [];
     private string? _claimedId;
+    private bool _hasJobs;
     private readonly List<(string Id, ushort Attempts)> _deadLettered = [];
+    private readonly List<(string Job, string MessageId)> _firedJobs = [];
+    private readonly List<string> _refusedJobs = [];
 
     public HwQClaimCommand(HighwayServerOptions opts, FlightRecorder recorder)
     {
@@ -47,7 +51,10 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
     {
         _claimedId = null;
         _knownNodes = [];
+        _hasJobs = false;
         _deadLettered.Clear();
+        _firedJobs.Clear();
+        _refusedJobs.Clear();
         ResetDeadLetterCounters();
     }
 
@@ -65,6 +72,20 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
         var nodeListKey = CreateArgSlice(HighwayKeys.QueueNodeList(_queue));
         api.GET(nodeListKey, out PinnedSpanByte nodeListValue);
         _knownNodes = SplitList(nodeListValue);
+
+        // Recurring jobs (028): only queues in the job index pay for the schedule key. The
+        // index is a main-store mirror, readable here in Prepare like the node list above.
+        api.GET(CreateArgSlice(HighwayKeys.JobIndex), out PinnedSpanByte jobIndex);
+        if (jobIndex.Length > 0)
+        {
+            foreach (var scheduled in SplitList(jobIndex))
+            {
+                if (scheduled != _queue) continue;
+                _hasJobs = true;
+                AddKey(CreateArgSlice(HighwayKeys.JobSchedules(_queue)), LockType.Exclusive, StoreType.Object);
+                break;
+            }
+        }
 
         AddKey(CreateArgSlice(HighwayKeys.Queue(_queue)), LockType.Exclusive, StoreType.Object);
         // Byte accounting (016): a claimed message leaves the live queue, so the counter
@@ -95,6 +116,9 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
             var procKey = CreateArgSlice(HighwayKeys.QueueProcessing(_queue, _nodeId));
 
             PromoteDueMessages(api, queueKey);
+
+            if (_hasJobs)
+                FireDueJobs(api, queueKey);
 
             if (_opts.Lease > TimeSpan.Zero)
             {
@@ -207,6 +231,90 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
         }
     }
 
+    /// <summary>
+    /// The fire-and-re-arm (feature 028). A due schedule enqueues exactly one occurrence and
+    /// re-inserts itself at its next time — one member replaced at a new score, inside this
+    /// claim's exclusive locks. Two racing pollers cannot both fire the same occurrence for
+    /// the same reason they cannot both claim the same message: the transaction IS the
+    /// election.
+    ///
+    /// <para><b>Catch-up-one (OD3):</b> the next occurrence is computed from <i>now</i>, so a
+    /// schedule that was due five times while nothing polled fires once and realigns.</para>
+    ///
+    /// <para><b>Backpressure (016):</b> a full queue refuses the fire — nextFire is left
+    /// unchanged and the fire retries on a later poll, recorded as <c>JobFireRefused</c>.</para>
+    /// </summary>
+    private void FireDueJobs<TGarnetApi>(TGarnetApi api, PinnedSpanByte queueKey)
+        where TGarnetApi : IGarnetApi
+    {
+        var schedKey = CreateArgSlice(HighwayKeys.JobSchedules(_queue));
+        var now = DateTime.UtcNow;
+
+        var status = api.SortedSetRange(
+            schedKey,
+            CreateArgSlice("-inf"),
+            CreateArgSlice(now.Ticks.ToString(CultureInfo.InvariantCulture)),
+            SortedSetOrderOperation.ByScore,
+            out var due,
+            out _,
+            withScores: false,
+            reverse: false,
+            limit: ("0", 16));
+
+        if (status != GarnetStatus.OK || due is null || due.Length == 0)
+            return;
+
+        foreach (var member in due)
+        {
+            var record = member.ReadOnlySpan.ToArray();
+            string job, expression;
+            byte[] template;
+            JobExpression parsed;
+
+            try
+            {
+                JobScheduleRecord.Decode(record, out job, out expression, out _, out _, out var templateSpan);
+                template = templateSpan.ToArray();
+                parsed = JobExpression.Parse(expression);
+            }
+            catch (Exception)
+            {
+                // A record this build cannot read or re-arm would otherwise be retried on
+                // every poll forever. Removing it is destruction, so it is loud (Finalize
+                // records the removal) — the 013 rule: refusing beats misparsing, and
+                // either beats silence.
+                api.SortedSetRemove(schedKey, CreateArgSlice(record), out _);
+                _refusedJobs.Add("<unreadable schedule removed>");
+                continue;
+            }
+
+            var messageId = $"job:{job}:{now.Ticks.ToString(CultureInfo.InvariantCulture)}";
+            var entry = Envelope.EncodeRpcEntry(Encoding.UTF8.GetBytes(messageId), template);
+
+            // The same refusal HW.QSEND makes: a fan-in of scheduled work does not get to
+            // overfill a queue that hand-sent work would be refused on.
+            if (_opts.MaxQueueBytes > 0
+                && ReadByteCounter(api, HighwayKeys.QueueBytes(_queue)) + entry.Length > _opts.MaxQueueBytes)
+            {
+                _refusedJobs.Add(job);
+                continue;   // nextFire unchanged — the fire retries on a later poll
+            }
+
+            api.ListRightPush(queueKey, CreateArgSlice(entry), out _);
+            AdjustByteCounter(api, HighwayKeys.QueueBytes(_queue), entry.Length);
+
+            var nextFire = parsed.NextOccurrence(now).Ticks;
+            api.SortedSetRemove(schedKey, CreateArgSlice(record), out _);
+            api.SortedSetAdd(
+                schedKey,
+                CreateArgSlice(nextFire.ToString(CultureInfo.InvariantCulture)),
+                CreateArgSlice(JobScheduleRecord.Encode(job, expression, now.Ticks, nextFire, template)),
+                out _);
+
+            _firedJobs.Add((job, messageId));
+        }
+    }
+
     private static void DecodeProcessing(
         ReadOnlySpan<byte> data, out long claimTicks, out byte[] id, out byte[] payload, out ushort attempts)
     {
@@ -225,6 +333,21 @@ internal sealed class HwQClaimCommand : HighwayCommandBase
                 requestId: id,
                 count: attempts,
                 errorCode: DeadLetter.MaxAttempts);
+        }
+
+        foreach (var (job, messageId) in _firedJobs)
+        {
+            _recorder.Record(
+                HighwayEventType.JobFired, _queue ?? "?",
+                requestId: messageId,
+                errorCode: job);
+        }
+
+        foreach (var job in _refusedJobs)
+        {
+            _recorder.Record(
+                HighwayEventType.JobFireRefused, _queue ?? "?",
+                errorCode: job);
         }
 
         if (!Failed && _claimedId is null) return;

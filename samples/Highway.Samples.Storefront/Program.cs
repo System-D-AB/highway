@@ -1,8 +1,10 @@
+using System.Text;
 using System.Text.Json;
 using Highway.Abstractions;
 using Highway.Client;
 using Highway.Samples;
 using Highway.Samples.Contracts;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -45,6 +47,7 @@ builder.Services.AddHighway(o =>
 
 var host = builder.Build();
 var client = host.Services.GetRequiredService<IHighwayClient>();
+var cache = host.Services.GetRequiredService<IDistributedCache>();
 
 Console.WriteLine($"""
     Highway storefront
@@ -95,6 +98,8 @@ while (true)
             case "discover": await DiscoverAsync(parts); break;
             case "stats":   await StatsAsync(parts); break;
             case "replay":  await ReplayAsync(parts); break;
+            case "cache":   await CacheAsync(parts); break;
+            case "cache-clear": await CacheClearAsync(parts); break;
             case "help":    PrintHelp(); break;
             default:
                 Console.WriteLine($"  unknown command '{command}' — try 'help'");
@@ -323,6 +328,56 @@ async Task StatsAsync(string[] parts)
         Console.WriteLine($"    {(string)result[i]!,-12} {(string)result[i + 1]!}");
 }
 
+// ---------------------------------------------------------------- cache
+
+async Task CacheAsync(string[] parts)
+{
+    var id = parts.Length > 1 ? parts[1] : "ORD-1";
+
+    // Check the distributed cache first.
+    var cached = await cache.GetAsync($"order:{id}");
+
+    if (cached is not null)
+    {
+        var json = Encoding.UTF8.GetString(cached);
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"  cache HIT — served from cache");
+        Console.ResetColor();
+        Console.WriteLine($"  {json}");
+        return;
+    }
+
+    // Cache miss — call the order service.
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine($"  cache MISS — calling orders.get");
+    Console.ResetColor();
+
+    var response = await client.ExecuteAsync(new GetOrder { OrderId = id });
+    var responseJson = JsonSerializer.Serialize(new
+    {
+        orderId = response.OrderId,
+        total = response.Total,
+        statusCode = response.StatusCode,
+        error = response.Error is not null ? $"{response.Error.Code}: {response.Error.Message}" : null,
+    });
+
+    // Store in the distributed cache (60-second sliding expiration).
+    await cache.SetAsync($"order:{id}", Encoding.UTF8.GetBytes(responseJson), new DistributedCacheEntryOptions
+    {
+        SlidingExpiration = TimeSpan.FromSeconds(60),
+    });
+
+    Console.WriteLine($"  {responseJson}");
+    Console.WriteLine($"  (cached for next time — try 'cache {id}' again)");
+}
+
+async Task CacheClearAsync(string[] parts)
+{
+    var id = parts.Length > 1 ? parts[1] : "ORD-1";
+    await cache.RemoveAsync($"order:{id}");
+    Console.WriteLine($"  removed 'order:{id}' from cache");
+}
+
 // ---------------------------------------------------------------- output
 
 void PrintFailure(Output response)
@@ -341,6 +396,8 @@ void PrintHelp() => Console.WriteLine("""
       invoice [orderId]      queue work — exactly ONE processor handles it
       poison                 queue a message that always fails, to show dead-lettering
       dlq [queue]            inspect a queue's dead letters
+      cache [id]             get an order via the distributed cache (shows hit/miss)
+      cache-clear [id]       remove a cached order entry
       discover [service]     which nodes host a service
       stats [name]           server / service / channel counters
       stats recorder         flight recorder health

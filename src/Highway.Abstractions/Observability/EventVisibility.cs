@@ -55,6 +55,11 @@ public static class EventVisibilityMap
         HighwayEventType.MessageDeadLettered => EventVisibility.Public,
         HighwayEventType.SendRefused => EventVisibility.Public,
 
+        // 028: what the developer's schedule did (or could not do) is a public fact; the
+        // schedule bookkeeping (changed/removed) is the broker recognising its own state.
+        HighwayEventType.JobFired => EventVisibility.Public,
+        HighwayEventType.JobFireRefused => EventVisibility.Public,
+
         // Everything else is the broker moving work around: claims, acknowledgements,
         // topology, lease renewals, retirement. Default rather than enumerated, because a
         // new event type is far more likely to be machinery than a developer-facing fact —

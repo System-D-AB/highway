@@ -201,25 +201,48 @@ converge on the new schedule (which is what a deploy *means*), and the event mak
 conflict visible instead of silent. Refuse-and-log would leave rolling deploys permanently
 half-updated.
 
-## D8 — The payload template: the message is a signal, not a datum
+## D8 — The payload template: the developer provides the message once, the broker replays it
 
-The fire is server-side, but the payload is a client envelope of type `T`, and the server
-cannot construct .NET objects. So registration stores a **template**: the client serializes
-`new T()` once, `HW.JOB SET` carries those bytes, and every fire enqueues the same template.
+*Who provides the message, and what message?* The fire is server-side, but the payload is a
+client envelope of type `T`, and the server cannot construct .NET objects. So **the developer
+provides the message at declaration — an actual instance — and the broker replays it**:
+registration serializes the instance through the ordinary envelope path, `HW.JOB SET` stores
+the bytes in the schedule record, and every fire copies that template into the queue. What
+changes versus a normal send is not who writes the message; it is *when*.
 
-Three consequences, stated rather than discovered:
+```csharp
+o.Jobs.Daily<GenerateStatements>(new TimeOnly(2, 0));                 // template = new T()
 
-1. **Every occurrence carries identical bytes.** A handler wanting occurrence-specific data
-   ("which night is this run for?") derives it (`DateTime.UtcNow.Date`) — the server will not
-   patch JSON inside a transaction (the same refusal as `startedOnNode`, for the same
-   reason). The UserGuide documents the one trap: after a catch-up fire (OD3), *now* is later
-   than the occurrence was scheduled.
-2. **Scheduled contracts should be parameterless records.** The analyzer-someday and the docs
-   say so; a contract with meaningful properties scheduled as a job is a smell (whose values
-   would they be?).
+o.Jobs.Daily(new SyncRegion { Region = "EU" }, new TimeOnly(2, 0));   // template = this instance
+o.Jobs.Daily(new SyncRegion { Region = "US" }, new TimeOnly(6, 0));   // same contract, 2nd schedule
+```
+
+The payload spectrum, and where each case lives:
+
+| The job needs... | Where it lives |
+|---|---|
+| Nothing — the **type is the signal** (the recommended default) | A parameterless record. Exactly cron's model: `0 2 * * * generate-statements` passes no per-run data either; the handler derives what it needs when it runs |
+| **Fixed configuration** per schedule (the EU sync vs the US sync) | The registered instance — frozen at declaration, distinct per schedule, same contract and processor |
+| **Per-occurrence data** ("process date X") | **Nowhere, deliberately.** The handler derives it from state ("process everything pending") — restart-safe and catch-up-safe, where a date-in-payload job goes wrong the first time OD3 delivers a stale X. Hangfire's guidance for recurring jobs is the same: parameterless, state in the store |
+
+Consequences, stated rather than discovered:
+
+1. **The template is frozen.** Identical bytes every fire; the server will not patch JSON
+   inside a transaction (the same refusal as `startedOnNode`, for the same reason). The
+   UserGuide documents the one trap: after a catch-up fire (OD3), *now* is later than the
+   occurrence was scheduled.
+2. **Multiple schedules per contract are permitted by construction** — schedules are keyed by
+   job name, each carrying its own template and expression against the same queue. Stated
+   here so it is a feature, not an accident.
 3. **Manual trigger is free by construction**: `client.SendAsync(new GenerateStatements())`
    is the same contract, processor, and observability as a scheduled fire — "run it now"
    needs no API.
+4. **`[Queue]` remains required on the contract** — not ceremony but the address half of the
+   split: `[Queue]` names *where* (contract, permanent, shared by every sender including
+   manual ones); the schedule names *when* (tuning, deployable). Three existing laws agree:
+   `ISend` without `[Queue]` is already a startup error; names are never inferred from type
+   names (the durable-address rule); and addressing derives from the contract (feature 010's
+   caller-only lesson — what makes the manual trigger resolve).
 
 If demand for occurrence metadata in the payload materialises, it is an envelope-framing
 addition later (versioned, per house rule) — not a v1 blocker.

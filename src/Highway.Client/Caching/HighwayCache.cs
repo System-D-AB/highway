@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using Microsoft.Extensions.Caching.Distributed;
 using StackExchange.Redis;
@@ -5,10 +6,10 @@ using StackExchange.Redis;
 namespace Highway.Client.Caching;
 
 /// <summary>
-/// <see cref="IDistributedCache"/> implementation backed by Garnet/Redis string commands
-/// over Highway's existing SE.Redis connection.
+/// <see cref="IDistributedCache"/> and <see cref="IBufferDistributedCache"/> implementation
+/// backed by Garnet/Redis string commands over Highway's existing SE.Redis connection.
 /// </summary>
-public sealed class HighwayCache : IDistributedCache, IDisposable
+public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, IDisposable
 {
     // Header layout (stored when sliding expiration is involved):
     // [1 byte version][8 bytes absoluteDeadline UTC ticks (0 = none)][2 bytes slidingSeconds (0 = none)]
@@ -125,6 +126,64 @@ public sealed class HighwayCache : IDistributedCache, IDisposable
             return;
 
         await ProcessGetResultAsync(redisKey, (byte[])raw!, isRefreshOnly: true).ConfigureAwait(false);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // IBufferDistributedCache — TryGet
+    // ─────────────────────────────────────────────────────────────────────
+
+    public bool TryGet(string key, IBufferWriter<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(destination);
+
+        var redisKey = PrefixKey(key);
+
+        RedisValue raw = _db.StringGet(redisKey);
+        if (raw.IsNull)
+            return false;
+
+        return ProcessGetToBuffer(redisKey, (byte[])raw!, destination);
+    }
+
+    public async ValueTask<bool> TryGetAsync(string key, IBufferWriter<byte> destination, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(destination);
+
+        var redisKey = PrefixKey(key);
+
+        RedisValue raw = await _db.StringGetAsync(redisKey).ConfigureAwait(false);
+        if (raw.IsNull)
+            return false;
+
+        return await ProcessGetToBufferAsync(redisKey, (byte[])raw!, destination).ConfigureAwait(false);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // IBufferDistributedCache — Set
+    // ─────────────────────────────────────────────────────────────────────
+
+    public void Set(string key, ReadOnlySequence<byte> value, DistributedCacheEntryOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(options);
+
+        var redisKey = PrefixKey(key);
+        var (payload, expiry) = BuildPayloadAndExpiry(value, options);
+
+        _db.StringSet(redisKey, payload, expiry);
+    }
+
+    public async ValueTask SetAsync(string key, ReadOnlySequence<byte> value, DistributedCacheEntryOptions options, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(options);
+
+        var redisKey = PrefixKey(key);
+        var (payload, expiry) = BuildPayloadAndExpiry(value, options);
+
+        await _db.StringSetAsync(redisKey, payload, expiry).ConfigureAwait(false);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -305,5 +364,166 @@ public sealed class HighwayCache : IDistributedCache, IDisposable
         }
 
         return isRefreshOnly ? null : raw;
+    }
+
+    /// <summary>
+    /// Processes a Get result and writes the payload to an <see cref="IBufferWriter{T}"/>.
+    /// Returns true if the entry was found and written; false if logically expired or missing.
+    /// </summary>
+    private bool ProcessGetToBuffer(string redisKey, byte[] raw, IBufferWriter<byte> destination)
+    {
+        if (raw.Length >= HeaderSize && raw[0] == HeaderVersion)
+        {
+            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(1));
+            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(9));
+
+            if (slidingSeconds > 0)
+            {
+                var sliding = TimeSpan.FromSeconds(slidingSeconds);
+                TimeSpan newTtl;
+
+                if (absoluteTicks > 0)
+                {
+                    var absoluteDeadline = new DateTimeOffset(absoluteTicks, TimeSpan.Zero);
+                    var timeToAbsolute = absoluteDeadline - DateTimeOffset.UtcNow;
+
+                    if (timeToAbsolute <= TimeSpan.Zero)
+                    {
+                        _db.KeyDelete(redisKey);
+                        return false;
+                    }
+
+                    newTtl = timeToAbsolute < sliding ? timeToAbsolute : sliding;
+                }
+                else
+                {
+                    newTtl = sliding;
+                }
+
+                _db.KeyExpire(redisKey, newTtl);
+
+                var payload = raw.AsSpan(HeaderSize);
+                var span = destination.GetSpan(payload.Length);
+                payload.CopyTo(span);
+                destination.Advance(payload.Length);
+                return true;
+            }
+        }
+
+        // No sliding header — write the raw value directly.
+        var data = raw.AsSpan();
+        var target = destination.GetSpan(data.Length);
+        data.CopyTo(target);
+        destination.Advance(data.Length);
+        return true;
+    }
+
+    /// <summary>
+    /// Async version of <see cref="ProcessGetToBuffer"/>.
+    /// </summary>
+    private async ValueTask<bool> ProcessGetToBufferAsync(string redisKey, byte[] raw, IBufferWriter<byte> destination)
+    {
+        if (raw.Length >= HeaderSize && raw[0] == HeaderVersion)
+        {
+            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(1));
+            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(9));
+
+            if (slidingSeconds > 0)
+            {
+                var sliding = TimeSpan.FromSeconds(slidingSeconds);
+                TimeSpan newTtl;
+
+                if (absoluteTicks > 0)
+                {
+                    var absoluteDeadline = new DateTimeOffset(absoluteTicks, TimeSpan.Zero);
+                    var timeToAbsolute = absoluteDeadline - DateTimeOffset.UtcNow;
+
+                    if (timeToAbsolute <= TimeSpan.Zero)
+                    {
+                        await _db.KeyDeleteAsync(redisKey).ConfigureAwait(false);
+                        return false;
+                    }
+
+                    newTtl = timeToAbsolute < sliding ? timeToAbsolute : sliding;
+                }
+                else
+                {
+                    newTtl = sliding;
+                }
+
+                await _db.KeyExpireAsync(redisKey, newTtl).ConfigureAwait(false);
+
+                var payload = raw.AsSpan(HeaderSize);
+                var span = destination.GetSpan(payload.Length);
+                payload.CopyTo(span);
+                destination.Advance(payload.Length);
+                return true;
+            }
+        }
+
+        // No sliding header — write the raw value directly.
+        var data = raw.AsSpan();
+        var target = destination.GetSpan(data.Length);
+        data.CopyTo(target);
+        destination.Advance(data.Length);
+        return true;
+    }
+
+    /// <summary>
+    /// Builds stored payload and TTL from a <see cref="ReadOnlySequence{T}"/> value.
+    /// Same logic as the byte[] overload but works with sequences to avoid allocation.
+    /// </summary>
+    private static (byte[] Payload, TimeSpan? Expiry) BuildPayloadAndExpiry(
+        ReadOnlySequence<byte> value, DistributedCacheEntryOptions options)
+    {
+        var absoluteDeadline = ComputeAbsoluteDeadline(options);
+        var slidingSeconds = options.SlidingExpiration.HasValue
+            ? (ushort)Math.Min((int)options.SlidingExpiration.Value.TotalSeconds, ushort.MaxValue)
+            : (ushort)0;
+
+        bool hasSliding = slidingSeconds > 0;
+        int valueLength = (int)value.Length;
+
+        byte[] payload;
+        TimeSpan? expiry;
+
+        if (hasSliding)
+        {
+            long absoluteTicks = absoluteDeadline?.UtcTicks ?? 0;
+
+            payload = new byte[HeaderSize + valueLength];
+            payload[0] = HeaderVersion;
+            BinaryPrimitives.WriteInt64LittleEndian(payload.AsSpan(1), absoluteTicks);
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(9), slidingSeconds);
+            value.CopyTo(payload.AsSpan(HeaderSize));
+
+            var sliding = TimeSpan.FromSeconds(slidingSeconds);
+            if (absoluteDeadline.HasValue)
+            {
+                var timeToAbsolute = absoluteDeadline.Value - DateTimeOffset.UtcNow;
+                expiry = timeToAbsolute < sliding ? timeToAbsolute : sliding;
+                if (expiry <= TimeSpan.Zero)
+                    expiry = TimeSpan.FromMilliseconds(1);
+            }
+            else
+            {
+                expiry = sliding;
+            }
+        }
+        else if (absoluteDeadline.HasValue)
+        {
+            payload = new byte[valueLength];
+            value.CopyTo(payload);
+            var timeToAbsolute = absoluteDeadline.Value - DateTimeOffset.UtcNow;
+            expiry = timeToAbsolute > TimeSpan.Zero ? timeToAbsolute : TimeSpan.FromMilliseconds(1);
+        }
+        else
+        {
+            payload = new byte[valueLength];
+            value.CopyTo(payload);
+            expiry = null;
+        }
+
+        return (payload, expiry);
     }
 }

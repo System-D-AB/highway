@@ -181,6 +181,44 @@ in the dead-letter queue if something goes wrong.
 
 ---
 
+## Recurring Jobs
+
+Work that runs on a schedule — nightly statements, quarter-hourly reconciliation — without
+deploying Hangfire, Quartz, or a cron container beside the broker.
+
+A recurring job is **a schedule that sends a queue message**. The contract and processor are
+ordinary (`[Queue]` + `ISend` + `IProcess<T>`); the schedule lives at the composition root:
+
+```csharp
+[Queue("statements.generate")]
+public sealed record GenerateStatements : ISend;   // parameterless: the TYPE is the signal
+
+services.AddHighway(o =>
+{
+    o.Jobs.Daily<GenerateStatements>(new TimeOnly(2, 0));      // 02:00 UTC, every day
+    o.Jobs.Every<ReconcileLedger>(TimeSpan.FromMinutes(15));
+    o.Jobs.Cron<PruneAudit>("0 3 * * SUN");                    // standard 5-field cron
+});
+```
+
+### Behavior
+
+- **Exactly one fire, at-least-once processing.** Each due time enqueues exactly one
+  message, however many replicas run; the message then has normal queue semantics
+  (competing consumers, retries, DLQ, `[Idempotent]`).
+- **Durable.** Schedules survive broker restarts. Missed occurrences collapse to **one**
+  catch-up fire, with the next computed from now.
+- **The broker's clock, UTC.** An occurrence fires on the first worker poll after its due
+  time — and not at all while no node hosts the processor (the dashboard shows this state).
+- **The payload is a template**, frozen at declaration: every occurrence carries identical
+  bytes. Fixed configuration goes in the registered instance
+  (`o.Jobs.Daily(new Sync { Region = "EU" }, ..., name: "eu")`); per-occurrence data is
+  derived by the handler from state — which is what makes catch-up fires safe.
+- **Run it now**: `client.SendAsync(new GenerateStatements())` — same contract, same
+  processor, no special API.
+- **Overlap**: a new occurrence may fire while the previous is still being processed. If
+  your job must not run twice at once, mark it `[Idempotent]` and derive work from state.
+
 ## Pub/Sub
 
 Broadcast events to every subscriber. Each subscribing application gets its own
@@ -254,16 +292,152 @@ await client.PublishAsync(new OrderPlaced
 
 ---
 
+## Distributed Cache
+
+A distributed cache backed by the same Garnet broker your messaging already runs
+on. No second server, no second connection string, no Redis package.
+
+### What you get
+
+Highway registers an `IDistributedCache` implementation in DI. It uses standard
+Garnet string commands (`GET`, `SET`, `DEL`) over the existing connection. Cache
+keys are prefixed (`hw:cache:` by default) so they never collide with Highway's
+internal state.
+
+For typed caching with stampede protection and L1/L2 layering, add .NET's
+`HybridCache` on top. Highway provides the L2 store; `HybridCache` provides
+the in-memory L1, serialization, and single-caller factory semantics.
+
+### Registration
+
+Caching registers automatically when you call `AddHighway`:
+
+```csharp
+builder.Services.AddHighway(o =>
+{
+    o.NodeName = "my-service";
+    o.Server   = "127.0.0.1:6500";
+});
+```
+
+If you want only the cache without the messaging engine (no services, no queues,
+no pub/sub), use the standalone registration:
+
+```csharp
+builder.Services.AddHighwayCache(o =>
+{
+    o.Server    = "127.0.0.1:6500";
+    o.KeyPrefix = "app:";  // optional, default "hw:cache:"
+});
+```
+
+Both paths share the same connection when used together in one process.
+
+### Basic usage — `IDistributedCache`
+
+```csharp
+public sealed class OrderLookup(IDistributedCache cache, IHighwayClient client)
+{
+    public async Task<OrderResult?> GetOrderAsync(string orderId, CancellationToken ct)
+    {
+        var key = $"order:{orderId}";
+        var cached = await cache.GetAsync(key, ct);
+
+        if (cached is not null)
+            return JsonSerializer.Deserialize<OrderResult>(cached);
+
+        var result = await client.ExecuteAsync(new GetOrder { OrderId = orderId }, ct);
+
+        await cache.SetAsync(key, JsonSerializer.SerializeToUtf8Bytes(result),
+            new DistributedCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
+            }, ct);
+
+        return result;
+    }
+}
+```
+
+### Typed usage — `HybridCache`
+
+Add `Microsoft.Extensions.Caching.Hybrid` to your application and register it:
+
+```csharp
+builder.Services.AddHighway(o =>
+{
+    o.NodeName = "my-service";
+    o.Server   = "127.0.0.1:6500";
+});
+
+builder.Services.AddHybridCache(o =>
+{
+    o.DefaultEntryOptions = new()
+    {
+        Expiration = TimeSpan.FromMinutes(5),
+        LocalCacheExpiration = TimeSpan.FromSeconds(30),
+    };
+});
+```
+
+Then inject `HybridCache` and use `GetOrCreateAsync<T>`:
+
+```csharp
+public sealed class OrderLookup(HybridCache cache, IHighwayClient client)
+{
+    public async Task<OrderResult> GetOrderAsync(string orderId, CancellationToken ct)
+    {
+        return await cache.GetOrCreateAsync(
+            $"order:{orderId}",
+            async token =>
+            {
+                return await client.ExecuteAsync(
+                    new GetOrder { OrderId = orderId }, token);
+            },
+            cancellationToken: ct);
+    }
+}
+```
+
+### Behavior
+
+- **Stampede protection.** When multiple callers request the same key
+  simultaneously, `HybridCache` calls the factory once and gives the result to
+  all waiters.
+- **L1 + L2.** `HybridCache` holds recent entries in process memory (L1) and
+  falls through to Highway's distributed cache (L2) on miss. No configuration
+  — both layers activate by default.
+- **Tag-based invalidation.** `HybridCache` supports tags for bulk invalidation.
+  Assign tags at creation and invalidate by tag to clear related entries at once.
+- **Serialization.** `System.Text.Json` by default — consistent with Highway's
+  wire format. Configure alternative serializers through `HybridCache`'s
+  `AddSerializer` / `AddSerializerFactory` extension points.
+- **No background work.** The cache itself is stateless — no timers, no sweeps.
+  TTL is managed by Garnet natively.
+- **Connection failure.** If the broker is unreachable, cache operations throw
+  (or return null for `Get`), same as any Redis-backed cache. No silent
+  fallback.
+- **Shares the broker's storage.** Entries live in the same Garnet instance as
+  your queues and channels — the same memory and the same AOF on disk. Give
+  entries TTLs: Highway does not enforce expiration, and a key set without one
+  persists until deleted.
+
+---
+
 ## Choosing Between Them
 
 One sentence: **need the answer → RPC. One handler → Queue. Many handlers →
-Pub/Sub.**
+Pub/Sub. Already have the answer → Cache.**
 
 The deployment consequence is the difference between the last two: deploy three
 instances of a queue processor and they **share** the work. Deploy three
 instances of a subscriber and each gets **its own copy** — unless they share a
 `SubscriptionGroup`, in which case they share that copy too. The verb decides
 the semantics; the subscription group decides who counts as *one* subscriber.
+
+Caching is also available through the same server connection — no additional
+infrastructure. Use it to avoid repeated RPC calls for data that changes
+infrequently.
 
 ---
 
@@ -354,6 +528,9 @@ services.AddHighway(o =>
 - **OpenTelemetry** — Highway emits `System.Diagnostics.Activity` with no OTEL
   dependency. Subscribe with your own pipeline for distributed traces.
 - **Delayed delivery** — schedule messages and events for future processing.
+- **Distributed cache** — `IDistributedCache` backed by the same Garnet broker.
+  Add `HybridCache` for typed caching with stampede protection and L1/L2
+  layering.
 - **Lease renewal** — handlers running up to 15 minutes are safe without
   configuration.
 

@@ -31,19 +31,19 @@ verb — a fired job is `SendAsync` with a clock).
   claimant. (This revises the earlier assumption that 029 was a prerequisite — recorded in
   the design, §D2.)
 
-## Open Decisions
+## Open Decisions — RESOLVED (2026-08-10, at execution approval)
 
-Following 016's precedent, decisions that change the feature's shape are recorded here and
-settled in discussion before the design is frozen. The design document analyses each with a
-recommendation; nothing below is decided by default.
+The user approved execution on the design's recommendations. One resolution changed during
+implementation analysis (OD4) and one was narrowed (OD2's time zones); both changes are
+reasoned below, not silent.
 
-| # | Decision | Options (design §) |
+| # | Decision | Resolution |
 |---|---|---|
-| **OD1** | **Where a schedule is declared** — the user-facing API | Attribute on the contract; composition-root code; attribute-with-override; handler-interface (`IJob`); external config (D1) |
-| **OD2** | **Schedule expression format** | Daily time shorthand; fixed interval; full cron; a typed builder (D3) |
-| **OD3** | **Missed occurrences after downtime** | Fire one catch-up; fire all missed; skip to next (D5) |
-| **OD4** | **Overlap** — next occurrence due while the previous still runs | Fire anyway (default queue semantics); skip while an instance is unacknowledged (D6) |
-| **OD5** | **Schedule ownership conflict** — two nodes declare different schedules for the same job | Last registration wins; refuse and log; first wins (D7) |
+| **OD1** | Declaration API | **Composition-root builder** (`o.Jobs.Daily<T>(...)` — design D1-B). The attribute remains registered as possible later sugar |
+| **OD2** | Expression format | **`Daily(TimeOnly)` + `Every(TimeSpan)` + `Cron(string, 5-field)`**, all **UTC-only in v1** — time-zone/DST support is registered as deferred, not half-shipped. Client-side floor: `Every` ≥ 1 minute (the wire accepts ≥ 1 second, for tests and tooling) |
+| **OD3** | Missed occurrences | **Catch-up-one, uniformly**: a due schedule fires exactly one occurrence and `nextFire` is computed **from now**, collapsing any missed backlog. Uniform rather than split-by-kind (the design's Daily/Every split), because firing one stale interval tick after downtime is at worst harmless and usually wanted ("sync now, then resume"), and one rule is teachable |
+| **OD4** | Overlap | **Fire-anyway in v1** — a change from the design's skip-while-outstanding recommendation, forced by implementation: detecting "previous occurrence still outstanding" in O(1) inside the fire transaction requires an ack-side completion hook (`HW.QACK` does not know a message was a job occurrence), and the alternative — scanning the queue and every processing list under exclusive locks — puts O(depth) work on the claim path. Skip-while-outstanding is **registered as a follow-up** with the ack-hook design named as its prerequisite. v1 documents the mitigation: `[Idempotent]` plus derive-from-state handlers |
+| **OD5** | Declaration conflict | **Last registration wins, loudly** — a `JobScheduleChanged` recorder event names old and new expressions (design D7; the catalog's existing rule) |
 
 ## Requirements
 
@@ -56,17 +56,23 @@ the same near-zero ceremony as the rest of Highway.
 
 1. A recurring job SHALL be declared against a `[Queue]` message contract (an `ISend` type):
    the schedule names *when*, the existing contract and its `IProcess<T>` name *what*. The
-   fired payload is a **template** serialized at registration (design D8) — occurrences carry
-   identical bytes, and manual triggering via `SendAsync(new T())` works by construction.
-2. The declaration API SHALL be the one settled by **OD1**; the requirement is
+   `[Queue]` attribute is required exactly as for any `ISend` — the address half of the
+   declaration (design D8.4).
+2. The fired payload SHALL be a **template provided by the developer at declaration**: a
+   registered instance, defaulting to `new T()` (design D8). Occurrences carry identical
+   bytes — per-occurrence data is derived by the handler, never patched by the broker — and
+   manual triggering via `SendAsync(new T())` works by construction.
+3. Multiple schedules MAY target the same contract (distinct job names, each with its own
+   template and expression) — the EU-sync/US-sync case (design D8.2).
+4. The declaration API SHALL be the one settled by **OD1**; the requirement is
    shape-agnostic beyond: declaring a job MUST NOT require touching the broker, and the
    declaration MUST be discoverable by the topology manifest (024) and the dashboard.
-3. The schedule expression SHALL support at minimum: a daily time (`"02:00"`) and a fixed
+5. The schedule expression SHALL support at minimum: a daily time (`"02:00"`) and a fixed
    interval (`every 15 minutes`); whether full cron ships in v1 is **OD2**.
-4. All schedule times SHALL be **UTC by default**, with time-zone support (and its DST
+6. All schedule times SHALL be **UTC by default**, with time-zone support (and its DST
    semantics) explicitly in or out per **OD2**'s resolution — never implicit local time,
    which differs per node.
-5. An invalid schedule expression SHALL fail at startup with an error naming the expression
+7. An invalid schedule expression SHALL fail at startup with an error naming the expression
    and the accepted forms (fail-fast, 005 R12).
 
 ### Requirement 2: Durable Schedules, Fired Exactly Once Per Occurrence
