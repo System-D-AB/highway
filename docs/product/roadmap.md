@@ -208,9 +208,9 @@ queue is RPC minus the reply. It also inherits feature 013 wholesale — delayed
 **Build this before 016.** Several retention constraints move from pub/sub to queues, and
 building gigabyte budgets into pub/sub first would be the expensive order.
 
-### 015 — Recoverability
+### 015 — Recoverability  ✅
 
-**Specced, then reduced by engineering review.** `docs/features/015-recoverability/`. Originally three tiers between "a handler threw" and
+**Shipped as reduced by engineering review.** `docs/features/015-recoverability/`. Originally three tiers between "a handler threw" and
 "an operator has to look at this", plus the failure context that makes the last one useful.
 
 A handler signals failure by throwing, and that stays. What is thin is everything after:
@@ -261,7 +261,7 @@ time (not promotion time).
 
 ---
 
-### 016 — Retention, Storage and Durability
+### 016 — Retention, Storage and Durability  ✅
 
 > **Runs after 018, and was rewritten once 018 shipped.** Requirement 3 halved — group queues
 > and queues were two bounding jobs because they were two implementations, and they are one now.
@@ -273,7 +273,7 @@ time (not promotion time).
 > ordinary queues under `hw:q:{channel}@{group}:*`, bounded by the same mechanism as every
 > other queue. C4.4's former "Pub/Sub group queues — no bound at all" row is gone.
 
-**Specced** — `docs/features/016-retention-and-durability/requirements.md`. Closes all five
+**Shipped** — `docs/features/016-retention-and-durability/`. Closed all five
 remaining unmet constraints (C4.1–C4.6). One coherent piece of work rather than five
 problems.
 
@@ -299,9 +299,9 @@ the shape of the feature, so the design is not written until they are settled.
 - Durable by default
 - `AofSizeLimit` and checkpointing, so the log does not grow forever
 
-### 023 — Messages, Not Protocol Events  ← **next**
+### 023 — Messages, Not Protocol Events  ✅
 
-**Specced** — `docs/features/023-message-centric-dashboard/`. 022 made the dashboard show *what
+**Shipped** — `docs/features/023-message-centric-dashboard/`. 022 made the dashboard show *what
 exists*. Clicking into a queue still shows six rows of `QueueSent` / `QueueClaimed` /
 `QueueAcknowledged` for two messages — **not one of them a thing the developer did**. The page
 cannot answer the first question anyone asks: how many succeeded, and how many failed?
@@ -328,9 +328,9 @@ Also lands 022's deferred node address, done properly: `NodeRegistration` gains 
 byte in the same change as the field**, because adding one to an unversioned binary format is
 exactly how 013's storage break happened.
 
-### 022 — Dashboard: A Catalogue, Not a List of Names
+### 022 — Dashboard: A Catalogue, Not a List of Names  ✅
 
-**Specced** — `docs/features/022-dashboard-catalogue/`. Run against the samples, the dashboard's
+**Shipped** — `docs/features/022-dashboard-catalogue/`. Run against the samples, the dashboard's
 main page lists ten rows in one column called **Name**, containing **six different kinds of
 thing**: nodes (`shop-1`), services (`orders.get`), a queue (`invoices.generate`), channels
 (`orders.placed`), group queues (`orders.placed@shop-1`) and an internal bucket (`hw.replies`).
@@ -350,9 +350,9 @@ read back for display. This is mostly a rendering problem.
 
 **Supersedes 020's view tasks** (T6–T9) while inheriting its Phase 0 read path unchanged.
 
-### 020 — Dashboard: Operations Console  ← **next**
+### 020 — Dashboard: Operations Console  ✅
 
-**Specced** — `docs/features/020-dashboard-operations/`. Feature 011 built a dashboard for the
+**Shipped** (view tasks superseded by 022/023; `HW.STATS` consumer fields T4/T5 remain registered) — `docs/features/020-dashboard-operations/`. Feature 011 built a dashboard for the
 flight recorder, and that is still all it is. Five features have shipped since, each adding
 operational state it cannot show: dead letters with their diagnosis (015), byte budgets and
 refusals (016), retirement countdowns (017), groups-as-queues (018), long-running handlers (019).
@@ -388,9 +388,9 @@ recovery, letting a deadlocked handler hold its message forever.
 For work measured in hours, renewal is the wrong tool:
 [`docs/cookbook/long-running-work.md`](../cookbook/long-running-work.md) documents chunk-and-checkpoint.
 
-### 017 — Node Decommissioning  ← **next**
+### 017 — Node Decommissioning  ✅
 
-**Specced** — `docs/features/017-node-decommissioning/`. A node that is never coming back can
+**Shipped** (retirement liveness generalized to group membership by 025) — `docs/features/017-node-decommissioning/`. A node that is never coming back can
 say so, an operator can say it on the node's behalf, and — the part that matters — **the broker
 works it out by itself**.
 
@@ -415,6 +415,103 @@ from a nightly batch job. Because a Highway group is a node with a heartbeat, Hi
 the one place the product can be strictly better than its closest analogues, and it costs
 nothing to take.
 
+### 024 — Hosting Boundaries and Topology  ✅
+
+**Shipped** — `docs/features/024-hosting-boundaries/`. Contracts stay discovered closure-wide;
+handlers become hosted by consent (`HostingMode`, `[HighwayHostModule]`, `HostAssembly`), with
+`Implicit` as the unbroken default plus a warning that makes reference-equals-hosting announce
+itself. Every node logs a topology manifest (PROVIDES / CAN USE) and the dashboard node page
+shows both halves. Born from three independent architecture reviews converging on the same gap.
+
+### 025 — Subscription Groups  ✅
+
+**Shipped** — `docs/features/025-subscription-groups/`. `SubscriptionGroup` names the logical
+consumer; `NodeName` keeps naming the process. Replicas sharing a group compete for one copy
+per event (the claimant IS the group); retirement counts the youngest member; `BYE PURGE`
+destroys a queue only for the last member. Protocol 4.4. The default (group = node name) is
+the pre-025 behavior exactly.
+
+### 026 — Distributed Cache  ⏳ in progress
+
+**Specced** — `docs/features/026-distributed-cache/`, implementation underway. Garnet is
+natively a cache-store; this exposes it through `IDistributedCache` / `IBufferDistributedCache`
+so `HybridCache` layers on top — standard interfaces, standard Redis commands, no `HW.*`
+surface, no new package. Review conditions to land with it: the AOF/memory-cohabitation
+section (cache traffic shares the durable broker's log and memory with the queues), a
+`constraints.md` C4 row (cache growth is bounded by application TTLs, not by Highway), and a
+4-byte sliding window in the metadata header.
+
+---
+
+## The Posture: Core-Complete, Production-Driven
+
+Settled 2026-08-10 (discussion recorded in [`brainstorming.md`](brainstorming.md)):
+
+1. **The verb set is frozen.** *Execute a verb, Publish a fact, Send a job* is the complete
+   model. Proposals for a fourth verb are rejected by default.
+2. **v1.0 is defined**: everything shipped above, plus 026 with its review conditions, plus
+   the pre-production hardening set — protocol completion (RESP + `HW.*` declared native,
+   per-node reply doorbells), a `Meter` beside the `ActivitySource`, and the assurance rig
+   (crash-recovery, disk-full, connection-churn, soak). Then production, for months, on
+   purpose.
+3. **Post-1.0 work enters through two lanes only**, each with a gate:
+   - **Substrate lane** — gated by the 026 scope test: *exposes a native Garnet capability,
+     through a standard .NET interface, with zero Highway protocol surface and zero new
+     guarantees.* This lane is finite and visibly ends (027, 029, 030 below — then closed).
+   - **Connective-tissue lane** — gated by: *closes a recorded gap or strengthens an existing
+     guarantee; never adds a paradigm.* (028 below; causation ids / hop count; outbox as
+     cookbook; retry tiers if production votes them back.)
+
+Not a freeze — a constitution. Freezes break at the first customer ask; a constitution says
+which asks to take seriously.
+
+---
+
+## Planned: 027–030
+
+Registered 2026-08-10 as empty feature folders; each gets the full requirements → design →
+tasks treatment when its discussion happens. Order within the list is not commitment order.
+
+### 027 — Distributed Rate Limiter
+
+**Lane:** substrate. **Seed:** implement `System.Threading.RateLimiting.RateLimiter` (the BCL
+abstraction — never a bespoke `CheckRateLimitAsync`) over `INCR`+`EXPIRE`. The strongest
+remaining substrate fit: event-driven apps throttle third-party APIs constantly, and the
+interface is Microsoft's, not ours. 026's sibling in every way.
+
+### 028 — Recurring Jobs
+
+**Lane:** connective tissue — the most valuable unbuilt feature. Highway has *delay* but not
+*recurrence*; "every night at 23:59" currently means deploying Hangfire or a cron container
+beside the broker — the second infrastructure Highway exists to delete. **Seed idea (to
+discuss):** a high-level declaration like `[Job(...)]` on a contract, riding delayed delivery
+plus a durable schedule record. Known discussion points, recorded now so they are not
+rediscovered: attribute arguments must be compile-time constants, so `Time.DailyAt(23,59,0)`
+cannot be an attribute argument as written — a cron/time string (`[Job("23:59")]`) or named
+integer arguments can; and F3's lesson applies (a schedule is *tuning* — freezing it into the
+contract assembly means redeploying every referencing node to move a job by an hour), so the
+attribute-vs-options placement is the first design decision, not a detail. Also: singleton
+semantics per schedule (exactly one node fires it) likely depends on 029's primitive.
+
+### 029 — Singleton Runner
+
+**Lane:** substrate (borderline — no standard interface exists, so Highway would own the
+API). **Seed:** "at most one replica runs this" — `SET NX PX` + heartbeat, the natural
+companion to 025's replicas and probably a prerequisite for 028's fire-exactly-once. Must be
+named honestly: *at most one*, never *exactly one*. API shape (an attribute? an
+`IHostedService` wrapper?) is the discussion.
+
+### 030 — Distributed Lock
+
+**Lane:** substrate. **Status: doubtful, and the doubt is shared** — registered so the
+reasoning is in one place when the ask recurs. The pre-existing note in this file's old
+"Later" table still holds: `SET NX EX` alone is not a correctness lock (GC pause or clock
+skew lets two holders proceed), so this ships **only with a fencing token** — which Highway
+*can* mint because it owns the server, and a generic Redis wrapper cannot. The open question
+is whether anything needs it that 029 does not already cover; if no concrete need surfaces
+during the discussions, this folder closes as a cookbook pattern instead of a feature.
+
+---
 
 The next theme is **not** breadth. It is making the delivery Highway already
 promises actually trustworthy, because there are gaps in it today.
@@ -441,7 +538,7 @@ Cache and locking remain reasonable *small* additions later — a lock in
 particular is only worth shipping with a fencing token, which Highway can offer
 because it owns the server and a naive Redis wrapper cannot.
 
-### Next: 013 — Reliable Delivery
+### 013 — Reliable Delivery  ✅  (shipped)
 
 | Part | API | Why |
 |---|---|---|
@@ -449,7 +546,7 @@ because it owns the server and a naive Redis wrapper cannot.
 | **Delayed delivery** | `PublishAsync(msg, delay: ...)` | One parameter on an API that already exists; also gives retry-with-backoff |
 | **Deduplication** | `[Idempotent]` | Closes the gap Highway's own at-least-once redelivery creates |
 
-### Later, and only if wanted
+### Later, and only if wanted — superseded by *Planned: 027–030* above (2026-08-10); kept for the reasoning
 
 | Feature | API | Note |
 |---|---|---|
