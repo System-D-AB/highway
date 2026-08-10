@@ -122,7 +122,36 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
             Error = new ErrorDetail { Code = "INTERNAL_ERROR", Message = "The service returned a non-Output result." },
         };
 
-        var envelopeBytes = HighwayJson.EncodeEnvelope(NodeName, result);
+        byte[] envelopeBytes;
+        try
+        {
+            envelopeBytes = HighwayJson.EncodeEnvelope(NodeName, result);
+        }
+        catch (Exception ex)
+        {
+            // The handler HAS RUN. Before this boundary existed, an unserializable response --
+            // a cyclic object graph, an unsupported type -- threw past the ack, so the request
+            // was redelivered and the already-completed business operation ran again
+            // (concerns.md 9.2). A serialization fault is a fault in the ANSWER, not the work;
+            // the caller gets a deterministic error and the request is acknowledged below,
+            // exactly as if the service had returned that error itself.
+            Logger.LogError(ex,
+                "Service '{Service}' produced a response of type {ResponseType} that could not be " +
+                "serialized (request {RequestId}); replying with RESPONSE_SERIALIZATION_FAILED instead " +
+                "of redelivering — the handler already ran",
+                _descriptor.Name, result.GetType().Name, requestId);
+
+            envelopeBytes = HighwayJson.EncodeEnvelope(NodeName, new GenericOutput
+            {
+                StatusCode = StatusCodes.Status500InternalServerError,
+                Error = new ErrorDetail
+                {
+                    Code = "RESPONSE_SERIALIZATION_FAILED",
+                    Message = $"The service ran, but its response ({result.GetType().Name}) could not " +
+                              $"be serialized: {ex.Message}",
+                },
+            });
+        }
 
         if (IdempotencyWindow is { } completeWindow)
         {

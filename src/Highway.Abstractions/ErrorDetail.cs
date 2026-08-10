@@ -16,7 +16,10 @@ public sealed class ErrorDetail
     public required string Message { get; init; }
 
     /// <summary>
-    /// Optional inner exception details (for debugging, not for production clients).
+    /// Optional stack detail. <b>Never populated for remote callers</b>: a stack trace names
+    /// source paths, internal classes and dependency versions, and the wire is not a log file
+    /// (concerns.md 9.3). The property remains so existing payloads still deserialize and
+    /// local tooling may use it; full traces live in the serving node's own logs.
     /// </summary>
     public string? StackTrace { get; init; }
 }

@@ -113,7 +113,14 @@ public class ServiceExecutorTests : IDisposable
         output.StatusCode.Should().Be(StatusCodes.Status500InternalServerError);
         output.Error.Should().NotBeNull();
         output.Error!.Code.Should().Be("SERVICE_EXCEPTION");
-        output.Error.Message.Should().Be("Oops");
+
+        // The exception TYPE now leads the message: with the stack trace no longer crossing
+        // the wire (concerns.md 9.3), the type is the one diagnostic the caller still gets.
+        output.Error.Message.Should().Be("InvalidOperationException: Oops");
+
+        // The wire is not a log file. Source paths, internal class names and dependency
+        // versions belong in the serving node's own logs, keyed by the request id.
+        output.Error.StackTrace.Should().BeNull();
     }
 
     [Fact]
