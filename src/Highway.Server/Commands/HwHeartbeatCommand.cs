@@ -113,18 +113,45 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
             if (_form == Form.Purge)
             {
                 AddKey(CreateArgSlice(HighwayKeys.NodeChannels(_nodeId)), LockType.Exclusive, StoreType.Main);
+                AddKey(CreateArgSlice(HighwayKeys.NodeSubs(_nodeId)), LockType.Exclusive, StoreType.Main);
 
-                // Read from the main-store mirror, never the object-store set: reading an
+                // Read from the main-store mirrors, never the object-store sets: reading an
                 // object structure in Prepare registers a watch that these very locks would
-                // then fail against (004.1). This is why the mirror key exists at all.
+                // then fail against (004.1). This is why the mirror keys exist at all.
+                //
+                // Two indexes, one target list (025). NodeSubs carries {channel}@{group}
+                // entries and is the authority; NodeChannels(_nodeId) is the pre-025 index
+                // where the group was always named after the node, kept so a broker upgraded
+                // mid-flight still purges what old subscribes recorded.
                 _subscribedChannels = ReadNodeChannels(api, _nodeId);
 
+                var targets = new Dictionary<string, (string Channel, string Group)>(StringComparer.Ordinal);
                 foreach (var channel in _subscribedChannels)
+                    targets[$"{channel}@{_nodeId}"] = (channel, _nodeId);
+
+                api.GET(CreateArgSlice(HighwayKeys.NodeSubs(_nodeId)), out PinnedSpanByte subsRaw);
+                if (subsRaw.Length > 0)
+                {
+                    foreach (var entry in Encoding.UTF8.GetString(subsRaw.ReadOnlySpan)
+                                 .Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        // '@' cannot appear in a channel or group name (018), so the FIRST
+                        // '@' is the only '@' and the split is unambiguous.
+                        var at = entry.IndexOf('@');
+                        if (at > 0 && at < entry.Length - 1)
+                            targets[entry] = (entry[..at], entry[(at + 1)..]);
+                    }
+                }
+
+                _purgeTargets = [.. targets.Values];
+
+                foreach (var (channel, group) in _purgeTargets)
                 {
                     AddKey(CreateArgSlice(HighwayKeys.ChannelGroups(channel)), LockType.Exclusive, StoreType.Object);
                     AddKey(CreateArgSlice(HighwayKeys.ChannelGroupList(channel)), LockType.Exclusive, StoreType.Main);
+                    AddKey(CreateArgSlice(HighwayKeys.NodeChannels(group)), LockType.Exclusive, StoreType.Main);
 
-                    var (objectKeys, mainKeys) = GroupQueueKeys(channel, _nodeId);
+                    var (objectKeys, mainKeys) = GroupQueueKeys(channel, group);
                     foreach (var key in objectKeys)
                         AddKey(CreateArgSlice(key), LockType.Exclusive, StoreType.Object);
                     foreach (var key in mainKeys)
@@ -293,10 +320,34 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
         }
 
         var destroyed = default(RetirementOutcome);
-        foreach (var channel in _subscribedChannels)
-            destroyed += RetireGroup(api, channel, _nodeId);
+        foreach (var (channel, group) in _purgeTargets)
+        {
+            // 025: a shared group outlives any one member. Remove this node's membership;
+            // destroy the queue only when it was the LAST member. The default deployment
+            // (group == node, membership == {node}) takes the destroy path every time,
+            // which is exactly 017's behavior.
+            var membersKey = HighwayKeys.GroupMembers(channel, group);
+            api.GET(CreateArgSlice(membersKey), out PinnedSpanByte membersRaw);
+            string[] members = membersRaw.Length > 0
+                ? Encoding.UTF8.GetString(membersRaw.ReadOnlySpan)
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                : [];
+
+            var remaining = members.Where(m => m != _nodeId).ToArray();
+
+            if (members.Length > 0 && remaining.Length > 0)
+            {
+                // Not the last member: the group lives on for the siblings.
+                api.SET(CreateArgSlice(membersKey), CreateArgSlice(string.Join('\n', remaining)));
+            }
+            else
+            {
+                destroyed += RetireGroup(api, channel, group);
+            }
+        }
 
         api.DELETE(CreateArgSlice(HighwayKeys.NodeChannels(_nodeId)));
+        api.DELETE(CreateArgSlice(HighwayKeys.NodeSubs(_nodeId)));
         RemoveRegistration(api, _nodeId);
 
         _retired = destroyed;
@@ -308,6 +359,9 @@ internal sealed class HwHeartbeatCommand : HighwayCommandBase
 
     /// <summary>What the purge destroyed, for the flight recorder in Finalize.</summary>
     private RetirementOutcome _retired;
+
+    /// <summary>The (channel, group) pairs this purge touches (025) -- union of both indexes.</summary>
+    private (string Channel, string Group)[] _purgeTargets = [];
 
     // -------------------------------------------------------------------------
     // Helpers

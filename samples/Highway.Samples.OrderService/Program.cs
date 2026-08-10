@@ -27,9 +27,15 @@ builder.Logging.SetMinimumLevel(LogLevel.Information);
 
 builder.Services.AddHighway(o =>
 {
-    o.NodeName = node;   // also this node's subscriber-group identity — must be
-                         // unique per running instance
+    o.NodeName = node;   // unique per running instance, always
     o.Server = server;
+
+    // 025: all order-service instances are replicas of ONE logical subscriber.
+    // They compete for each InventoryLow event instead of each receiving a copy —
+    // run two instances, publish 'low widget', and exactly one of them reacts.
+    // Delete this line and each instance becomes its own group: every instance
+    // then gets every event, which is right for things like cache invalidation.
+    o.SubscriptionGroup = "order-service";
 });
 
 Console.WriteLine($"""

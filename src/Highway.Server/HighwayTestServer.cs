@@ -145,6 +145,12 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
                 ?? []);
     }
 
+    /// <summary>
+    /// The in-process flight recorder, for tests that need evidence the wire cannot carry —
+    /// e.g. claims on a derived queue, whose '@' name HW.REPLAY's identifier rules reject (025).
+    /// </summary>
+    internal Observability.FlightRecorder Recorder => _server.Recorder;
+
     /// <summary>Reads the classified catalogue the way the dashboard does (022).</summary>
     internal async Task<IReadOnlyList<Observability.CatalogueEntryDto>> ReadCatalogueAsync()
     {

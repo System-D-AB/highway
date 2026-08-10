@@ -107,6 +107,22 @@ internal static class HighwayKeys
     /// <summary>Per-channel message-ID sequence counter.  hw:ch:{channel}:seq</summary>
     public static string ChannelSeq(string channel) => $"hw:ch:{channel}:seq";
 
+    /// <summary>
+    /// Main-store string of node ids (newline-delimited) currently backing a subscriber group
+    /// (feature 025). Derivable from <c>{channel}@{group}</c>, which is what keeps it
+    /// declarable in <c>Prepare</c>. Group liveness = the youngest member's heartbeat.
+    /// hw:grp:members:{channel}@{group}
+    /// </summary>
+    public static string GroupMembers(string channel, string group) => $"hw:grp:members:{channel}@{group}";
+
+    /// <summary>
+    /// Main-store string of <c>{channel}@{group}</c> entries (newline-delimited) this node
+    /// subscribes through (feature 025). The reverse index <c>BYE PURGE</c> walks: a node can
+    /// back groups not named after it, so <c>NodeChannels(nodeId)</c> alone no longer finds
+    /// them. hw:reg:node:{nodeId}:subs
+    /// </summary>
+    public static string NodeSubs(string nodeId) => $"hw:reg:node:{nodeId}:subs";
+
     // -------------------------------------------------------------------------
     // Registry keys (feature 006)
     //

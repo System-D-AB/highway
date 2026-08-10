@@ -592,3 +592,48 @@ catalog JSON → registry → dashboard, additively; the broker needed no migrat
 multi-line block as a single wrapped line. Structured sinks keep the newlines; the console
 default does not. Legible either way; a per-line log call would trade one log record for
 fifteen.
+
+---
+
+## 2026-08-10 — feature 025 (subscription groups)
+
+Broker + TWO order-service instances (`order-service-1`, `--node order-service-2`), both with
+`SubscriptionGroup = "order-service"`, then three `low` publishes from the storefront.
+
+### Replicas compete instead of duplicating
+
+```
+published:  low widget 3, low bolt 2, low nut 1     (3 events)
+replica 1:  3 x "Inventory low"
+replica 2:  0 x "Inventory low"
+total:      3  — one delivery per event across the group
+```
+
+Before 025 this was 6 — each instance its own group, each getting every event. Distribution
+between replicas is whoever claims first (here replica 1's doorbell consistently won); the
+invariant is the total, not the balance.
+
+### The catalogue shows the group's members
+
+```
+inventory.low@order-service     members: [order-service-1, order-service-2]
+inventory.low@order-service-1   members: [order-service-1]     ← previous run's per-node
+                                                                  group, in the durable data
+                                                                  dir; retires on threshold
+```
+
+That leftover entry is correct behavior worth understanding: the data directory remembers the
+pre-grouping subscription, and 017's retirement (now measuring 025's membership) is exactly
+the mechanism that cleans it up after `SubscriberRetirementThreshold`.
+
+### Findings
+
+**1 — the 024 flake is attributed and fixed.** `ExecuteSubscribersAsync_InvokesAllSubscribers`
+failed once in the full suite: `TestSubscriber`'s static counters were shared with
+`DelegateCompilerTests`, a class xUnit runs in parallel. The compiler tests now use a
+dedicated fixture type — the same rule the loop tests already followed, for the same reason.
+
+**2 — `HW.REPLAY` cannot read derived queues** *(recorded, pre-existing)*. Its identifier
+rules reject `@`, so claims recorded under `{channel}@{group}` are reachable in-process (the
+dashboard) but not over the wire. The idempotency test reads the recorder directly for this
+reason.

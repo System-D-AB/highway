@@ -137,6 +137,7 @@ internal sealed class HwPublishCommand : HighwayCommandBase
             AddKey(CreateArgSlice(HighwayKeys.QueueNodeList(derivedName)), LockType.Exclusive, StoreType.Main);
             AddKey(CreateArgSlice(HighwayKeys.QueueProcessing(derivedName, group)), LockType.Exclusive, StoreType.Object);
             AddKey(CreateArgSlice(HighwayKeys.NodeChannels(group)), LockType.Exclusive, StoreType.Main);
+            AddKey(CreateArgSlice(HighwayKeys.GroupMembers(_channel, group)), LockType.Exclusive, StoreType.Main);
         }
 
         // Automatic retirement (017) rides here rather than on a timer. A publish already reads
@@ -145,9 +146,10 @@ internal sealed class HwPublishCommand : HighwayCommandBase
         // publish that WOULD be blocked by a dead subscriber is the one that clears it.
         //
         // Liveness evidence, not a consumption gap: a group nobody has consumed from is not
-        // dead, but a group whose node has stopped heartbeating is. RabbitMQ's x-expires and
-        // Azure's AutoDeleteOnIdle cannot tell those apart; Highway can, because a group IS a
-        // node (018).
+        // dead, but a group whose every backing node has stopped heartbeating is. RabbitMQ's
+        // x-expires and Azure's AutoDeleteOnIdle cannot tell those apart; Highway can,
+        // because groups have MEMBERS with heartbeats (025) -- one node until replicas share
+        // a SubscriptionGroup, and the youngest member's beat keeps the whole group alive.
         if (_opts.SubscriberRetirementThreshold > TimeSpan.Zero && _groups.Length > 0)
         {
             // Retirement unregisters the group, which means touching the object-store SET that
@@ -162,21 +164,47 @@ internal sealed class HwPublishCommand : HighwayCommandBase
 
             foreach (var group in _groups)
             {
-                var regKey = CreateArgSlice(HighwayKeys.RegistrationNode(group));
-                AddKey(regKey, LockType.Exclusive, StoreType.Main);
+                // 025: liveness is the YOUNGEST member's heartbeat. Membership comes from the
+                // main-store mirror (readable here in Prepare); a group with no membership
+                // record predates 025, and its name is a node name -- the 017 rule, kept as
+                // the fallback so an upgraded broker retires legacy groups exactly as before.
+                api.GET(CreateArgSlice(HighwayKeys.GroupMembers(_channel, group)),
+                    out PinnedSpanByte membersRaw);
 
-                api.GET(regKey, out PinnedSpanByte record);
+                string[] members = membersRaw.Length > 0
+                    ? Encoding.UTF8.GetString(membersRaw.ReadOnlySpan)
+                        .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                    : [group];
 
-                // No registration at all is NOT evidence of death: a subscriber that never
-                // registered a catalog still has a group. Only a record that exists and has
-                // gone stale proves the node was here and stopped.
-                if (record.Length >= NodeRegistration.HeaderSize
-                    && NodeRegistration.IsStale(record.ReadOnlySpan, now, _opts.SubscriberRetirementThreshold))
+                var anyRecord = false;
+                var allStale = true;
+                var allPastHalf = true;
+
+                foreach (var member in members)
                 {
+                    var regKey = CreateArgSlice(HighwayKeys.RegistrationNode(member));
+                    AddKey(regKey, LockType.Exclusive, StoreType.Main);
+
+                    api.GET(regKey, out PinnedSpanByte record);
+
+                    // No registration at all is NOT evidence of death: a subscriber that
+                    // never registered a catalog still has a group. Only a record that exists
+                    // and has gone stale proves the member was here and stopped.
+                    if (record.Length < NodeRegistration.HeaderSize) continue;
+
+                    anyRecord = true;
+                    if (!NodeRegistration.IsStale(record.ReadOnlySpan, now, _opts.SubscriberRetirementThreshold))
+                        allStale = false;
+                    if (!NodeRegistration.IsStale(record.ReadOnlySpan, now, halfThreshold))
+                        allPastHalf = false;
+                }
+
+                if (anyRecord && allStale)
+                {
+                    // Every member that was ever here has been silent past the threshold.
                     dead.Add(group);
                 }
-                else if (record.Length >= NodeRegistration.HeaderSize
-                         && NodeRegistration.IsStale(record.ReadOnlySpan, now, halfThreshold))
+                else if (anyRecord && allPastHalf)
                 {
                     // Past half the threshold: still alive as far as this feature is concerned,
                     // but worth seeing in a replay before its backlog disappears.

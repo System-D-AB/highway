@@ -39,7 +39,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.3**
+**Current version: 4.4**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,8 +47,9 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.4 | 025 | **Subscription groups.** `HW.SUBSCRIBE` gains an optional third argument (arity 3 → -3): the subscribing **node**, so the server can track which nodes back a group. Absent means the pre-025 identity — the group is the node — so an old client's two-argument subscribe is unchanged in meaning. Adds two mirror keys: `hw:grp:members:{channel}@{group}` (nodes backing a group) and `hw:reg:node:{nodeId}:subs` (`{channel}@{group}` entries a node subscribes through). **Two behaviour changes:** automatic retirement now measures a group by its **youngest member's** heartbeat (a group with no membership record falls back to the 017 rule — group name as node name), and `HW.HEARTBEAT BYE PURGE` destroys a group's queue only when the departing node was its **last member** — otherwise it removes the membership and the group lives on for the siblings. Client-side, replicas sharing a `SubscriptionGroup` claim with the **group** as the claimant, competing through the ordinary queue machinery; the default (group = node name) is byte-identical to 018's wire traffic. Additive. |
 | 4.3 | 019 | **Long-running tasks.** Adds `HW.TOUCH SVC/Q`, which moves a claimed entry's timestamp forward so a handler that outlives `Lease` is not duplicated while it is still running. No new field, framing or key — the sweep already decides expiry from that timestamp. Adds the `ProcessingCapExceeded` recorder event. **One behaviour change:** the client renews automatically by default, so a **hung** handler is now recovered after `MaxProcessingTime` (15 min) rather than after `Lease` (5 min). Deliberate: a slow-but-working handler executed five times and dead-lettered corrupts data, while a hung one taking ten minutes longer to recover is a delay. `MaxProcessingTime = TimeSpan.Zero` restores the old behaviour exactly. |
-| 4.2 | 017 | **Node decommissioning.** Adds `HW.HEARTBEAT <node> BYE PURGE` — a third form that retires a node permanently, destroying its subscriber queues and returning `[groups, messages, bytes]`. Plain `BYE` is unchanged and still preserves a subscriber's backlog: `BYE` is "I am stopping", `PURGE` is "I am never coming back". Adds the `hw:reg:node:{nodeId}:channels` mirror key and the `GroupRetired` recorder event. **A subscriber group whose node has been absent past `SubscriberRetirementThreshold` (24h default) is now retired automatically**, which is what stops one dead subscriber blocking a channel once its queue reaches `MaxQueueBytes`. Additive — no existing command, reply or entry framing changed. |
+| 4.2 | 017 | **Node decommissioning.** Adds `HW.HEARTBEAT <node> BYE PURGE` — a third form that retires a node permanently, destroying its subscriber queues and returning `[groups, messages, bytes]`. Plain `BYE` is unchanged and still preserves a subscriber's backlog: `BYE` is "I am stopping", `PURGE` is "I am never coming back". Adds the `hw:reg:node:{nodeId}:channels` mirror key and the `GroupRetired` recorder event. *(Since 4.4/025: a purge destroys only groups whose **last member** is departing — a shared group loses the membership and lives on.)* **A subscriber group whose node has been absent past `SubscriberRetirementThreshold` (24h default) is now retired automatically**, which is what stops one dead subscriber blocking a channel once its queue reaches `MaxQueueBytes`. Additive — no existing command, reply or entry framing changed. |
 | 4.1 | 016 | **Durable by default, and bounded.** No command changes. A server built with no configuration now creates a data directory beside the executable and enables AOF, so queued work survives a restart; memory-only is asked for by name (`Ephemeral()`). Adds the `HW_QUEUE_FULL` error and the `hw:q:{queue}:bytes` counter key. A full queue **refuses** rather than dropping its oldest entry, and a publish refuses in full when **any** group's queue is full, naming that group — a fan-out reaches every registered group or none. Additive: no existing command, reply or entry framing changed. |
 | 4.0 | 018 | **Pub/Sub Unification.** Removes `HW.RECEIVE` and `HW.RACK` — subscribers now consume through `HW.QCLAIM`/`HW.QACK` on derived queues named `{channel}@{group}`. Removes two entry framings (channel entry, group processing entry); `Envelope` is down to two. `HW.FAIL` and `HW.DLQ` lose the `CH` target — a group **is** a queue, targeted as `Q`. The `hw:ch:{channel}:grp:{group}:*` key space, `hw:ch:{channel}:delayed`, and the `hw:door:ch:{channel}:grp:{group}` doorbells are all gone. `@` is reserved in identifiers. **Three semantic changes (R5):** (1) batch consumption is lost — one claim per round trip replaces `HW.RECEIVE`'s batch; (2) subscriber ordering is preserved by default (concurrency 1 per group); (3) deferred publish resolves groups at **publish time**, not promotion time — a group registering during the delay does not receive the message. **Major**: removes two commands, two framings, one key space; existing channel data becomes unreachable. A broker started against pre-018 data refuses with a diagnostic message. |
 | 3.1 | 015 | **Diagnosable failures.** Adds `HW.FAIL`, which records the exception that caused a delivery to fail without acknowledging the message, and an optional **failure block** on every entry framing. Adds the `DeliveryFailed` recorder event and new dead-letter fields. Additive: the failure block is a *trailer*, so an entry written without one decodes byte-for-byte as before — unlike 013's attempt count, which changed the framings themselves. No existing command, reply or key changed. |
@@ -72,7 +73,7 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.DEQUEUE` | 3 | 1 | Claim the next request for a node; sweeps expired leases and dead nodes |
 | `HW.ACK` | 4 | 1 | Acknowledge a claimed request |
 | `HW.PUBLISH` | -3 | 2 | Durable fan-out to every subscriber group, immediately or at a future time |
-| `HW.SUBSCRIBE` | 3 | 1 | Register a subscriber group |
+| `HW.SUBSCRIBE` | -3 | 1 | Register a subscriber group, and optionally the node backing it |
 | `HW.UNSUBSCRIBE` | 3 | 1 | Remove a subscriber group and delete its state |
 | `HW.HEARTBEAT` | -2 | 4 | Register a catalog, prove liveness, depart, or retire permanently |
 | `HW.DISCOVER` | 2 | 1 | Live nodes hosting a service |
@@ -368,19 +369,27 @@ Highway previously held such messages in a per-channel backlog that a future sub
 ### HW.SUBSCRIBE
 
 ```
-HW.SUBSCRIBE <channel> <group>   →   +OK
+HW.SUBSCRIBE <channel> <group>          →   +OK
+HW.SUBSCRIBE <channel> <group> <node>   →   +OK      (025)
 ```
 
-Registers a subscriber group. Creates the derived queue `{channel}@{group}` if the group is genuinely new.
+Registers a subscriber group — and, with the third argument, the node's **membership** in it.
+Creates the derived queue `{channel}@{group}` if the group is genuinely new.
 
 | | |
 |---|---|
-| **Arguments** | Both identifiers. |
+| **Arguments** | All identifiers. `node` optional (025): the subscribing node. **Absent means the group is the node** — the pre-025 identity, preserved so old clients keep their exact semantics. |
 | **Reply** | `+OK` |
-| **Keys written** | `hw:ch:{channel}:groups`, `hw:ch:{channel}:grplist` |
-| **Idempotency** | **Idempotent.** Re-subscribing an existing group returns `+OK` and adds nothing. |
+| **Keys written** | `hw:ch:{channel}:groups`, `hw:ch:{channel}:grplist`, `hw:reg:node:{group}:channels`; with `node`: `hw:grp:members:{channel}@{group}`, `hw:reg:node:{node}:subs` |
+| **Idempotency** | **Idempotent.** Re-subscribing an existing group or member returns `+OK` and adds nothing. |
 
 Group registration is durable and survives a restart when AOF is enabled.
+
+**A group may be backed by several nodes** (025): replicas of one logical subscriber each
+subscribe with the same `group` and their own `node`. They compete for the group's single
+copy of each message through the ordinary queue machinery — **the claimant is the group**,
+so all replicas share `hw:q:{channel}@{group}:proc:{group}`. Group liveness for automatic
+retirement is the youngest member's heartbeat; see [Invariants](#invariants).
 
 ### HW.UNSUBSCRIBE
 
@@ -991,6 +1000,7 @@ Every key Highway creates lives under the `hw:` namespace and cannot collide wit
 | `hw:ch:{channel}:groups` | Object | Set | Registered subscriber groups |
 | `hw:ch:{channel}:grplist` | Main | String | Newline-delimited mirror of the groups set |
 | `hw:ch:{channel}:seq` | Main | Integer | Message-ID counter |
+| `hw:grp:members:{channel}@{group}` | Main | String | Newline-delimited node IDs backing the group (025). Deleted with the group |
 
 A subscriber group's queue, processing list, dead letters and delayed set all live under `hw:q:{channel}@{group}:*` — the standard queue key space. The derived queue name `{channel}@{group}` is what makes the `@` reservation mandatory (see [Identifiers](#identifiers)).
 
@@ -1001,6 +1011,7 @@ A subscriber group's queue, processing list, dead letters and delayed set all li
 | `hw:reg:node:{nodeId}` | Main | String | Registration record: last-seen timestamp + catalog |
 | `hw:reg:nodes` | Main | String | Newline-delimited list of registered node IDs |
 | `hw:reg:svc:{service}` | Main | String | Newline-delimited node IDs hosting the service |
+| `hw:reg:node:{nodeId}:subs` | Main | String | Newline-delimited `{channel}@{group}` entries the node subscribes through (025) — the index `BYE PURGE` walks |
 
 ### Mirror keys, and why they exist
 
@@ -1085,6 +1096,18 @@ A consumer must send `HW.QACK` only **after** the message has been fully dispatc
 Acknowledging first turns a crash mid-dispatch into silent loss. Acknowledging last turns it into redelivery, which at-least-once permits.
 
 *Enforced by* `SubscriptionWorkerLoop`'s structure: `ProcessAsync` calls `ExecuteSubscribersAsync` first, then `QAckAsync` only if all handlers succeed.
+
+### A group dies only when its last member is gone (025)
+
+A subscriber group's queue is destroyed exactly when its **membership reaches zero** — by
+`BYE PURGE` from the last member, by `HW.UNSUBSCRIBE` (which is explicit and total), or by
+automatic retirement once **every** member's heartbeat is older than
+`SubscriberRetirementThreshold`. One live member keeps the group — and every sibling's
+pending messages — alive. A group with no membership record (pre-025) is measured by the
+017 rule: its name is treated as a node name.
+
+*Enforced by* `SubscriptionGroupTests.Purge_FromNonLastMember_PreservesTheGroup` and
+`SubscriptionGroupTests.Retirement_SparesGroupWithOneLiveMember`.
 
 ### Pruning requeues RPC work but never deletes subscriber groups
 

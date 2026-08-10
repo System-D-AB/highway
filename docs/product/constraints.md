@@ -130,7 +130,8 @@ free, and dead-letters one bad slice without killing the job.
 
 ### C2.1 — A published message is delivered at least once to every group registered at publish time
 
-**Status: Met.**
+**Status: Met** — and since feature 025, **the fan-out unit is the subscription group, not the
+node**.
 
 Fan-out across groups, atomic — all groups or none. Each group has its own **queue** (named
 `{channel}@{group}`) with the same lease, acknowledgement, attempt counter and dead-letter
@@ -138,6 +139,12 @@ list as any other queue. One group failing has no effect on another.
 
 **"Delivered" is per group, never "delivered to anyone".** First-acknowledgement-wins would
 let a fast subscriber deny a slow one the message, which is not fan-out.
+
+**Within a group, replicas compete** (025). Nodes sharing a `SubscriptionGroup` claim from the
+group's one queue with the group as the claimant; each message is processed once per group, by
+whichever replica claims it. The default — group = node name — keeps every node its own group,
+which is the pre-025 behavior exactly. `[Idempotent]` markers are group-scoped, so a redelivery
+suppressed for one replica is suppressed for its siblings too.
 
 ### C2.2 — A delivered and acknowledged message is gone
 
@@ -155,11 +162,14 @@ deploy loses nothing. That was unqualified until 017 and it could not stay that 
 to hold messages forever, for a node that will never return, is a guarantee to fill a disk and —
 after 016 — to block the channel for every healthy subscriber on it.
 
-The bound is **evidence-based, not a blind idle timer**. A group is retired when the node that
-owns it has been absent from the heartbeat registry past `SubscriberRetirementThreshold`
-(24 hours by default). A group nobody has *consumed* from is not dead; a group whose node has
-stopped *heartbeating* is. RabbitMQ's `x-expires` and Azure's `AutoDeleteOnIdle` cannot tell
-those apart — Highway can, because a group is a node (018).
+The bound is **evidence-based, not a blind idle timer**. A group is retired when **every node
+backing it** has been absent from the heartbeat registry past `SubscriberRetirementThreshold`
+(24 hours by default) — since 025 liveness is the *youngest member's* heartbeat, so one live
+replica keeps the whole group and every sibling's pending messages alive. A group nobody has
+*consumed* from is not dead; a group whose every member has stopped *heartbeating* is.
+RabbitMQ's `x-expires` and Azure's `AutoDeleteOnIdle` cannot tell those apart — Highway can,
+because groups have members with heartbeats (018's insight, generalized by 025). `BYE PURGE`
+destroys a group's queue only when the departing node is its **last member**.
 
 Three ways a group is retired: the node says so (`CleanAndByeForeverAsync`), an operator says it
 (`HW.HEARTBEAT <node> BYE PURGE`), or the broker decides after the threshold. Plain `BYE`
@@ -456,7 +466,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C1.6 | A handler may outlive the lease without duplication | ✅ Met (019) |
 | C2.1 | At-least-once per registered group | ✅ Met |
 | C2.2 | Acknowledged means gone | ✅ Met |
-| C2.3 | A down subscriber receives what it missed, until its node is declared gone | ✅ Met, bounded (017) |
+| C2.3 | A down subscriber receives what it missed, until its group's last member is declared gone | ✅ Met, bounded (017, group-aware since 025) |
 | C2.4 | Not a store for absent subscribers | ✅ Met |
 | C2.5 | Not a replayable log | ✅ Met |
 | C3.1 | In-flight requests survive departure | ✅ Met |
@@ -507,6 +517,7 @@ get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the
 |---|---|---|
 | **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in `docs/features/015-recoverability/requirements.md` § Deferred |
 | **Polly / `Microsoft.Extensions.Resilience`** | 015 | The .NET built-in for retry pipelines and the obvious "does the framework already do this?" answer. Moot until the tiers return. Highway takes no dependency beyond Garnet and StackExchange.Redis, so it is a real trade rather than a free win |
+| **Per-subscriber `SubscriptionGroup` override** | 025, D5 | One node-wide option teaches the model ("this process is one replica of `billing`"); a per-subscriber-class override re-opens the which-identity-am-I confusion 025 exists to close, and no review produced a concrete need. Registered until one does |
 | **`HostingMode` default flip to `Declared`** | 024, D1 | Changing the default silently changes what deployed processes host — the exact surprise 024 exists to end — and under a test runner the entry assembly is `testhost`, so the flip breaks every fixture-hosting test that has not declared its assembly. A major-version change, made when `Implicit`'s startup warning has had time to teach |
 | **A longer-retention message index** | 023, Open Decision 3 | The dashboard's message view is bounded by the flight recorder's window, so history older than that is simply gone. A durable index would fix it and would be **new unbounded storage inside a diagnostic** — the exact cost feature 016 spent its length measuring. Registered, not built |
 | **A node → message index** | 023 T6 | The node page projects every entity and filters, because nothing maps a node to the messages it handled. Affordable only because the recorder is bounded. An index would be new storage for a view |

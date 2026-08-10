@@ -210,6 +210,25 @@ public sealed class HighwayOptions
     public List<Func<Assembly, bool>> ExcludedAssemblies { get; } = [];
 
     /// <summary>
+    /// The logical consumer identity for pub/sub (feature 025). Replicas that share a
+    /// subscription group <b>compete</b> for one copy of each published message; nodes with
+    /// distinct groups each receive <b>their own copy</b>.
+    ///
+    /// <para>Default <c>null</c> → the group is <see cref="NodeName"/>, which reproduces the
+    /// original behavior exactly: every node is its own group, every node gets a copy. Set it
+    /// to one stable name per logical application ("billing") and scale replicas freely —
+    /// they will share the group's queue through the ordinary claim machinery.</para>
+    ///
+    /// <para>Validated by the same identifier rules as <see cref="NodeName"/>, including the
+    /// <c>@</c> rejection — the group is embedded in the derived queue name
+    /// <c>{channel}@{group}</c>.</para>
+    /// </summary>
+    public string? SubscriptionGroup { get; set; }
+
+    /// <summary>The group pub/sub actually uses: <see cref="SubscriptionGroup"/> or <see cref="NodeName"/>.</summary>
+    internal string EffectiveSubscriptionGroup => SubscriptionGroup ?? NodeName;
+
+    /// <summary>
     /// Which assemblies may contribute <b>handlers</b> to this process (feature 024).
     /// Contract discovery ignores this setting — see <see cref="Client.HostingMode"/>.
     /// Default: <see cref="Client.HostingMode.Implicit"/>, the original behavior.

@@ -210,7 +210,7 @@ public sealed class HighwayServer : IHighwayServer
         new("HW.REPLY",       3, () => new HwReplyCommand(opts, doorbell, recorder)),
         new("HW.DEQUEUE",     3, () => new HwDequeueCommand(opts, recorder)),
         new("HW.ACK",         4, () => new HwAckCommand(opts, recorder)),
-        new("HW.SUBSCRIBE",   3, () => new HwSubscribeCommand(opts, recorder)),
+        new("HW.SUBSCRIBE",  -3, () => new HwSubscribeCommand(opts, recorder)),   // 025: optional node (membership); position unchanged
         new("HW.UNSUBSCRIBE", 3, () => new HwUnsubscribeCommand(opts, recorder)),
         new("HW.PUBLISH",    -3, () => new HwPublishCommand(opts, doorbell, recorder)),
 

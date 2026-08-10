@@ -41,31 +41,31 @@ public class DelegateCompilerTests
     [Fact]
     public async Task CompileSubscriberDelegate_InvokesCorrectly()
     {
-        TestSubscriber.Reset();
-        var del = _compiler.CompileSubscriberDelegate(typeof(TestSubscriber), typeof(TestEvent));
+        CompilerOnlySubscriber.Reset();
+        var del = _compiler.CompileSubscriberDelegate(typeof(CompilerOnlySubscriber), typeof(TestEvent));
 
-        var subscriber = new TestSubscriber();
+        var subscriber = new CompilerOnlySubscriber();
         var message = new TestEvent { Data = "test-data" };
 
         await del(subscriber, message, CancellationToken.None);
 
-        TestSubscriber.CallCount.Should().Be(1);
-        TestSubscriber.LastData.Should().Be("test-data");
+        CompilerOnlySubscriber.CallCount.Should().Be(1);
+        CompilerOnlySubscriber.LastData.Should().Be("test-data");
     }
 
     [Fact]
     public async Task CompileSubscriberDelegate_MultipleInvocations_Accumulate()
     {
-        TestSubscriber.Reset();
-        var del = _compiler.CompileSubscriberDelegate(typeof(TestSubscriber), typeof(TestEvent));
+        CompilerOnlySubscriber.Reset();
+        var del = _compiler.CompileSubscriberDelegate(typeof(CompilerOnlySubscriber), typeof(TestEvent));
 
-        var subscriber = new TestSubscriber();
+        var subscriber = new CompilerOnlySubscriber();
 
         await del(subscriber, new TestEvent { Data = "first" }, CancellationToken.None);
         await del(subscriber, new TestEvent { Data = "second" }, CancellationToken.None);
 
-        TestSubscriber.CallCount.Should().Be(2);
-        TestSubscriber.LastData.Should().Be("second");
+        CompilerOnlySubscriber.CallCount.Should().Be(2);
+        CompilerOnlySubscriber.LastData.Should().Be("second");
     }
 
     [Fact]
@@ -76,4 +76,25 @@ public class DelegateCompilerTests
 
         del1.Should().NotBeSameAs(del2);
     }
+
+/// <summary>
+/// Dedicated to this class. It used to share <c>TestSubscriber</c>'s static counters with
+/// <c>ServiceExecutorTests</c> — two classes xUnit runs in PARALLEL — which produced a
+/// once-per-many-runs flake (first seen unattributed during 024, attributed during 025).
+/// Same rule as the loop tests' dedicated types, for the same reason.
+/// </summary>
+public sealed class CompilerOnlySubscriber : Highway.Abstractions.ISubscribe<TestFixtures.TestEvent>
+{
+    public static int CallCount;
+    public static string? LastData;
+
+    public Task SubscribeAsync(TestFixtures.TestEvent message, CancellationToken ct = default)
+    {
+        CallCount++;
+        LastData = message.Data;
+        return Task.CompletedTask;
+    }
+
+    public static void Reset() { CallCount = 0; LastData = null; }
+}
 }

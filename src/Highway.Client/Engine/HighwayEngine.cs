@@ -141,14 +141,19 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 wakes.Add(wake);
             }
 
+            // 025: the pub/sub identity. SubscriptionGroup names the logical consumer;
+            // NodeName is only the default. Loops, doorbells and HW.SUBSCRIBE below must all
+            // use the same value, or claims would target a queue nothing subscribed.
+            var group = _options.EffectiveSubscriptionGroup;
+
             foreach (var channel in _catalog.AllChannels)
             {
                 var wake = new LoopWake();
                 // 018 T2: Subscribers consume through the queue engine via SubscriptionWorkerLoop.
-                // The derived queue name is {channel}@{nodeName}.
+                // The derived queue name is {channel}@{group} (025).
                 // 018 T3: Concurrency defaults to 1 to preserve sequential ordering.
                 var loop = new SubscriptionWorkerLoop(
-                    channel, _connection, executor, _options.NodeName,
+                    channel, _connection, executor, group,
                     1, wake,
                     _loggerFactory.CreateLogger($"Highway.Subscriber.{channel.Name}"),
                     _options.LeaseRenewalInterval, _options.MaxProcessingTime);
@@ -213,10 +218,12 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
 
             await watcher.StartAsync(ct).ConfigureAwait(false);
 
-            // 3. Register this node's subscriber groups (group = NodeName).
+            // 3. Register this node's subscriber groups (025: the group is the logical
+            // consumer — SubscriptionGroup, or NodeName by default — and the node identifies
+            // itself so the server can track membership for group-aware retirement).
             foreach (var channel in _catalog.AllChannels)
             {
-                await _connection.SubscribeGroupAsync(channel.Name, _options.NodeName, ct).ConfigureAwait(false);
+                await _connection.SubscribeGroupAsync(channel.Name, group, _options.NodeName, ct).ConfigureAwait(false);
             }
 
             // 4. Sweeper last — once everything can be woken.
