@@ -24,6 +24,30 @@ Assembly scanning discovers your services, subscribers and processors at
 startup — it covers every referenced assembly that references
 `Highway.Abstractions`. Nothing is registered by hand.
 
+## The Four Rules
+
+The whole mental model, stated once:
+
+1. **Contracts are the schema.** They declare what exists, live in packages that reference
+   only `Highway.Abstractions`, and host nothing. Every process that references a contract
+   can address its route — in every configuration.
+2. **Handlers declare capability.** A process hosts the handlers in its scanned assemblies.
+   By default that includes referenced libraries (`HostingMode.Implicit` — Highway warns at
+   startup when a library contributes handlers by reference alone); switch to
+   `HostingMode.Declared` to host only the entry assembly plus libraries that consented via
+   `[assembly: HighwayHostModule]` or `options.HostAssembly(...)`.
+3. **The verb decides sharing.** `ExecuteAsync` and `SendAsync` handlers **compete** across
+   every node that hosts them — deploy more copies and they share the work. `PublishAsync`
+   delivers **one copy per subscriber group**. Today the group is the node name, so every
+   subscribing node gets its own copy; feature 025 separates the two so replicas can share.
+4. **Verbs declare semantics.** Need the answer → `ExecuteAsync`. One handler →
+   `SendAsync`. Every subscriber → `PublishAsync`.
+
+At startup every node logs its **topology manifest** — what it PROVIDES (hosted services,
+processors, subscriptions, each with its source assembly) and what it CAN USE (routes whose
+contracts it references). The same manifest is available in code via
+`IHighwayEngine.Topology`, and the dashboard's node page shows both halves.
+
 ---
 
 ## RPC — `ExecuteAsync`

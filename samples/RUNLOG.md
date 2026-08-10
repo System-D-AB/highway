@@ -553,3 +553,42 @@ non-interactively. Worth knowing before concluding the dashboard is broken.
 **3 — group queues appear under their raw name** *(recorded, cosmetic)*. `inventory.low@order-service-1`
 is what a subscriber's queue is called, and it is truthful, but it reads as an implementation
 detail beside `orders.create`. The catalogue already classifies these; the node page does not.
+
+---
+
+## 2026-08-10 — feature 024 (hosting boundaries and topology)
+
+Broker + order service, default configuration — nothing in the samples changed.
+
+### The boot log now answers the topology question
+
+```
+Highway topology — node order-service-1
+  PROVIDES
+    rpc    orders.create      CreateOrderService      (Highway.Samples.OrderService)
+    rpc    orders.get         GetOrderService         (Highway.Samples.OrderService)
+    queue  invoices.generate  InvoiceProcessor        (Highway.Samples.OrderService)
+    queue  poison.queue       AlwaysFailsProcessor    (Highway.Samples.OrderService)
+    sub    inventory.low      InventoryLowSubscriber  (...)  group=order-service-1
+  CAN USE (references the contract; not proof of calling)
+    rpc    orders.cancel
+    chan   orders.placed
+```
+
+CAN USE is exactly right for this node: `orders.cancel` is a contract nobody hosts (the
+fast-fail demo), and `orders.placed` is the channel this node publishes but does not
+subscribe to. Both derived from references alone.
+
+### Findings
+
+**1 — zero reference-hosted warnings, as required.** The samples' handlers live in their
+entry assemblies, so R2.3's "the samples must boot without warnings" held on first contact.
+
+**2 — the can-use half crosses the wire.** `/api/node/order-service-1` returns
+`canUse: { services: ["orders.cancel"], channels: ["orders.placed"] }` — client scan →
+catalog JSON → registry → dashboard, additively; the broker needed no migration.
+
+**3 — the manifest logs as one line** *(cosmetic, recorded)*. The console logger renders the
+multi-line block as a single wrapped line. Structured sinks keep the newlines; the console
+default does not. Legible either way; a per-line log call would trade one log record for
+fifteen.

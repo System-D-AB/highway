@@ -11,32 +11,96 @@ namespace Highway.Client.Scanning;
 internal sealed class DefaultTypeScanner : ITypeScanner
 {
     public ScanResult Scan(IReadOnlyList<Assembly> assemblies)
-    {
-        var allTypes = assemblies
-            .SelectMany(a =>
-            {
-                try { return a.GetTypes(); }
-                catch (ReflectionTypeLoadException ex) { return ex.Types.OfType<Type>(); }
-            })
-            .Where(t => t.IsClass && !t.IsAbstract)
-            .ToList();
+        => Scan(assemblies, assemblies);
 
-        return Build(allTypes);
+    /// <summary>
+    /// Scans with the two assembly sets feature 024 separates: <b>contracts</b> come from the
+    /// full reference closure in every <c>HostingMode</c> (that reach is load-bearing — it is
+    /// what makes a caller-only node work); <b>handlers</b> come only from assemblies the
+    /// process consented to host.
+    ///
+    /// <para>Handlers found in the excluded remainder are not discovered-and-dropped — they
+    /// are recorded in <see cref="ScanResult.SkippedHandlerAssemblies"/> so the engine can say
+    /// what is not being hosted and why. Silence never hides a skipped handler (013's rule,
+    /// applied to <i>not</i> doing something).</para>
+    /// </summary>
+    public ScanResult Scan(
+        IReadOnlyList<Assembly> contractAssemblies,
+        IReadOnlyList<Assembly> handlerAssemblies)
+    {
+        var contractTypes = TypesOf(contractAssemblies);
+
+        var handlerSet = handlerAssemblies.ToHashSet();
+        var handlerTypes = ReferenceEquals(contractAssemblies, handlerAssemblies)
+            ? contractTypes
+            : TypesOf(handlerAssemblies);
+
+        var excluded = contractAssemblies.Where(a => !handlerSet.Contains(a)).ToList();
+
+        return Build(contractTypes, handlerTypes, DiscoverSkipped(excluded));
     }
 
     /// <summary>Internal method for testing — scans a specific list of types.</summary>
     internal ScanResult ScanTypes(IReadOnlyList<Type> types)
-        => Build(types.Where(t => t.IsClass && !t.IsAbstract).ToList());
-
-    private static ScanResult Build(List<Type> allTypes) => new()
     {
-        Services = DiscoverServices(allTypes),
-        Channels = DiscoverChannels(allTypes),
-        RequestContracts = DiscoverRequestContracts(allTypes),
-        MessageContracts = DiscoverMessageContracts(allTypes),
-        Queues = DiscoverQueues(allTypes),
-        QueueContracts = DiscoverQueueContracts(allTypes),
+        var filtered = types.Where(t => t.IsClass && !t.IsAbstract).ToList();
+        return Build(filtered, filtered, []);
+    }
+
+    /// <summary>Internal method for testing — separate contract and handler type lists.</summary>
+    internal ScanResult ScanTypes(IReadOnlyList<Type> contractTypes, IReadOnlyList<Type> handlerTypes)
+        => Build(
+            contractTypes.Where(t => t.IsClass && !t.IsAbstract).ToList(),
+            handlerTypes.Where(t => t.IsClass && !t.IsAbstract).ToList(),
+            []);
+
+    private static List<Type> TypesOf(IReadOnlyList<Assembly> assemblies) => assemblies
+        .SelectMany(a =>
+        {
+            try { return a.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { return ex.Types.OfType<Type>(); }
+        })
+        .Where(t => t.IsClass && !t.IsAbstract)
+        .ToList();
+
+    private static ScanResult Build(
+        List<Type> contractTypes, List<Type> handlerTypes, IReadOnlyList<SkippedHandlerAssembly> skipped) => new()
+    {
+        Services = DiscoverServices(handlerTypes),
+        Channels = DiscoverChannels(handlerTypes),
+        RequestContracts = DiscoverRequestContracts(contractTypes),
+        MessageContracts = DiscoverMessageContracts(contractTypes),
+        Queues = DiscoverQueues(handlerTypes),
+        QueueContracts = DiscoverQueueContracts(contractTypes),
+        SkippedHandlerAssemblies = skipped,
     };
+
+    /// <summary>
+    /// Structural handler detection for the skip report. Deliberately NOT the full discovery
+    /// pipeline: an excluded assembly is not being hosted, so its handlers must not be
+    /// validated (a missing attribute there is not this process's error) — only named.
+    /// </summary>
+    internal static bool LooksLikeHandler(Type type)
+        => type.GetInterfaces().Any(i => i.IsGenericType
+               && (i.GetGenericTypeDefinition() == typeof(IProcess<>)
+                || i.GetGenericTypeDefinition() == typeof(ISubscribe<>)))
+           || FindGenericBaseType(type, typeof(AsyncService<,>)) is not null;
+
+    private static IReadOnlyList<SkippedHandlerAssembly> DiscoverSkipped(List<Assembly> excluded)
+        => excluded.Count == 0 ? [] : DiscoverSkippedFromTypes(TypesOf(excluded));
+
+    /// <summary>Split out for tests: fixture types stand in for an excluded assembly's types.</summary>
+    internal static IReadOnlyList<SkippedHandlerAssembly> DiscoverSkippedFromTypes(IEnumerable<Type> types)
+    {
+        return types
+            .Where(LooksLikeHandler)
+            .GroupBy(t => t.Assembly)
+            .Select(g => new SkippedHandlerAssembly(
+                g.Key.GetName().Name ?? g.Key.FullName ?? "<unknown>",
+                [.. g.Select(t => t.FullName ?? t.Name).Order()]))
+            .OrderBy(a => a.AssemblyName, StringComparer.Ordinal)
+            .ToList();
+    }
 
     /// <summary>
     /// Every message type carrying <c>[Queue]</c>, whether or not this node processes it

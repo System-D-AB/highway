@@ -20,4 +20,25 @@ public sealed class CatalogInfo
     /// </summary>
     [JsonPropertyName("queues")]
     public IReadOnlyList<CatalogQueueEntry> Queues { get; init; } = [];
+
+    /// <summary>
+    /// Routes this node can address because it references their contracts (feature 024).
+    /// <b>Addressability, not proof of calling.</b> Optional for backward compatibility: a
+    /// pre-024 catalog omits it and must still deserialize.
+    /// </summary>
+    [JsonPropertyName("uses")]
+    public CatalogUses? Uses { get; init; }
+}
+
+/// <summary>The can-use half of a node's catalog (feature 024). Route names only.</summary>
+public sealed class CatalogUses
+{
+    [JsonPropertyName("services")]
+    public IReadOnlyList<string> Services { get; init; } = [];
+
+    [JsonPropertyName("queues")]
+    public IReadOnlyList<string> Queues { get; init; } = [];
+
+    [JsonPropertyName("channels")]
+    public IReadOnlyList<string> Channels { get; init; } = [];
 }

@@ -44,4 +44,14 @@ public sealed class ScanResult
     /// </summary>
     public IReadOnlyDictionary<Type, string> QueueContracts { get; init; }
         = new Dictionary<Type, string>();
+
+    /// <summary>
+    /// Assemblies whose handlers were NOT hosted because the <c>HostingMode</c> excluded them
+    /// (feature 024). Empty under <c>Implicit</c>. The engine reports each at startup —
+    /// a skipped handler is a decision, and decisions are said out loud.
+    /// </summary>
+    public IReadOnlyList<SkippedHandlerAssembly> SkippedHandlerAssemblies { get; init; } = [];
 }
+
+/// <summary>An assembly whose handlers were found and deliberately not hosted (feature 024).</summary>
+public sealed record SkippedHandlerAssembly(string AssemblyName, IReadOnlyList<string> HandlerTypes);

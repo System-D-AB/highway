@@ -149,6 +149,25 @@ internal sealed class ImmutableCatalog : ICatalog
             })
             .ToList();
 
-        return new CatalogInfo { Services = services, Channels = channels, Queues = queues };
+        // The can-use half (024): contract routes minus what this node itself provides — the
+        // registry's question is what the node reaches OUT to. Populated HERE, in the same
+        // method that builds the provides half, because Queues above was once added to the
+        // DTO and not to this method, and the registry was blind to queues for two features.
+        var provided = services.Select(s => s.Name)
+            .Concat(queues.Select(q => q.Name))
+            .Concat(channels.Select(c => c.Name))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var uses = new CatalogUses
+        {
+            Services = Remote(_requestTypeToServiceName.Values, provided),
+            Queues = Remote(_messageTypeToQueueName.Values, provided),
+            Channels = Remote(_messageTypeToChannelName.Values, provided),
+        };
+
+        return new CatalogInfo { Services = services, Channels = channels, Queues = queues, Uses = uses };
     }
+
+    private static IReadOnlyList<string> Remote(IEnumerable<string> routes, HashSet<string> provided)
+        => [.. routes.Distinct(StringComparer.Ordinal).Where(r => !provided.Contains(r)).Order(StringComparer.Ordinal)];
 }

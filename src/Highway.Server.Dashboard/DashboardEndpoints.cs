@@ -101,7 +101,8 @@ internal static class DashboardEndpoints
                 messages,
                 messages.Count(m => m.Outcome == "Processed"),
                 messages.Count(m => m.Outcome is "Failed" or "DeadLettered"),
-                node is null ? result.Unavailable ?? "this node is not in the registry" : null));
+                node is null ? result.Unavailable ?? "this node is not in the registry" : null,
+                node?.Uses is { } u ? new NodeCanUseDto(u.Services, u.Queues, u.Channels) : null));
         });
 
         app.MapGet("/api/catalogue", async (IBrokerState state, FlightRecorder recorder) =>

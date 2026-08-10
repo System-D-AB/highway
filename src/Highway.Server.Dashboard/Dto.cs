@@ -196,4 +196,12 @@ internal sealed record NodeDetailDto(
     IReadOnlyList<NodeMessageRowDto> Messages,
     int Processed,
     int Failed,
-    string? Unavailable);
+    string? Unavailable,
+
+    /// <summary>Reference-derived addressability (024) — labelled "can use", never "uses".</summary>
+    NodeCanUseDto? CanUse = null);
+
+internal sealed record NodeCanUseDto(
+    IReadOnlyList<string> Services,
+    IReadOnlyList<string> Queues,
+    IReadOnlyList<string> Channels);

@@ -485,9 +485,15 @@ The expected shape, from which only `services[].name` is read:
 ```json
 {
   "services": [ { "name": "orders.create", "requestType": "...", "responseType": "..." } ],
-  "channels": [ { "name": "orders.placed", "subscriberCount": 1 } ]
+  "channels": [ { "name": "orders.placed", "subscriberCount": 1 } ],
+  "queues":   [ { "name": "invoices.generate", "messageType": "..." } ],
+  "uses":     { "services": ["payments.authorize"], "queues": [], "channels": [] }
 }
 ```
+
+`queues` (014) and `uses` (024) are optional: catalogs written before those features omit
+them and still register. `uses` lists routes the node can **address** because it references
+their contracts — it is observability data only; the server derives nothing from it.
 
 An empty catalog (`{"services":[],"channels":[]}`) is valid and registers a node that hosts nothing — a pure caller.
 

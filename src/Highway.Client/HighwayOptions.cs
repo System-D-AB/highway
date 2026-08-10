@@ -209,6 +209,33 @@ public sealed class HighwayOptions
     /// </summary>
     public List<Func<Assembly, bool>> ExcludedAssemblies { get; } = [];
 
+    /// <summary>
+    /// Which assemblies may contribute <b>handlers</b> to this process (feature 024).
+    /// Contract discovery ignores this setting — see <see cref="Client.HostingMode"/>.
+    /// Default: <see cref="Client.HostingMode.Implicit"/>, the original behavior.
+    /// </summary>
+    public HostingMode HostingMode { get; set; } = HostingMode.Implicit;
+
+    /// <summary>
+    /// Assemblies the composition root consents to host handlers from, in addition to any
+    /// carrying <c>[assembly: HighwayHostModule]</c>. Only consulted by
+    /// <see cref="Client.HostingMode.Declared"/> and <see cref="Client.HostingMode.ExplicitOnly"/>.
+    ///
+    /// <para>Distinct from <see cref="AdditionalAssemblies"/>, which adds assemblies to the
+    /// <i>scan</i> (contracts and, mode permitting, handlers); this list grants <i>hosting
+    /// consent</i> to assemblies already scanned.</para>
+    /// </summary>
+    public List<Assembly> HostAssemblies { get; } = [];
+
+    /// <summary>Fluent form of <see cref="HostAssemblies"/>. Idempotent.</summary>
+    public HighwayOptions HostAssembly(Assembly assembly)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        if (!HostAssemblies.Contains(assembly))
+            HostAssemblies.Add(assembly);
+        return this;
+    }
+
     private static string DefaultNodeName()
     {
         var appName = Assembly.GetEntryAssembly()?.GetName().Name ?? "highway-node";

@@ -125,6 +125,15 @@ Four class shapes. Two verbs. One attribute each. That's the entire API:
 
 No `AddService<T>()`. No routing configuration. No manual wiring. Assembly scanning discovers everything at startup.
 
+> **Annotation (2026-08-10, feature 024):** the promise above holds **unconditionally for
+> contracts** — every route a process references is addressable in every configuration — and
+> **per `HostingMode` for handlers**. The default (`Implicit`) hosts handlers from every
+> scanned assembly exactly as this goal describes; `Declared` and `ExplicitOnly` let a team
+> require consent before a referenced library's handlers run in their process, because
+> "reference equals hosting" is the accident three architecture reviews independently found.
+> The goal's intent — no ceremony between writing a handler and running it — is unchanged;
+> what 024 adds is the ability to *decide where that convenience stops*.
+
 ### G4: Location transparency
 
 The same code runs whether the service is in the same process or across machines. The difference is invisible to the developer — all calls go through the server. For testing, Highway.Server embeds in-process (`HighwayTestServer`) so `dotnet test` requires zero external infrastructure:

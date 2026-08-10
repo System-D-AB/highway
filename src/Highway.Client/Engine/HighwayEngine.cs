@@ -37,13 +37,53 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         ICatalog catalog,
         HighwayOptions options,
         IServiceScopeFactory scopeFactory,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        TopologyManifest? topology = null,
+        HostingReport? hostingReport = null)
     {
         _catalog = catalog;
         _options = options;
         _scopeFactory = scopeFactory;
         _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
         _logger = _loggerFactory.CreateLogger<HighwayEngine>();
+        Topology = topology
+            ?? new TopologyManifest(options.NodeName, [], new CanUseContracts([], [], []));
+        _hostingReport = hostingReport;
+    }
+
+    private readonly HostingReport? _hostingReport;
+
+    /// <inheritdoc/>
+    public TopologyManifest Topology { get; }
+
+    /// <summary>
+    /// Says what the hosting boundary decided (feature 024). Every entry is one assembly and
+    /// its handlers — never one line per handler, which would train operators to scroll past.
+    /// </summary>
+    private void AnnounceTopology()
+    {
+        _logger.LogInformation("{Manifest}", Topology.ToLogString());
+
+        if (_hostingReport is null) return;
+
+        foreach (var a in _hostingReport.Skipped)
+        {
+            _logger.LogWarning(
+                "Assembly {Assembly} contains handlers that are NOT hosted under HostingMode.{Mode}: " +
+                "{Handlers}. To host them, add [assembly: HighwayHostModule] to that assembly or call " +
+                "options.HostAssembly(typeof(...).Assembly) at the composition root.",
+                a.AssemblyName, _hostingReport.Mode, string.Join(", ", a.HandlerTypes));
+        }
+
+        foreach (var a in _hostingReport.ReferenceHosted)
+        {
+            _logger.LogWarning(
+                "Assembly {Assembly} contributed handlers to this process by REFERENCE, not by " +
+                "declaration: {Handlers}. This is HostingMode.Implicit behavior. If intended, declare " +
+                "it ([assembly: HighwayHostModule] or options.HostAssembly) to silence this; if not, " +
+                "switch to HostingMode.Declared to stop hosting it.",
+                a.AssemblyName, string.Join(", ", a.HandlerTypes));
+        }
     }
 
     public EngineState State => _state;
@@ -70,6 +110,10 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             _workCts = new CancellationTokenSource();
             var stopToken = _stopCts.Token;
             var workToken = _workCts.Token;
+
+            // 0. The topology, before anything can fail: the manifest is what an operator
+            // reads to know what this process WAS GOING TO BE when startup breaks (024).
+            AnnounceTopology();
 
             // 1. Connect — fail fast, descriptive error, no silent retry loop.
             _connection = await HighwayConnection.ConnectAsync(_options.Server!, _options, ct).ConfigureAwait(false);

@@ -31,6 +31,28 @@ function declared(label, list) {
     return `<div class="declared-group"><h4>${esc(label)}</h4><ul>${items}</ul></div>`;
 }
 
+// The can-use half (024). "Can use" and not "uses", deliberately: these routes come from
+// the contracts the node REFERENCES — proof it can address them, not proof it calls them.
+// The heading carries that caveat because a UI label is the only place most readers meet it.
+function canUse(d) {
+    if (!d.canUse) return '';
+
+    const kinds = [
+        ['Services', d.canUse.services],
+        ['Queues', d.canUse.queues],
+        ['Channels', d.canUse.channels],
+    ].filter(([, list]) => list && list.length > 0);
+
+    if (kinds.length === 0) return '';
+
+    const groups = kinds.map(([label, list]) => `<div class="declared-group"><h4>${esc(label)}</h4><ul>${
+        list.map((n) => `<li><a href="#/entity?name=${encodeURIComponent(n)}">${esc(n)}</a></li>`).join('')
+    }</ul></div>`).join('');
+
+    return `<h3>Can use <span class="muted">— references the contract; not proof of calling</span></h3>
+            <div class="declared">${groups}</div>`;
+}
+
 function row(m) {
     const href = `#/message?entity=${encodeURIComponent(m.entity)}&id=${encodeURIComponent(m.id)}`;
     const cls = OUTCOME_CLASS[m.outcome] || 'muted';
@@ -82,6 +104,8 @@ export async function render(container, options, params) {
 
             <h3>Declares</h3>
             <div class="declared">${groups || '<p class="muted">Declares nothing.</p>'}</div>
+
+            ${canUse(d)}
 
             <h3>Completed here</h3>
             <p class="muted">Messages this node finished, newest first, within the flight

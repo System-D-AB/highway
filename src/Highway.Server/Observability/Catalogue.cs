@@ -81,7 +81,16 @@ internal sealed record NodeDto(
     IReadOnlyList<string> Services,
     IReadOnlyList<string> Queues,
     IReadOnlyList<string> Channels,
-    string? SeenFrom = null);
+    string? SeenFrom = null,
+
+    /// <summary>The can-use half (024): reference-derived addressability, never "uses".</summary>
+    NodeUsesDto? Uses = null);
+
+/// <summary>Routes a node can address because it references their contracts (feature 024).</summary>
+internal sealed record NodeUsesDto(
+    IReadOnlyList<string> Services,
+    IReadOnlyList<string> Queues,
+    IReadOnlyList<string> Channels);
 
 /// <summary>
 /// Classifies broker entities, and assembles the catalogue from the two sources that know about
@@ -145,6 +154,7 @@ internal static class Catalogue
         var services = new List<string>();
         var queues = new List<string>();
         var channels = new List<string>();
+        var uses = new NodeUsesDto([], [], []);
 
         try
         {
@@ -152,6 +162,15 @@ internal static class Catalogue
             ReadNames(doc.RootElement, "services", services);
             ReadNames(doc.RootElement, "queues", queues);
             ReadNames(doc.RootElement, "channels", channels);
+
+            // The can-use half (024). A pre-024 catalog has no "uses" — empty, not an error.
+            if (doc.RootElement.TryGetProperty("uses", out var u) && u.ValueKind == JsonValueKind.Object)
+            {
+                uses = new NodeUsesDto(
+                    ReadStringArray(u, "services"),
+                    ReadStringArray(u, "queues"),
+                    ReadStringArray(u, "channels"));
+            }
         }
         catch (JsonException)
         {
@@ -159,7 +178,7 @@ internal static class Catalogue
             // readable. Omitting it would hide the misconfiguration entirely.
         }
 
-        return new NodeDto(nodeId, since, since <= expiry, services, queues, channels);
+        return new NodeDto(nodeId, since, since <= expiry, services, queues, channels, Uses: uses);
     }
 
     /// <summary>
@@ -167,6 +186,21 @@ internal static class Catalogue
     /// accepted too — the shape that looked obviously correct when writing 017's tests, and was
     /// silently parsed as "no services at all".
     /// </summary>
+    /// <summary>Reads a plain string array property, tolerating absence (pre-024 catalogs).</summary>
+    private static IReadOnlyList<string> ReadStringArray(JsonElement parent, string property)
+    {
+        if (!parent.TryGetProperty(property, out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return [];
+
+        var result = new List<string>();
+        foreach (var item in arr.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String && item.GetString() is { Length: > 0 } v)
+                result.Add(v);
+        }
+        return result;
+    }
+
     private static void ReadNames(JsonElement root, string property, List<string> into)
     {
         if (!root.TryGetProperty(property, out var array) || array.ValueKind != JsonValueKind.Array)
