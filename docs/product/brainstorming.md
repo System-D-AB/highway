@@ -169,3 +169,68 @@ counts, the analyzer, API-shape cleanups — waits for production to say which o
 If a feature is cut from this later, the suggested shape was **024-conventions-and-hosting**
 (mental-model cluster, F1 as Phase 0) with message safety (F8 + F7 machinery) as a separate
 future feature rather than a bundle.
+
+---
+
+## 2026-08-10 — Substrate strategy: eight sessions, one decision
+
+*A multi-session discussion of Highway's foundations: could Highway be built without Garnet
+(ZeroMQ, Orleans, Akka.NET, EventStoreDB, SQLite, Tsavorite+Kestrel were each priced); should
+Garnet or SE.Redis be forked, stripped, or absorbed; how deep does the RESP coupling run; and
+how do pinned dependencies earn production trust. Full reasoning lives in the conversation;
+what follows is what must not be lost.*
+
+### Findings that shaped everything
+
+- **The 24-verb seam already exists.** `IHighwayConnection` has 24 semantic members; every
+  `HW.*`/RESP call site lives in the one implementing class. The client engine is
+  substrate-agnostic *today*. Three RESP-isms leak into the interface (reply-slot get/delete,
+  doorbell subscriptions as a side channel, `StatsAsync` mirroring `HW.STATS`) and should be
+  generalized while there is one implementation.
+- **RESP-the-framing is separable from Redis-the-semantics** (precedent: Kvrocks, Tile38,
+  Dragonfly). Declaring "RESP framing + `HW.*` + AUTH/PING" as Highway's native protocol makes
+  every future substrate a server-side implementation detail — no client changes, conformance
+  tests become the cross-substrate suite. The gap is ~5 commands wrapping the protocol doc's
+  "Stock Garnet Dependencies" table. Accepted cost: RESP + SE.Redis's multiplexer caps delivery
+  at doorbell+poll (B3 stays) until a dedicated-connection native driver exists.
+- **You cannot subtract your way to ownership.** Measured against the pinned submodule:
+  stripping Garnet to Highway's needs removes ~60k mechanical lines (`server/Resp` ~40k,
+  cluster ~20k — already disabled) and keeps ~88k of the hardest code (Tsavorite core ~55k,
+  session/AOF/network glue ~33k) as an orphaned copy, cut off from exactly the upstream fixes
+  that matter (the pinned commit is itself a LightEpoch CAS hardening fix). Same arithmetic for
+  SE.Redis: the command surface is the cheap part; the multiplexer core is the hard part and
+  the wrong shape besides — a stripped multiplexer still cannot do blocking/streaming claims.
+- **There is no Highway AOF.** Durability is Garnet's AOF behind one flag; structures are the
+  state, the log is the survival plan, and they cannot be merged. Real kernel of the concern:
+  Garnet's AOF is indiscriminate, so ephemera (reply slots, leases, idempotency markers) pay
+  the same logging cost as durable queue messages. A two-tier durable/ephemeral store is v2
+  material, unlocked by any future substrate move.
+- **Pinned dependencies are certified by envelope, not by faith**: 340 integration tests
+  already run against the real embedded Garnet every build (Layers 1–2 of the assurance case).
+  The gap is Layer 3 — crash-recovery under load, disk-full injection, connection churn,
+  multi-day soak (`AofGrowthTests.SustainedTraffic` is currently skipped) — plus a bump
+  cadence and a recovery runbook.
+
+### The decision
+
+**Keep Garnet pristine and pinned; keep SE.Redis as a NuGet reference; modify neither, strip
+neither. Ship v1, run production for months, learn.** Garnet is the first *binding* of
+Highway, not its definition; SE.Redis is the first driver. Both are positions held behind
+seams, not commitments.
+
+Accompanying actions (all additive, none touch dependency code): (1) protocol-completion
+feature — RESP+`HW.*` declared native, ~5 absorbing commands, per-node reply doorbells (fixes
+B2); (2) A1 AOF registration-manifest guard; (3) command allowlist; (4) `Meter` beside the
+`ActivitySource` (C2); (5) the Layer-3 assurance rig; (6) runbook + quarterly pin-bump
+cadence; (7) seam hygiene — generalize the three RESP-isms, grow semantic conformance against
+`constraints.md`; (8) the F1 scanner fix and the two documentation rules from the do-nothing
+triage above.
+
+Revisit triggers, in place of a schedule: push/streaming delivery becomes a requirement →
+build the small dedicated-connection driver (never vendor SE.Redis); A2/C1 pain grows →
+upstream contributions first, minimal rebaseable patch queue second, hard fork only if a
+structural change (named-operation AOF) is refused upstream; SE.Redis diamond-dependency
+conflict → same native driver; production shows AOF cost → commit knobs, then two-tier
+storage in v2. The endgame, if ever triggered, is the client-first server: `HW.*` over RESP
+framing, push delivery, two-tier storage, over Tsavorite-as-NuGet — reachable as a two-adapter
+swap precisely because of the seams above.
