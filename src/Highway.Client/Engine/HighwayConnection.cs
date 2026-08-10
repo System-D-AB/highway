@@ -222,6 +222,9 @@ internal interface IHighwayConnection
 
     Task SubscribeGroupAsync(string channel, string group, string node, CancellationToken ct = default);
 
+    /// <summary>HW.JOB SET — registers/updates a recurring-job schedule (028). Last wins, loudly.</summary>
+    Task JobSetAsync(string queue, string job, string expression, byte[] template, CancellationToken ct = default);
+
 
 
 
@@ -546,6 +549,12 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     private readonly ISubscriber _subscriber;
+
+    /// <summary>
+    /// Exposes the underlying multiplexer so that <c>HighwayCache</c> can share
+    /// the same connection without creating a second one (feature 026, D1).
+    /// </summary>
+    internal IConnectionMultiplexer Multiplexer => _redis;
 
 
 
@@ -1579,6 +1588,14 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
+        }, ct);
+
+    /// <summary>HW.JOB SET &lt;queue&gt; &lt;job&gt; &lt;expression&gt; &lt;template&gt; (idempotent; last registration wins).</summary>
+    public Task JobSetAsync(string queue, string job, string expression, byte[] template, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            await _db.ExecuteAsync("HW.JOB", "SET", queue, job, expression, template).ConfigureAwait(false);
+            return true;
         }, ct);
 
 

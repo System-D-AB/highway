@@ -57,6 +57,12 @@ public class MessageProjectionTests
             [HighwayEventType.MessageDeadLettered] = EventVisibility.Public,
             [HighwayEventType.SendRefused] = EventVisibility.Public,
 
+            // 028: the schedule's actions are the developer's facts; its bookkeeping is not.
+            [HighwayEventType.JobFired] = EventVisibility.Public,
+            [HighwayEventType.JobFireRefused] = EventVisibility.Public,
+            [HighwayEventType.JobScheduleChanged] = EventVisibility.Internal,
+            [HighwayEventType.JobScheduleRemoved] = EventVisibility.Internal,
+
             // Internal: the broker recognising its own work.
             [HighwayEventType.RpcClaimed] = EventVisibility.Internal,
             [HighwayEventType.RpcAcknowledged] = EventVisibility.Internal,

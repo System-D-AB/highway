@@ -1,3 +1,5 @@
+using StackExchange.Redis;
+
 namespace Highway.Client.Engine;
 
 /// <summary>Lifecycle states of the Highway engine (Requirement 11 AC6).</summary>
@@ -72,4 +74,10 @@ internal interface IHighwayEngineInternals
 
     /// <summary>Discovery cache backing fast-fail once running; null before.</summary>
     ServiceDiscoveryCache? Discovery { get; }
+
+    /// <summary>
+    /// The shared multiplexer once the engine is running; null before start.
+    /// Used by <c>HighwayCache</c> to share the engine's connection (feature 026).
+    /// </summary>
+    IConnectionMultiplexer? Multiplexer { get; }
 }

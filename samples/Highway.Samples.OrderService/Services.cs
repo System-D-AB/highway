@@ -97,6 +97,20 @@ public sealed class InvoiceProcessor(ILogger<InvoiceProcessor> logger)
 }
 
 /// <summary>
+/// The scheduled work (028). One instance processes each minutely occurrence — run two
+/// copies of this service and they compete for it like any queue message.
+/// </summary>
+public sealed class ReconcileOrdersProcessor(ILogger<ReconcileOrdersProcessor> logger)
+    : IProcess<ReconcileOrders>
+{
+    public Task ProcessAsync(ReconcileOrders message, CancellationToken ct = default)
+    {
+        logger.LogInformation("  [job] reconciling orders (scheduled run)");
+        return Task.CompletedTask;
+    }
+}
+
+/// <summary>
 /// Always throws, so the message is never acknowledged, is redelivered until
 /// MaxDeliveryAttempts is exhausted, and then dead-letters (feature 013).
 ///

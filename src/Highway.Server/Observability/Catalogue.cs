@@ -86,6 +86,14 @@ internal sealed record NodeDto(
     /// <summary>The can-use half (024): reference-derived addressability, never "uses".</summary>
     NodeUsesDto? Uses = null);
 
+/// <summary>One recurring-job schedule, from HW.JOB LIST (feature 028).</summary>
+internal sealed record JobScheduleDto(
+    string Queue,
+    string Job,
+    string Expression,
+    DateTimeOffset NextFire,
+    DateTimeOffset? LastFire);
+
 /// <summary>Routes a node can address because it references their contracts (feature 024).</summary>
 internal sealed record NodeUsesDto(
     IReadOnlyList<string> Services,

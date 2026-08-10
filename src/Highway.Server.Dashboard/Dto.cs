@@ -117,6 +117,23 @@ internal sealed record NodesDto(
     string? Unavailable);
 
 
+// ---- feature 028: recurring jobs -------------------------------------------
+
+/// <summary>
+/// One schedule. "No hosting node" is the state worth a colour: a schedule whose queue no
+/// node processes never fires — nothing polls it — and silently accumulating nothing is the
+/// failure mode R2.5 exists to make visible.
+/// </summary>
+internal sealed record JobRowDto(
+    string Queue,
+    string Job,
+    string Expression,
+    DateTimeOffset NextFire,
+    DateTimeOffset? LastFire,
+    bool Hosted);
+
+internal sealed record JobsDto(IReadOnlyList<JobRowDto> Jobs, string? Unavailable);
+
 // ---- feature 023: messages -------------------------------------------------
 
 /// <summary>

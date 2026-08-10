@@ -13,7 +13,7 @@ saying so is the point of the document.
 same feature. If a constraint turns out to be wrong, change the constraint and record why —
 do not quietly let the code diverge.
 
-Last reviewed: 2026-08-08 (feature 018).
+Last reviewed: 2026-08-11 (feature 028).
 
 ---
 
@@ -350,6 +350,21 @@ work: a global accountant on every enqueue, plus an eviction or refusal policy a
 structures deciding whose message loses. 016 shipped the bound that could be built without
 that, and named the gap instead of letting the default imply a guarantee it does not make.
 
+### C4.8 — The cache is bounded by application TTLs, not by Highway
+
+**Status: Met as scoped** — feature 026.
+
+Cache entries given an expiration die natively in Garnet; Highway adds no sweeper and no
+quota of its own. Entries set **without** an expiration persist until deleted, exactly as
+with any Redis-style store — `IDistributedCache` permits it, so Highway permits it. The
+cache's growth is therefore bounded by the application's TTL discipline, and Highway names
+that rather than implying a bound it does not enforce.
+
+Cache traffic also **cohabits** with the queues: every cache write rides the same AOF and
+every entry shares the same memory as queue and channel state. A heavy cache makes the
+C4.6 disk growth and restart-replay cost heavier; an operator sizing a broker's data
+directory sizes it for the cache too.
+
 ---
 
 ## C5 — What Highway does not guarantee
@@ -405,6 +420,41 @@ container, or scaled horizontally under one name would report a number nobody ca
 storing it would mean a record that outlives the socket it describes.
 
 ---
+
+## C8 — Recurring jobs (feature 028)
+
+### C8.1 — Each due occurrence fires exactly once, however many workers poll
+
+**Status: Met.** The fire is one transaction inside `HW.QCLAIM`'s locks: enqueue one
+occurrence, advance `nextFire`, replace the schedule record. Racing pollers cannot double-fire
+for the same reason they cannot double-claim. **Exactly one fire, at-least-once processing** —
+the occurrence is then an ordinary queue message, and the handler keeps queue semantics.
+
+### C8.2 — Due-ness is the broker's clock, and firing needs a polling worker
+
+**Status: Met, stated honestly.** Node clocks never participate. An occurrence fires on the
+first poll after its due time — within the backstop interval in a running system; **not at
+all** while no node hosts the queue's processor (the dashboard shows that state). Highway is
+not an alarm clock and does not pretend to be.
+
+### C8.3 — Missed occurrences collapse to one catch-up fire
+
+**Status: Met** (OD3). After downtime, a due schedule fires once and `nextFire` is computed
+from now. Three missed nights are one statements run, not three.
+
+### C8.4 — A full queue refuses the fire without consuming it
+
+**Status: Met** (016's rule, applied to the scheduler). `nextFire` is unchanged,
+`JobFireRefused` is recorded, a later poll retries. Backpressure reaches the schedule instead
+of being absorbed.
+
+### C8.5 — Overlap: v1 fires anyway
+
+**Status: Met as decided** (OD4, changed from the spec's recommendation during execution). A
+new occurrence may be enqueued while the previous is unacknowledged. Detecting
+"still outstanding" in O(1) needs an ack-side completion hook that does not exist; the
+mitigations are `[Idempotent]` and derive-from-state handlers, documented. The
+skip-while-outstanding default is in the Deferred table with its prerequisite named.
 
 ## C6 — Security (feature 012)
 
@@ -517,6 +567,9 @@ get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the
 |---|---|---|
 | **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in `docs/features/015-recoverability/requirements.md` § Deferred |
 | **Polly / `Microsoft.Extensions.Resilience`** | 015 | The .NET built-in for retry pipelines and the obvious "does the framework already do this?" answer. Moot until the tiers return. Highway takes no dependency beyond Garnet and StackExchange.Redis, so it is a real trade rather than a free win |
+| **Skip-while-outstanding overlap for jobs** | 028, OD4 | Needs an ack-side completion hook (`HW.QACK` does not know a message was a job occurrence); without it, detection is an O(depth) scan under exclusive locks on the claim path. Ships when the hook is designed |
+| **Time-zone schedules (DST semantics)** | 028, OD2 | UTC-only shipped; local-time schedules are a real feature with real edge cases, not a parameter |
+| **`[Job]` attribute sugar** | 028, OD1 | Layers onto the composition-root API if demanded; the reverse retreat would break users |
 | **Per-subscriber `SubscriptionGroup` override** | 025, D5 | One node-wide option teaches the model ("this process is one replica of `billing`"); a per-subscriber-class override re-opens the which-identity-am-I confusion 025 exists to close, and no review produced a concrete need. Registered until one does |
 | **`HostingMode` default flip to `Declared`** | 024, D1 | Changing the default silently changes what deployed processes host — the exact surprise 024 exists to end — and under a test runner the entry assembly is `testhost`, so the flip breaks every fixture-hosting test that has not declared its assembly. A major-version change, made when `Implicit`'s startup warning has had time to teach |
 | **A longer-retention message index** | 023, Open Decision 3 | The dashboard's message view is bounded by the flight recorder's window, so history older than that is simply gone. A durable index would fix it and would be **new unbounded storage inside a diagnostic** — the exact cost feature 016 spent its length measuring. Registered, not built |

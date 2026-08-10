@@ -108,6 +108,22 @@ internal static class HighwayKeys
     public static string ChannelSeq(string channel) => $"hw:ch:{channel}:seq";
 
     /// <summary>
+    /// Sorted set of recurring-job schedules for a queue (feature 028): score is
+    /// nextFireTicks, member is a versioned JobScheduleRecord. Fire-and-re-arm replaces the
+    /// member at a new score inside HW.QCLAIM's promotion transaction.
+    /// hw:job:{queue}:schedules
+    /// </summary>
+    public static string JobSchedules(string queue) => $"hw:job:{queue}:schedules";
+
+    /// <summary>
+    /// Main-store newline-delimited list of queues that have at least one schedule (028).
+    /// Read in Prepare so HW.QCLAIM only declares (and locks) the schedules key for queues
+    /// that actually have jobs, and so HW.JOB LIST can enumerate without scanning.
+    /// hw:job:index
+    /// </summary>
+    public const string JobIndex = "hw:job:index";
+
+    /// <summary>
     /// Main-store string of node ids (newline-delimited) currently backing a subscriber group
     /// (feature 025). Derivable from <c>{channel}@{group}</c>, which is what keeps it
     /// declarable in <c>Prepare</c>. Group liveness = the youngest member's heartbeat.

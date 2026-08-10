@@ -18,6 +18,8 @@
 > | **Dead letters, delayed delivery, `[Idempotent]`** | **Shipped** — feature 013 |
 > | **Diagnosable failures — `HW.FAIL`, failure context** | **Shipped** — feature 015 |
 > | **Authentication and TLS** | **Shipped** — feature 012. Not required on loopback, required off it; TLS opt-in always |
+> | **Distributed Cache — `IDistributedCache` + `HybridCache` integration** | **Shipped** — feature 026. Uses Garnet's native GET/SET; no protocol extension |
+> | **Recurring Jobs — schedule-driven message firing** | **Shipped** — feature 028. Uses HW.JOB commands and queue promotion |
 > | Embedded Control Panel / web dashboard | **Partially built** — flight recorder view delivered in feature 011. Server settings and catalog views are deferred |
 > | Flight recorder, `HW.REPLAY`, activity emission | **Shipped** — G8. The recorder is **volatile** (in-process, lost on restart); Highway emits `Activity` and takes no OpenTelemetry dependency, so the application wires its own pipeline |
 > | Running as separate processes end to end | **Proven** — feature 010, and re-run for every feature since. See [`samples/RUNLOG.md`](../../samples/RUNLOG.md) |
@@ -49,7 +51,7 @@ Choosing between them is one sentence: **one handler → Send, many handlers →
 
 The deployment consequence is the point of having both of the last two: run three instances of a **queue** handler and they *share* the work; run three instances of a **subscriber** and they each get *their own copy*.
 
-Because the server is a full Garnet instance, Highway can offer a small number of adjacent primitives — caching and locking chief among them — through the same connection and the same server, without a second piece of infrastructure.
+Because the server is a full Garnet instance, Highway can offer adjacent primitives through the same connection and the same server, without a second piece of infrastructure. **Caching is delivered** (feature 026 — `IDistributedCache` and `HybridCache` backed by the same Garnet); locking remains a future candidate.
 
 > **Highway is a library, not a runtime.** An earlier draft of this document called
 > it "a distributed application runtime for .NET" — which is, word for word, what
