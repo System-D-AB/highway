@@ -211,49 +211,49 @@ These are explicitly out of scope for the first release:
 
 ## Delivery (Package Architecture)
 
-Three NuGet packages, clean separation of concerns:
+Four NuGet packages with clean separation of concerns, plus a standalone executable distribution:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Highway.Server                                                  │
-│  Extension of Garnet — the broker process.                       │
-│  Registers custom HW.* commands (RPC, Pub/Sub, Registry).       │
-│  Manages durable queues, subscriber routing, acknowledgment.    │
-│  Runs as a standalone process or embedded for testing.           │
+│  Embedded server library (`HighwayTestServer`, `HighwayServerBuilder`). │
+│  Registers custom HW.* commands (RPC, Pub/Sub, Queues, Registry).│
 │  References: Microsoft.Garnet, Highway.Abstractions              │
 └─────────────────────────────────────────────────────────────────┘
-         ▲ RESP framing + HW.* commands ▲
-         │                               │
-┌────────┴────────────┐  ┌──────────────┴─────────────────────────┐
-│  Highway.Client      │  │  Your Application (service host)       │
-│  For callers and     │  │  References Highway.Client to host     │
-│  publishers.         │  │  services AND call/publish.            │
-│  ExecuteAsync,       │  │                                        │
-│  PublishAsync,       │  │  AsyncService<T,TRes> implementations  │
-│  Subscribe.          │  │  ISubscribe<T> implementations         │
-│  Assembly scanning,  │  │                                        │
-│  DI integration,     │  └────────────────────────────────────────┘
-│  engine, catalog.    │
-│  References:         │
+         ▲                            ▲
+         │                            │
+┌────────┴────────────┐      ┌────────┴───────────────────────────┐
+│  Highway.Client      │      │  Highway.Server.Dashboard          │
+│  For callers,       │      │  Embedded flight recorder & UI.    │
+│  workers & pub/sub. │      │  References: Highway.Server,       │
+│  Queues, cache, RPC.│      │  Microsoft.AspNetCore.App          │
+│  References:         │      └────────────────────────────────────┘
 │  Highway.Abstractions│
 └──────────────────────┘
          ▲
          │
 ┌────────┴─────────────────────────────────────────────────────────┐
 │  Highway.Abstractions                                             │
-│  Shared contracts and interfaces. Zero dependencies.              │
-│  IHighwayClient, IReturn<T>, IPublish, ISubscribe<T>,            │
-│  Output, AsyncService<T,TRes>, [Service], [Channel],             │
-│  StatusCodes, ErrorDetail.                                        │
-│  This is what contract/shared assemblies reference.               │
+│  Shared contracts and interfaces. Zero package dependencies.     │
+│  IHighwayClient, ISend, IProcess<T>, IPublish, ISubscribe<T>,    │
+│  IReturn<T>, AsyncService<T,TRes>, [Queue], [Channel], [Service]. │
+│  This is what contract/shared domain assemblies reference.       │
 └───────────────────────────────────────────────────────────────────┘
+
+[Highway.Server.Host] (highways) ──► IsPackable=false. Distributed via GitHub Releases zip (031).
 ```
 
 | Package | Purpose | Who references it |
 |---|---|---|
-| **`Highway.Abstractions`** | Contracts, interfaces, attributes, base classes. No implementation, no dependencies. | Everyone — shared contract assemblies, client apps, server. |
-| **`Highway.Client`** | The client library. Engine, assembly scanning, DI wiring, serialization, sends `HW.*` commands via RESP framing. | Any application that hosts services, publishes events, or calls remote services. |
-| **`Highway.Server`** | A Garnet extension — the broker. Registers custom `HW.*` commands for RPC queuing, durable pub/sub, subscriber management, and service registry. | Deployed as a standalone process in production. Embedded in-process for integration tests. |
+| **`Highway.Abstractions`** | Contracts, interfaces, attributes, base classes. Zero dependencies. | Everyone — shared contract assemblies, client apps, server. |
+| **`Highway.Client`** | The client library. Engine, assembly scanning, DI wiring, queues, pub/sub, RPC, distributed caching, resilience. | Any application that hosts services, workers, or publishes/calls messages. |
+| **`Highway.LocalServer`** | The broker, in-process. `HighwayTestServer` for integration tests, `HighwayServerBuilder` for a local run. Named for what it is for: production deploys the `highways` distribution from Releases, not a host written around this package. | Test projects and local development. |
+
+The dashboard assembly (`Highway.Server.Dashboard`) is **not packaged**. It ships inside the
+`highways` distribution, where it runs in the broker process and reads the flight recorder
+live — the reason 031 OD9 kept it embedded. A package would serve only someone hosting a
+broker themselves, and would pull the ASP.NET Core shared framework into every test host that
+referenced it.
 
 **Why this split:**
 

@@ -100,16 +100,21 @@ internal sealed record CatalogueDto(
     IReadOnlyList<CatalogueRowDto> Entries,
     string? Unavailable);
 
-/// <summary>One node, with liveness already interpreted so the browser does no arithmetic.</summary>
+/// <summary>One registered node row in the dashboard, with liveness already interpreted.</summary>
+/// <param name="Name">Node name.</param>
+/// <param name="State">"live" | "stale" | "absent".</param>
+/// <param name="SinceSeconds">Seconds since last seen.</param>
+/// <param name="Services">List of hosted services.</param>
+/// <param name="Queues">List of hosted queues.</param>
+/// <param name="Channels">List of subscribed channels.</param>
+/// <param name="SeenFrom">Peer address of the node's live connection, or null if it has none right now.</param>
 internal sealed record NodeRowDto(
     string Name,
-    string State,          // "live" | "stale" | "absent"
+    string State,
     double SinceSeconds,
     IReadOnlyList<string> Services,
     IReadOnlyList<string> Queues,
     IReadOnlyList<string> Channels,
-
-    /// <summary>Peer address of the node's live connection, or null if it has none right now.</summary>
     string? SeenFrom);
 
 internal sealed record NodesDto(
@@ -140,6 +145,16 @@ internal sealed record JobsDto(IReadOnlyList<JobRowDto> Jobs, string? Unavailabl
 /// One message as a developer thinks of it. <b>Both nodes</b>, because a message is usually
 /// produced on one and processed on another.
 /// </summary>
+/// <param name="Id">Message ID.</param>
+/// <param name="Outcome">Message outcome status.</param>
+/// <param name="StartedAt">Timestamp message handling started.</param>
+/// <param name="StartedOnNode">Node name that started processing.</param>
+/// <param name="CompletedAt">Timestamp message handling completed.</param>
+/// <param name="CompletedOnNode">Node name that completed processing.</param>
+/// <param name="DurationMs">Duration in milliseconds.</param>
+/// <param name="FailureDetail">Detail if failed.</param>
+/// <param name="DeliveredGroups">Fan-out, for a channel: groups finished out of groups subscribed. Null otherwise.</param>
+/// <param name="SubscriberGroups">Total subscriber groups.</param>
 internal sealed record MessageRowDto(
     string Id,
     string Outcome,
@@ -149,8 +164,6 @@ internal sealed record MessageRowDto(
     string? CompletedOnNode,
     double? DurationMs,
     string? FailureDetail,
-
-    /// <summary>Fan-out, for a channel: groups finished out of groups subscribed. Null otherwise.</summary>
     int? DeliveredGroups,
     int? SubscriberGroups);
 
@@ -202,6 +215,18 @@ internal sealed record NodeMessageRowDto(
 /// node that declares a service and has processed nothing through it is the exact shape of a
 /// misconfiguration, and it is only visible when both are on the same page.</para>
 /// </summary>
+/// <param name="Name">Node name.</param>
+/// <param name="State">Node state.</param>
+/// <param name="SinceSeconds">Seconds since last seen.</param>
+/// <param name="SeenFrom">Peer address.</param>
+/// <param name="Services">List of hosted services.</param>
+/// <param name="Queues">List of hosted queues.</param>
+/// <param name="Channels">List of subscribed channels.</param>
+/// <param name="Messages">List of recent messages.</param>
+/// <param name="Processed">Processed count.</param>
+/// <param name="Failed">Failed count.</param>
+/// <param name="Unavailable">Reason if unavailable.</param>
+/// <param name="CanUse">Reference-derived addressability (024) — labelled "can use", never "uses".</param>
 internal sealed record NodeDetailDto(
     string Name,
     string State,
@@ -214,8 +239,6 @@ internal sealed record NodeDetailDto(
     int Processed,
     int Failed,
     string? Unavailable,
-
-    /// <summary>Reference-derived addressability (024) — labelled "can use", never "uses".</summary>
     NodeCanUseDto? CanUse = null);
 
 internal sealed record NodeCanUseDto(

@@ -31,6 +31,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
     private ServiceDiscoveryCache? _discovery;
     private HeartbeatLoop? _heartbeat;
     private readonly List<Task> _runningTasks = [];
+    private readonly HighwayConnectionSource _connectionSource;
+    private readonly HostingReport? _hostingReport;
     private int _activeOperations;
     private bool _disposed;
 
@@ -40,7 +42,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         IServiceScopeFactory scopeFactory,
         ILoggerFactory? loggerFactory = null,
         TopologyManifest? topology = null,
-        HostingReport? hostingReport = null)
+        HostingReport? hostingReport = null,
+        HighwayConnectionSource? connectionSource = null)
     {
         _catalog = catalog;
         _options = options;
@@ -50,9 +53,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         Topology = topology
             ?? new TopologyManifest(options.NodeName, [], new CanUseContracts([], [], []));
         _hostingReport = hostingReport;
+        _connectionSource = connectionSource ?? new HighwayConnectionSource(options);
     }
-
-    private readonly HostingReport? _hostingReport;
 
     /// <inheritdoc/>
     public TopologyManifest Topology { get; }
@@ -64,6 +66,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
     private void AnnounceTopology()
     {
         _logger.LogInformation("{Manifest}", Topology.ToLogString());
+        HighwayOptionsValidator.ValidateTls(_options, _logger);
 
         if (_hostingReport is null) return;
 
@@ -118,7 +121,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             AnnounceTopology();
 
             // 1. Connect — fail fast, descriptive error, no silent retry loop.
-            _connection = await HighwayConnection.ConnectAsync(_options.Server!, _options, ct).ConfigureAwait(false);
+            var mux = await _connectionSource.GetMultiplexerAsync(ct).ConfigureAwait(false);
+            _connection = HighwayConnection.FromMultiplexer(mux);
             _pendingCalls = new PendingCallRegistry(_connection);
 
             var executor = new ServiceExecutor(_catalog, _scopeFactory);

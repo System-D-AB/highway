@@ -31,3 +31,14 @@ Thumbs.db
 data/
 highway-data/
 highway-data-*/
+
+# Assurance rig run artifacts (feature 032). Ledgers, broker data directories and
+# AOF binaries — tens of MB per run. The committed record is the run summary in
+# docs/features/032-assurance-rig/runs.md, not the raw artefacts (OD11).
+assurance/runs/
+
+# Agent working copies of feature specs. The specs themselves live in docs/features/.
+.agent/
+
+# Local package-verification output (feature 035 T5)
+build/dist/

@@ -1,0 +1,34 @@
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Line endings are deliberately left to git's normalisation rather than pinned
+# here — the working tree is CRLF on Windows and the index is LF, and pinning a
+# value would rewrite every file for no benefit.
+
+[*.{cs,csx}]
+indent_style = space
+indent_size = 4
+
+# Provenance headers on first-party source only — src/ and tests/. Samples and the
+# assurance rig are demonstration and harness code, and generated files under
+# obj/ must never be touched.
+#
+# IDE0073 makes this enforced rather than remembered: `dotnet format` applies it,
+# and a new file without it is a warning.
+#
+# No year: LICENSE carries the year of first publication; per-file years mean an
+# annual churn commit across every source file for no legal gain.
+[{src,tests}/**/*.cs]
+file_header_template = Copyright (c) System D AB.\nLicensed under the MIT license.
+dotnet_diagnostic.IDE0073.severity = warning
+
+[*.{json,jsonc,yml,yaml,props,targets,csproj,slnx}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false

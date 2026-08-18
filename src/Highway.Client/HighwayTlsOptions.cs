@@ -31,4 +31,7 @@ public sealed class HighwayTlsOptions
 
     /// <summary>Permitted protocol versions. When null, the platform default applies.</summary>
     public SslProtocols? Protocols { get; set; }
+
+    /// <summary>Whether this certificate is an ephemeral self-signed test certificate.</summary>
+    public bool IsEphemeral { get; set; }
 }

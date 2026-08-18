@@ -58,6 +58,12 @@ public sealed class HighwayServerOptions
     /// </summary>
     public long AofSizeLimitBytes { get; set; } = 512L * 1024 * 1024;
 
+    /// <summary>
+    /// Size of each AOF segment file on disk (e.g. "32m", "64m", "1g").
+    /// Default: <see langword="null"/> (defer to Garnet default, 1g).
+    /// </summary>
+    public string? AofSegmentSize { get; set; }
+
 
 
     /// <summary>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Highway.Assurance.Contracts</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      ONLY Highway.Abstractions. No Highway.Client, no Highway.Server, no
+      third-party packages — enforced by tests in Highway.Assurance.Tests.
+    -->
+    <ProjectReference Include="..\..\src\Highway.Abstractions\Highway.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -123,6 +123,20 @@ internal abstract class SingleMessageWorkerLoop
         Logger.LogInformation("Worker loop started for {Kind} '{Target}' (concurrency {Concurrency})",
             TargetKind, TargetName, _concurrency);
 
+        // Initial drain on startup before waiting for wake signal
+        try
+        {
+            await DrainAsync(stopToken, workToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Initial drain failed for {Kind} '{Target}'", TargetKind, TargetName);
+        }
+
         while (!stopToken.IsCancellationRequested)
         {
             await _wake.WaitAsync(selfHealTimeout, stopToken).ConfigureAwait(false);

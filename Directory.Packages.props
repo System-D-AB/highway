@@ -16,6 +16,14 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
 
+    <!-- highwayd host executable (feature 031): service-lifetime integration.
+         Acquired only by the executable artifact — no library consumer sees these. -->
+    <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.5" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.5" />
+
+    <!-- Microsoft.Garnet: 2.1.3 includes LightEpoch slot-claim CAS fix (#2015) present in submodule commit 8b329e300 -->
+    <PackageVersion Include="Microsoft.Garnet" Version="2.1.3" />
+
     <!-- HybridCache (application-level dependency, not Highway.Client) -->
     <PackageVersion Include="Microsoft.Extensions.Caching.Hybrid" Version="10.8.0" />
 

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Highway.Assurance.Notifications</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Highway.Client\Highway.Client.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Contracts\Highway.Assurance.Contracts.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Ledger\Highway.Assurance.Ledger.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Notifications.Subs\Highway.Assurance.Notifications.Subs.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Notifications.Mailer\Highway.Assurance.Notifications.Mailer.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+  </ItemGroup>
+
+</Project>

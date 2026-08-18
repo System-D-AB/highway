@@ -4,6 +4,10 @@
     <RootNamespace>Highway.Server</RootNamespace>
     <!-- Required for DoorbellBridge which pins byte arrays via fixed() statements -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PackageId>Highway.LocalServer</PackageId>
+    <Description>In-process Highway broker for integration tests and local development. Start a real broker inside your test host with HighwayTestServer — no Docker, no external infrastructure. Production deployments use the standalone highways distribution from GitHub Releases, not this package.</Description>
+    <PackageTags>highway;testserver;integration-testing;in-memory;local-development;broker</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,18 +16,32 @@
     <InternalsVisibleTo Include="Highway.Server.Dashboard" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <UseGarnetSource Condition="'$(UseGarnetSource)' == ''">false</UseGarnetSource>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Highway.Abstractions\Highway.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseGarnetSource)' == 'true'">
     <ProjectReference Include="..\..\libs\garnet\libs\host\Garnet.host.csproj" />
-    <!-- Garnet.host uses PrivateAssets="All" for its server/cluster dependencies so they
-         don't flow transitively.  We reference them directly so our code can use
-         Garnet.server types (GarnetServerOptions, SubscribeBroker, etc.) and
-         Tsavorite.core types (PinnedSpanByte) at compile time. -->
     <ProjectReference Include="..\..\libs\garnet\libs\server\Garnet.server.csproj" />
     <ProjectReference Include="..\..\libs\garnet\libs\storage\Tsavorite\cs\src\core\Tsavorite.core.csproj" />
-    <!-- Used at startup only: the pre-018 data check (T10) scans for old channel keys
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseGarnetSource)' != 'true'">
+    <PackageReference Include="Microsoft.Garnet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Used at startup only: the pre-018 data check scans for old channel keys
          by connecting to ourselves via SE.Redis. One SCAN that matches nothing on a clean broker. -->
     <PackageReference Include="StackExchange.Redis" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>

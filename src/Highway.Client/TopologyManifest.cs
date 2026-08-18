@@ -14,16 +14,18 @@ public enum CapabilityKind
 }
 
 /// <summary>One hosted handler: the route, who implements it, and where that type came from.</summary>
+/// <param name="Kind">What kind of inbound capability a process provides.</param>
+/// <param name="Route">The route name.</param>
+/// <param name="ImplementationType">The implementation type name.</param>
+/// <param name="SourceAssembly">The source assembly name.</param>
+/// <param name="Group">The subscriber group, for <see cref="CapabilityKind.Subscriber"/> entries only.</param>
+/// <param name="Detail">Kind-specific detail — the schedule expression, for <see cref="CapabilityKind.RecurringJob"/>.</param>
 public sealed record ProvidedCapability(
     CapabilityKind Kind,
     string Route,
     string ImplementationType,
     string SourceAssembly,
-
-    /// <summary>The subscriber group, for <see cref="CapabilityKind.Subscriber"/> entries only.</summary>
     string? Group = null,
-
-    /// <summary>Kind-specific detail — the schedule expression, for <see cref="CapabilityKind.RecurringJob"/>.</summary>
     string? Detail = null);
 
 /// <summary>

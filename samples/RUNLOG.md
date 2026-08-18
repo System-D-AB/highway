@@ -14,6 +14,23 @@ documentation defect and loses it.
 
 ---
 
+## 2026-08-18 — feature 035 (NuGet Packages)
+
+**Libraries:** all four NuGet packages (`Highway.Abstractions`, `Highway.Client`, `Highway.Server`, `Highway.Server.Dashboard`) produced via `dotnet pack`.
+**Ran:** `Microsoft.Garnet` package dependency swap verified in both default mode (`PackageReference Microsoft.Garnet`) and opt-in source mode (`-p:UseGarnetSource=true`). Consumer project in `build/verify/` restored from local packages, executed in-process `HighwayTestServer`, registered `Highway.Client`, and completed queue round-trip successfully.
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| `Highway.Server` references `Microsoft.Garnet` 2.1.3 package | ✅ All 201 server tests pass |
+| `-p:UseGarnetSource=true` opt-in source compilation | ✅ All 201 server tests pass |
+| `dotnet pack` for all 4 packages + symbols | ✅ 0 warnings, snupkg generated, doc comments included |
+| Out-of-tree consumer verification (`build/verify/`) | ✅ Restores from local feed, runs `HighwayTestServer`, executes `ISend`/`IProcess` |
+| `Highway.Abstractions` package purity | ✅ Verified 0 package dependencies |
+
+---
+
 ## 2026-08-10 — feature 026 (Distributed Cache)
 
 **Libraries:** everything through feature 026.

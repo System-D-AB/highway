@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Highway.Assurance.Notifications.Mailer</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Highway.Client\Highway.Client.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Contracts\Highway.Assurance.Contracts.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Ledger\Highway.Assurance.Ledger.csproj" />
+  </ItemGroup>
+
+</Project>

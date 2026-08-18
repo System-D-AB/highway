@@ -47,9 +47,36 @@ internal static class SecurityPolicy
     {
         var endpoint = $"{opts.BindAddress}:{opts.Port}";
 
+        if (opts.Tls.IsConfigured)
+        {
+            if (!opts.Tls.ClientCertificateRequired)
+            {
+                logger?.LogWarning(
+                    "TLS option ClientCertificateRequired is false: remote client certificate validation unconditionally succeeds for any certificate and for none.");
+            }
+            else if (string.IsNullOrWhiteSpace(opts.Tls.IssuerCertificatePath))
+            {
+                logger?.LogWarning(
+                    "TLS option ClientCertificateRequired is true but IssuerCertificatePath is not specified: certificate chain errors will be accepted and the issuer will not be validated.");
+            }
+
+            if (opts.Tls.IsEphemeral)
+            {
+                logger?.LogWarning(
+                    "Using ephemeral self-signed certificate for TLS; clients must not use this configuration in production environments without proper certificate validation.");
+            }
+        }
+
         if (opts.Authentication.IsConfigured)
         {
             logger?.LogInformation("Highway server authentication is enabled on {Endpoint}.", endpoint);
+
+            if (!opts.Tls.IsConfigured)
+            {
+                logger?.LogWarning(
+                    "Transport security (TLS) is disabled while authentication is configured; credentials will cross the network in clear text. Enable TLS with WithTls(...) / HighwayOptions.Tls.");
+            }
+
             return;
         }
 

@@ -46,6 +46,9 @@ public sealed class TlsOptions
     /// <summary>Issuer certificate path, for validating client certificates against a private CA.</summary>
     public string? IssuerCertificatePath { get; set; }
 
+    /// <summary>Whether this certificate is an ephemeral self-signed test certificate.</summary>
+    public bool IsEphemeral { get; set; }
+
     /// <summary>
     /// Escape hatch: a fully-formed Garnet TLS configuration, used verbatim.
     ///

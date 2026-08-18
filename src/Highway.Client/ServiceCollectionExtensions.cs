@@ -120,18 +120,23 @@ public static class ServiceCollectionExtensions
 
         services.TryAddSingleton<IHighwayClient, HighwayClient>();
 
-        // 8. Register distributed cache (feature 026). TryAdd semantics — defers
-        // to an existing IDistributedCache registration. The cache creates its own
-        // connection from the same server string so it is available immediately —
-        // before the engine's hosted service starts. SE.Redis multiplexes on one
-        // TCP socket regardless of how many IDatabase instances exist, so two
-        // ConnectionMultiplexer instances to the same endpoint share the server's
-        // resources efficiently.
-        var cacheOptions = new HighwayCacheOptions { Server = options.Server };
-        var cacheMux = StackExchange.Redis.ConnectionMultiplexer.Connect(cacheOptions.Server!);
-        var hwCache = new HighwayCache(cacheMux, cacheOptions);
-        services.TryAddSingleton<HighwayCache>(hwCache);
+        // 8. Register connection source and distributed cache (feature 026, 034).
+        // TryAdd semantics — defers to existing registrations. Exactly 1 multiplexer per process,
+        // connected lazily on first use with zero eager I/O during AddHighway.
+        services.TryAddSingleton<HighwayConnectionSource>(sp => new HighwayConnectionSource(options));
+        var cacheOptions = new HighwayCacheOptions
+        {
+            Server = options.Server,
+            Username = options.Username,
+            Password = options.Password,
+            Tls = options.Tls,
+            ConfigureConnection = options.ConfigureConnection
+        };
+        services.TryAddSingleton<HighwayCacheOptions>(cacheOptions);
+        services.TryAddSingleton<HighwayCache>(sp =>
+            new HighwayCache(sp.GetRequiredService<HighwayConnectionSource>(), sp.GetRequiredService<HighwayCacheOptions>()));
         services.TryAddSingleton<IDistributedCache>(sp => sp.GetRequiredService<HighwayCache>());
+        services.TryAddSingleton<IBufferDistributedCache>(sp => sp.GetRequiredService<HighwayCache>());
 
         return services;
     }
