@@ -138,6 +138,79 @@ public class AddHighwayCacheRegistrationTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task AddHighway_RegistersIBufferDistributedCache_AsHighwayCache()
+    {
+        var services = new ServiceCollection();
+        services.AddHighway(o =>
+        {
+            o.Server = _server.ConnectionString;
+            o.NodeName = "cache-buf-reg-test";
+            ExcludeTestAssembly(o);
+        });
+
+        await using var sp = services.BuildServiceProvider();
+        var engine = sp.GetRequiredService<IHighwayEngine>();
+        await engine.StartAsync();
+
+        try
+        {
+            var bufferCache = sp.GetService<IBufferDistributedCache>();
+            bufferCache.Should().NotBeNull();
+            bufferCache.Should().BeOfType<HighwayCache>();
+        }
+        finally
+        {
+            await engine.StopAsync();
+        }
+    }
+
+    [Fact]
+    public void AddHighway_NoBrokerRunning_BuildServiceProviderDoesNotThrow()
+    {
+        var services = new ServiceCollection();
+        services.AddHighway(o =>
+        {
+            // Port 1: no broker running
+            o.Server = "127.0.0.1:1,abortConnect=true";
+            o.NodeName = "lazy-test";
+            ExcludeTestAssembly(o);
+        });
+
+        // Building the container must NOT attempt a network connection (0 eager I/O)
+        var act = () => services.BuildServiceProvider();
+        act.Should().NotThrow();
+    }
+
+    [Fact]
+    public async Task AddHighway_EngineAndCache_ShareSameMultiplexerInstance()
+    {
+        var services = new ServiceCollection();
+        services.AddHighway(o =>
+        {
+            o.Server = _server.ConnectionString;
+            o.NodeName = "mux-sharing-test";
+            ExcludeTestAssembly(o);
+        });
+
+        await using var sp = services.BuildServiceProvider();
+        var engine = sp.GetRequiredService<IHighwayEngine>();
+        await engine.StartAsync();
+
+        try
+        {
+            var source = sp.GetRequiredService<HighwayConnectionSource>();
+            var internals = (IHighwayEngineInternals)engine;
+
+            internals.Multiplexer.Should().NotBeNull();
+            internals.Multiplexer.Should().BeSameAs(source.Multiplexer);
+        }
+        finally
+        {
+            await engine.StopAsync();
+        }
+    }
+
     /// <summary>
     /// A trivial <see cref="IDistributedCache"/> used to verify TryAdd semantics.
     /// </summary>

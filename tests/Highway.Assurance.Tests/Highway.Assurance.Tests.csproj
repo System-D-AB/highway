@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Highway.Assurance.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="NSubstitute" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Contracts\Highway.Assurance.Contracts.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Ledger\Highway.Assurance.Ledger.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Reconciler\Highway.Assurance.Reconciler.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Notifications.Subs\Highway.Assurance.Notifications.Subs.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Notifications.Mailer\Highway.Assurance.Notifications.Mailer.csproj" />
+  </ItemGroup>
+
+</Project>

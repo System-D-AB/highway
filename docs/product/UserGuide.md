@@ -1,3 +1,10 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)"
+          srcset="../assets/logo/highway-1a-white-transparent-512.png">
+  <img src="../assets/logo/highway-1a-blue-transparent-512.png"
+       alt="Highway" width="72" height="72">
+</picture>
+
 # Highway User Guide
 
 Highway provides a foundation for building distributed .NET applications. It
@@ -10,15 +17,30 @@ No external broker. No infrastructure decisions before your first message.
 
 ---
 
-## Getting Started
+## Distribution & Packages
 
-Three packages:
+Highway is delivered through two distinct channels:
+
+| Channel | Carries | Target Audience |
+|---|---|---|
+| **GitHub Releases** | `highways` distribution zip (Feature 031) | Operators deploying a standalone broker (Windows service or systemd daemon) |
+| **NuGet Packages** | `Highway.Abstractions`, `Highway.Client`, `Highway.LocalServer` | Developers building services and running in-process tests |
+
+### NuGet Packages
 
 | Package | What it is | Who references it |
 |---|---|---|
-| `Highway.Abstractions` | Contracts, interfaces, attributes. Zero dependencies. | Shared contract libraries |
-| `Highway.Client` | Assembly scanning, DI, engine, serialization. | Any application |
-| `Highway.Server` | The broker. Runs as a standalone process. | Deployed once |
+| `Highway.Abstractions` | Contracts, interfaces, declarative attributes. Zero dependencies. | Shared contract and domain libraries |
+| `Highway.Client` | High-performance client, scanning, queues, pub/sub, RPC, caching, resilience. | Any application consuming or providing services |
+| `Highway.LocalServer` | In-process broker (`HighwayTestServer`, `HighwayServerBuilder`). | Integration test suites and local development |
+
+### Getting Started
+
+Install the client package:
+
+```bash
+dotnet add package Highway.Client --prerelease
+```
 
 Register Highway in any .NET application:
 
@@ -533,6 +555,159 @@ services.AddHighway(o =>
   layering.
 - **Lease renewal** — handlers running up to 15 minutes are safe without
   configuration.
+
+---
+
+## Transport Security (TLS)
+
+Highway supports TLS encryption on the wire between clients and the broker.
+
+### What TLS Provides (and What It Does Not)
+
+| Security Property | Provided by TLS? | Notes |
+|---|---|---|
+| **Encryption in transit** | **Yes** | All payloads, queue messages, and command framing are encrypted on the wire. |
+| **Server Identity** | **Yes** | Client verifies server certificate subject/SAN and trust chain. |
+| **Client-Certificate Gate** | **Yes** (optional) | Server requires incoming connections to present a certificate from an accepted issuer. |
+| **Client/User Identity** | **No** | A client certificate authenticates the **connection**, never a **user**. |
+| **Per-Command Authorization** | **No** | Authorization is governed by `AUTH` and ACL profiles, not certificates. |
+
+> [!IMPORTANT]
+> A client certificate authenticates the **connection**, never a user or principal. Garnet has no certificate-based authentication or user mapping mechanism. An authenticated TLS connection with no `AUTH` command executes as the `default` user.
+
+### Broker TLS Configuration
+
+To enable TLS on the Highway server, supply a PFX certificate file and password:
+
+```csharp
+var server = new HighwayServerBuilder()
+    .WithPort(6500)
+    .WithTls("/path/to/server.pfx", "cert-password")
+    .WithPassword("broker-secret-password")
+    .Build();
+
+await server.RunAsync();
+```
+
+In `highway.json`:
+
+```json
+{
+  "server": {
+    "port": 6500
+  },
+  "tls": {
+    "certFile": "/etc/highway/server.pfx",
+    "certPassword": "cert-password",
+    "clientCertificateRequired": true,
+    "issuerCertificatePath": "/etc/highway/ca-root.crt"
+  }
+}
+```
+
+### Client TLS Configuration
+
+Clients configure TLS via `HighwayOptions.Tls` or `HighwayCacheOptions.Tls`:
+
+```csharp
+builder.Services.AddHighway(o =>
+{
+    o.NodeName = "orders-node";
+    o.Server   = "broker.internal.company.com:6500";
+    o.Password = "broker-secret-password";
+    o.Tls = new HighwayTlsOptions
+    {
+        Enabled = true,
+        TargetHost = "broker.internal.company.com", // Must match the certificate SAN/CN
+    };
+});
+```
+
+### Silent Degradations & Startup Warnings (D5)
+
+Garnet exhibits two weak TLS validation shapes that Highway detects and warns about on startup:
+
+1. **`ClientCertificateRequired = false`**
+   - *Effect:* The server's remote certificate validation callback returns `true` for every client certificate presented, and also when no client certificate is presented at all.
+   - *Warning emitted:* `TLS option ClientCertificateRequired is false: remote client certificate validation unconditionally succeeds for any certificate and for none.`
+2. **`ClientCertificateRequired = true` without `IssuerCertificatePath`**
+   - *Effect:* Client certificates are requested, but chain errors are accepted without validating the issuing CA. Any certificate from any CA (including self-signed) is accepted.
+   - *Warning emitted:* `TLS option ClientCertificateRequired is true but IssuerCertificatePath is not specified: certificate chain errors will be accepted and the issuer will not be validated.`
+
+> [!WARNING]
+> Garnet's authors document their issuer-validation routine with the caveat:
+> *"prototype code … validate for your requirements before using in production"*.
+> For production environments exposed beyond a trusted network, verify corporate CA requirements and deployment topography.
+
+### Client/Server Setting Agreement & Mismatch Symptoms
+
+- **Plaintext client connecting to TLS server:** Connection hangs or fails immediately with `RedisConnectionException: It was not possible to connect to the redis server(s)`.
+- **TargetHost mismatch:** Fails during TLS handshake with `AuthenticationException: The remote certificate is invalid according to the validation procedure (RemoteCertificateNameMismatch)`.
+- **Untrusted Certificate Authority:** Fails with `AuthenticationException: The remote certificate is invalid according to the validation procedure (UntrustedRoot)`.
+- **Protocol version mismatch:** Specifying deprecated protocols (< TLS 1.2) emits a client startup warning; servers configured for TLS 1.2/1.3 will abort handshakes with legacy clients.
+
+---
+
+## Access Control Lists (ACL)
+
+Highway supports fine-grained Access Control Lists (ACL) to restrict command execution and protect administrative operations.
+
+### The Three Security Postures (R3.4)
+
+| Posture | Environment | Mechanism | What It Protects Against | What It Does Not Protect Against |
+|---|---|---|---|---|
+| **1. Open on loopback** | Local development | No auth, loopback bind (`127.0.0.1`) | Accidental exposure (bound to loopback only) | Local processes on same machine |
+| **2. `nopass` + Allowlist** | Trusted internal network (Default) | Shipped `config/users.acl` with `default` user | Accidental `FLUSHALL`, `CONFIG`, `KEYS`, data destruction | Network eavesdropping (unless paired with TLS) |
+| **3. Password/ACL + TLS** | Exposed / multi-tenant network | Named users, passwords, TLS encryption | Eavesdropping, unauthorized command execution | Misconfigured client credentials |
+
+> [!NOTE]
+> **TLS and ACL are complementary, not alternatives.** TLS encrypts the wire and gates connection access. ACL determines what commands the connection is permitted to execute.
+
+### Shipped ACL Default (`config/users.acl`)
+
+Highway ships with a minimal, least-privilege default configuration for trusted networks:
+
+```acl
+# config/users.acl
+user default on nopass ~* -@all +@connection +ping +subscribe +unsubscribe +get +set +del +expire +scan +hw.call +hw.reply +hw.dequeue +hw.ack +hw.publish +hw.subscribe +hw.unsubscribe +hw.heartbeat +hw.discover +hw.stats +hw.replay +hw.dlq +hw.qsend +hw.qclaim +hw.qack +hw.fail +hw.job +hw.touch +@custom
+```
+
+This configuration:
+- Operates without passwords (`nopass`) on trusted networks.
+- Grants access to all 18 `HW.*` protocol commands.
+- Grants `PING`, pub/sub doorbells (`SUBSCRIBE`, `UNSUBSCRIBE`), cache commands (`GET`, `SET`, `DEL`, `EXPIRE`), and startup check (`SCAN`).
+- Explicitly refuses destructive and administrative commands (`FLUSHALL`, `CONFIG`, `KEYS`, `SHUTDOWN`).
+
+### Handling `NOPERM` Errors
+
+If a client attempts to execute a command not in the allowlist (for example, `FLUSHALL` or `CONFIG GET *`), the broker refuses the command and returns a `NOPERM` error:
+
+```
+(error) NOPERM this user has no permissions to run the 'flushall' command
+```
+
+If an application requires additional commands, edit [`config/users.acl`](file:///c:/Software/ai/highway/config/users.acl) and reload the server.
+
+### Connecting with Named ACL Users
+
+For multi-tenant or password-authenticated deployments, define named users in `users.acl`:
+
+```acl
+user default on >admin-secret ~* +@all
+user dev-app on >dev-secret ~* -@all +@connection +ping +subscribe +unsubscribe +get +set +del +expire +scan +@custom
+```
+
+And configure credentials in client options:
+
+```csharp
+builder.Services.AddHighway(o =>
+{
+    o.NodeName = "my-service";
+    o.Server   = "127.0.0.1:6500";
+    o.Username = "dev-app";
+    o.Password = "dev-secret";
+});
+```
 
 ---
 

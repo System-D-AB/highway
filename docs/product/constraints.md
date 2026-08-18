@@ -13,7 +13,7 @@ saying so is the point of the document.
 same feature. If a constraint turns out to be wrong, change the constraint and record why —
 do not quietly let the code diverge.
 
-Last reviewed: 2026-08-11 (feature 028).
+Last reviewed: 2026-08-18 (feature 032 — Assurance Rig).
 
 ---
 
@@ -39,14 +39,14 @@ gigabyte budgets onto a fan-out mechanism. They belong on the queue.
 
 ### C1.1 — A sent message is processed at least once
 
-**Status: Met** — feature 014.
+**Status: Met** — feature 014. Proven under sustained multi-process load and crash turbulence by feature 032 (`assurance/runs/2026-08-18T10-47-30/`, `docs/features/032-assurance-rig/runs.md`).
 
 Exactly one `IProcess<T>` handles each message. Multiple instances of the same application
 **compete** — they share the work, they do not each get a copy.
 
 ### C1.2 — A sent message survives until it is processed
 
-**Status: Met** — feature 014, subject to C4.
+**Status: Met** — feature 014, subject to C4. Proven under ungraceful worker kill and lease recovery by feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
 
 This is the queue's reason to exist. A message with no worker running waits. A message whose
 worker crashes mid-handling is redelivered after its lease. Nothing removes it except
@@ -56,7 +56,7 @@ Bounded only by C4.1 and C4.2.
 
 ### C1.3 — Sending never requires a running consumer
 
-**Status: Met** — feature 014.
+**Status: Met** — feature 014. Proven during the Gap phase of feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
 
 `SendAsync` succeeds whether or not any worker exists. The message waits. This is the
 capability whose absence made people misuse `PublishAsync`.
@@ -131,7 +131,7 @@ free, and dead-letters one bad slice without killing the job.
 ### C2.1 — A published message is delivered at least once to every group registered at publish time
 
 **Status: Met** — and since feature 025, **the fan-out unit is the subscription group, not the
-node**.
+node**. Proven under multi-process soak by feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
 
 Fan-out across groups, atomic — all groups or none. Each group has its own **queue** (named
 `{channel}@{group}`) with the same lease, acknowledgement, attempt counter and dead-letter
@@ -155,7 +155,7 @@ A message leaves a group's queue when that group acknowledges it via `HW.QACK`. 
 
 ### C2.3 — A subscriber that is down receives what it missed, **until its node is declared gone**
 
-**Status: Met, and now bounded** — feature 018 for the holding, feature 017 for the bound.
+**Status: Met, and now bounded** — feature 018 for the holding, feature 017 for the bound. Proven under graceful subscriber restart by feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
 
 A registered group's queue holds every publish while its subscriber is away, so a restart or a
 deploy loses nothing. That was unqualified until 017 and it could not stay that way: a guarantee
@@ -181,7 +181,7 @@ Retirement deletes the backlog and is **never silent**: it logs at Warning, reco
 
 ### C2.4 — Pub/Sub is **not** a store for messages nobody has subscribed to
 
-**Status: Met** — the backlog was removed once `SendAsync` gave that use case a proper home.
+**Status: Met** — the backlog was removed once `SendAsync` gave that use case a proper home. Proven during Settle/Arrival phases of feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
 
 A publish with no registered group is delivered to nobody. A group registering later starts
 empty. The surprising rule this removes: a late group used to receive an arbitrary prefix of
@@ -215,7 +215,7 @@ subscriber that has declared it no longer exists; in-flight *requests* do not.
 
 ### C3.2 — A caller always gets an answer or a timeout, never silence
 
-**Status: Met.**
+**Status: Met.** Proven by invariant I3 under sustained load across thousands of RPC invocations by feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
 
 `CallTimeout` (30 s default) bounds the wait. Errors are data (`Output.StatusCode`), not
 exceptions.
@@ -303,7 +303,7 @@ documented as true.
 
 ### C4.6 — Storage growth is bounded over time, not just in the moment
 
-**Status: Not met.** Investigated twice and **measured not to work** both times.
+**Status: Not met.** Investigated three times and **measured not to work** across all configurations.
 
 `AofSizeLimitBytes` (512 MB default) is configured and Garnet's background enforcement task
 runs — checkpoints appear where none did before, and the checkpoint path demonstrably calls
@@ -320,18 +320,11 @@ Measured against a **32 MB** limit, so hundreds of checkpoints' worth of headroo
 disk. Reclamation would need whole device segments to retire, and in this configuration they do
 not.
 
-> **A hypothesis tested and discarded, recorded so nobody repeats it.** The suspicion was that
-> Garnet's 32 MB `AofPageSize` was larger than the traffic between checkpoints, so no page ever
-> fully obsoleted. Lowering it is impossible — Garnet requires the AOF page to be at least twice
-> the 16 MB main-log page and refuses to start otherwise — and testing at a scale that crosses
-> several 32 MB pages showed exactly the same linear growth. The option added to configure it
-> was **removed rather than shipped**, because an option whose only stated purpose is a fix that
-> does not work is worse than no option.
+> **Investigations & Discarded Hypotheses (recorded so nobody repeats them):**
+> 1. *Hypothesis 1 (016):* Garnet's default AOF page size (32 MB) was larger than the traffic between checkpoints, so no page ever fully obsoleted. Lowering it below 32 MB is rejected by Garnet (must be at least 2x 16 MB main-log page).
+> 2. *Hypothesis 2 (034):* Exposing `AofSegmentSize` (`32m`, `64m`) would enable Garnet to truncate and delete retired segment files on disk once traffic crosses segment boundaries. Feature 034 exposed `WithAofSegmentSize("32m")` and verified at full scale (12,000 × 8 KB messages per wave = 24,000 total ≈ 205 MB): Wave 1 produces 102.3 MB across 4 files (`aof.log.0..3`); Wave 2 produces 204.6 MB across 7 files (`aof.log.0..6`). File count increases monotonically from 4 to 7; older segment files are never deleted by Garnet's `TsavoriteLog` on disk despite logical truncation (`TruncateUntil`). Growth remains strictly linear in total history.
 
-An earlier measurement (2,000 messages → 8.9 MB, 4,000 → 17.8 MB) was too small to distinguish
-"not reclaiming" from "reclaiming in 32 MB steps". This one is not.
-
-The test is kept and **skipped**, carrying the measurement.
+The test `SustainedTraffic_DoesNotGrowTheLogWithoutBound` is kept and **skipped**, carrying the measurements.
 
 **What this costs in practice:** a broker's disk grows with everything it has ever written, and
 restart replays all of it. A busy broker needs its data directory watched, and a periodic

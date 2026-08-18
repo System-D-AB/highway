@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using Highway.Client.Engine;
 using Microsoft.Extensions.Caching.Distributed;
 using StackExchange.Redis;
 
@@ -11,22 +12,37 @@ namespace Highway.Client.Caching;
 /// </summary>
 public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, IDisposable
 {
+    /// <summary>
+    /// The exact Redis string/key commands issued by <see cref="HighwayCache"/>.
+    /// Used by ACL allowlist derivation and validation (feature 034).
+    /// </summary>
+    public static readonly string[] SupportedCommands = ["GET", "SET", "DEL", "EXPIRE"];
+
     // Header layout (stored when sliding expiration is involved):
-    // [1 byte version][8 bytes absoluteDeadline UTC ticks (0 = none)][2 bytes slidingSeconds (0 = none)]
-    private const int HeaderSize = 11;
+    // [4 bytes magic "HWCH"][1 byte version][8 bytes absoluteDeadline UTC ticks (0 = none)][2 bytes slidingSeconds (0 = none)]
+    private const uint HeaderMagic = 0x48435748; // "HWCH"
+    private const int HeaderSize = 15;
     private const byte HeaderVersion = 1;
 
-    private readonly IDatabase _db;
+    private readonly HighwayConnectionSource? _connectionSource;
+    private readonly IConnectionMultiplexer? _directConnection;
     private readonly string _prefix;
 
-    internal HighwayCache(IConnectionMultiplexer connection, HighwayCacheOptions options)
+    public HighwayCache(HighwayConnectionSource connectionSource, HighwayCacheOptions options)
     {
-        ArgumentNullException.ThrowIfNull(connection);
+        _connectionSource = connectionSource ?? throw new ArgumentNullException(nameof(connectionSource));
         ArgumentNullException.ThrowIfNull(options);
-
-        _db = connection.GetDatabase();
         _prefix = options.KeyPrefix;
     }
+
+    public HighwayCache(IConnectionMultiplexer connection, HighwayCacheOptions options)
+    {
+        _directConnection = connection ?? throw new ArgumentNullException(nameof(connection));
+        ArgumentNullException.ThrowIfNull(options);
+        _prefix = options.KeyPrefix;
+    }
+
+    private IDatabase Db => _directConnection?.GetDatabase() ?? _connectionSource!.GetDatabase();
 
     // ─────────────────────────────────────────────────────────────────────
     // IDistributedCache — Get
@@ -37,7 +53,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
         ArgumentNullException.ThrowIfNull(key);
         var redisKey = PrefixKey(key);
 
-        RedisValue raw = _db.StringGet(redisKey);
+        RedisValue raw = Db.StringGet(redisKey);
         if (raw.IsNull)
             return null;
 
@@ -49,7 +65,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
         ArgumentNullException.ThrowIfNull(key);
         var redisKey = PrefixKey(key);
 
-        RedisValue raw = await _db.StringGetAsync(redisKey).ConfigureAwait(false);
+        RedisValue raw = await Db.StringGetAsync(redisKey).ConfigureAwait(false);
         if (raw.IsNull)
             return null;
 
@@ -69,7 +85,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
         var redisKey = PrefixKey(key);
         var (payload, expiry) = BuildPayloadAndExpiry(value, options);
 
-        _db.StringSet(redisKey, payload, expiry);
+        Db.StringSet(redisKey, payload, expiry);
     }
 
     public async Task SetAsync(string key, byte[] value, DistributedCacheEntryOptions options, CancellationToken token = default)
@@ -81,7 +97,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
         var redisKey = PrefixKey(key);
         var (payload, expiry) = BuildPayloadAndExpiry(value, options);
 
-        await _db.StringSetAsync(redisKey, payload, expiry).ConfigureAwait(false);
+        await Db.StringSetAsync(redisKey, payload, expiry).ConfigureAwait(false);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -91,13 +107,13 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
     public void Remove(string key)
     {
         ArgumentNullException.ThrowIfNull(key);
-        _db.KeyDelete(PrefixKey(key));
+        Db.KeyDelete(PrefixKey(key));
     }
 
     public async Task RemoveAsync(string key, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(key);
-        await _db.KeyDeleteAsync(PrefixKey(key)).ConfigureAwait(false);
+        await Db.KeyDeleteAsync(PrefixKey(key)).ConfigureAwait(false);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -109,7 +125,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
         ArgumentNullException.ThrowIfNull(key);
         var redisKey = PrefixKey(key);
 
-        RedisValue raw = _db.StringGet(redisKey);
+        RedisValue raw = Db.StringGet(redisKey);
         if (raw.IsNull)
             return;
 
@@ -121,7 +137,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
         ArgumentNullException.ThrowIfNull(key);
         var redisKey = PrefixKey(key);
 
-        RedisValue raw = await _db.StringGetAsync(redisKey).ConfigureAwait(false);
+        RedisValue raw = await Db.StringGetAsync(redisKey).ConfigureAwait(false);
         if (raw.IsNull)
             return;
 
@@ -129,17 +145,16 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // IBufferDistributedCache — TryGet
+    // IBufferDistributedCache — Get / Set via ReadOnlySequence / IBufferWriter
     // ─────────────────────────────────────────────────────────────────────
 
     public bool TryGet(string key, IBufferWriter<byte> destination)
     {
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(destination);
-
         var redisKey = PrefixKey(key);
 
-        RedisValue raw = _db.StringGet(redisKey);
+        RedisValue raw = Db.StringGet(redisKey);
         if (raw.IsNull)
             return false;
 
@@ -150,29 +165,23 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
     {
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(destination);
-
         var redisKey = PrefixKey(key);
 
-        RedisValue raw = await _db.StringGetAsync(redisKey).ConfigureAwait(false);
+        RedisValue raw = await Db.StringGetAsync(redisKey).ConfigureAwait(false);
         if (raw.IsNull)
             return false;
 
         return await ProcessGetToBufferAsync(redisKey, (byte[])raw!, destination).ConfigureAwait(false);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // IBufferDistributedCache — Set
-    // ─────────────────────────────────────────────────────────────────────
-
     public void Set(string key, ReadOnlySequence<byte> value, DistributedCacheEntryOptions options)
     {
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(options);
 
-        var redisKey = PrefixKey(key);
-        var (payload, expiry) = BuildPayloadAndExpiry(value, options);
-
-        _db.StringSet(redisKey, payload, expiry);
+        // Convert ReadOnlySequence to byte[] for storage
+        var bytes = value.ToArray();
+        Set(key, bytes, options);
     }
 
     public async ValueTask SetAsync(string key, ReadOnlySequence<byte> value, DistributedCacheEntryOptions options, CancellationToken token = default)
@@ -180,10 +189,8 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
         ArgumentNullException.ThrowIfNull(key);
         ArgumentNullException.ThrowIfNull(options);
 
-        var redisKey = PrefixKey(key);
-        var (payload, expiry) = BuildPayloadAndExpiry(value, options);
-
-        await _db.StringSetAsync(redisKey, payload, expiry).ConfigureAwait(false);
+        var bytes = value.ToArray();
+        await SetAsync(key, bytes, options, token).ConfigureAwait(false);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -192,7 +199,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
 
     public void Dispose()
     {
-        // The cache does not own the connection — nothing to dispose.
+        // ConnectionMultiplexer lifecycle is managed externally (by DI container).
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -226,9 +233,10 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
             long absoluteTicks = absoluteDeadline?.UtcTicks ?? 0;
 
             payload = new byte[HeaderSize + value.Length];
-            payload[0] = HeaderVersion;
-            BinaryPrimitives.WriteInt64LittleEndian(payload.AsSpan(1), absoluteTicks);
-            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(9), slidingSeconds);
+            BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0), HeaderMagic);
+            payload[4] = HeaderVersion;
+            BinaryPrimitives.WriteInt64LittleEndian(payload.AsSpan(5), absoluteTicks);
+            BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(13), slidingSeconds);
             value.CopyTo(payload.AsSpan(HeaderSize));
 
             // Initial TTL = sliding, capped by absolute if present.
@@ -282,10 +290,12 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
     /// </summary>
     private byte[]? ProcessGetResult(string redisKey, byte[] raw, bool isRefreshOnly)
     {
-        if (raw.Length >= HeaderSize && raw[0] == HeaderVersion)
+        if (raw.Length >= HeaderSize &&
+            BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(0)) == HeaderMagic &&
+            raw[4] == HeaderVersion)
         {
-            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(1));
-            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(9));
+            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(5));
+            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(13));
 
             if (slidingSeconds > 0)
             {
@@ -301,7 +311,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
                     if (timeToAbsolute <= TimeSpan.Zero)
                     {
                         // Past absolute deadline — logically expired.
-                        _db.KeyDelete(redisKey);
+                        Db.KeyDelete(redisKey);
                         return null;
                     }
 
@@ -313,7 +323,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
                     newTtl = sliding;
                 }
 
-                _db.KeyExpire(redisKey, newTtl);
+                Db.KeyExpire(redisKey, newTtl);
 
                 return isRefreshOnly ? null : raw.AsSpan(HeaderSize).ToArray();
             }
@@ -329,10 +339,12 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
     /// </summary>
     private async Task<byte[]?> ProcessGetResultAsync(string redisKey, byte[] raw, bool isRefreshOnly)
     {
-        if (raw.Length >= HeaderSize && raw[0] == HeaderVersion)
+        if (raw.Length >= HeaderSize &&
+            BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(0)) == HeaderMagic &&
+            raw[4] == HeaderVersion)
         {
-            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(1));
-            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(9));
+            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(5));
+            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(13));
 
             if (slidingSeconds > 0)
             {
@@ -346,7 +358,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
 
                     if (timeToAbsolute <= TimeSpan.Zero)
                     {
-                        await _db.KeyDeleteAsync(redisKey).ConfigureAwait(false);
+                        await Db.KeyDeleteAsync(redisKey).ConfigureAwait(false);
                         return null;
                     }
 
@@ -357,7 +369,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
                     newTtl = sliding;
                 }
 
-                await _db.KeyExpireAsync(redisKey, newTtl).ConfigureAwait(false);
+                await Db.KeyExpireAsync(redisKey, newTtl).ConfigureAwait(false);
 
                 return isRefreshOnly ? null : raw.AsSpan(HeaderSize).ToArray();
             }
@@ -372,10 +384,12 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
     /// </summary>
     private bool ProcessGetToBuffer(string redisKey, byte[] raw, IBufferWriter<byte> destination)
     {
-        if (raw.Length >= HeaderSize && raw[0] == HeaderVersion)
+        if (raw.Length >= HeaderSize &&
+            BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(0)) == HeaderMagic &&
+            raw[4] == HeaderVersion)
         {
-            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(1));
-            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(9));
+            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(5));
+            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(13));
 
             if (slidingSeconds > 0)
             {
@@ -389,7 +403,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
 
                     if (timeToAbsolute <= TimeSpan.Zero)
                     {
-                        _db.KeyDelete(redisKey);
+                        Db.KeyDelete(redisKey);
                         return false;
                     }
 
@@ -400,7 +414,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
                     newTtl = sliding;
                 }
 
-                _db.KeyExpire(redisKey, newTtl);
+                Db.KeyExpire(redisKey, newTtl);
 
                 var payload = raw.AsSpan(HeaderSize);
                 var span = destination.GetSpan(payload.Length);
@@ -423,10 +437,12 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
     /// </summary>
     private async ValueTask<bool> ProcessGetToBufferAsync(string redisKey, byte[] raw, IBufferWriter<byte> destination)
     {
-        if (raw.Length >= HeaderSize && raw[0] == HeaderVersion)
+        if (raw.Length >= HeaderSize &&
+            BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(0)) == HeaderMagic &&
+            raw[4] == HeaderVersion)
         {
-            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(1));
-            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(9));
+            var absoluteTicks = BinaryPrimitives.ReadInt64LittleEndian(raw.AsSpan(5));
+            var slidingSeconds = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(13));
 
             if (slidingSeconds > 0)
             {
@@ -440,7 +456,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
 
                     if (timeToAbsolute <= TimeSpan.Zero)
                     {
-                        await _db.KeyDeleteAsync(redisKey).ConfigureAwait(false);
+                        await Db.KeyDeleteAsync(redisKey).ConfigureAwait(false);
                         return false;
                     }
 
@@ -451,7 +467,7 @@ public sealed class HighwayCache : IDistributedCache, IBufferDistributedCache, I
                     newTtl = sliding;
                 }
 
-                await _db.KeyExpireAsync(redisKey, newTtl).ConfigureAwait(false);
+                await Db.KeyExpireAsync(redisKey, newTtl).ConfigureAwait(false);
 
                 var payload = raw.AsSpan(HeaderSize);
                 var span = destination.GetSpan(payload.Length);

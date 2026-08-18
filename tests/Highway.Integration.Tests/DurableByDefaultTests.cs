@@ -143,16 +143,21 @@ public class AofGrowthTests : IDisposable
         catch { /* a locked file must not fail a passing test */ }
     }
 
-    private long AofBytes() => Directory
-        .GetFiles(Path.Combine(_dataDir, "checkpoints", "AOF"), "aof.log*", SearchOption.AllDirectories)
-        .Sum(f => new FileInfo(f).Length);
+    private (long TotalBytes, int FileCount, string[] FileNames) AofStats()
+    {
+        var dir = Path.Combine(_dataDir, "checkpoints", "AOF");
+        if (!Directory.Exists(dir)) return (0, 0, []);
+        var files = Directory.GetFiles(dir, "aof.log*", SearchOption.AllDirectories);
+        var total = files.Sum(f => new FileInfo(f).Length);
+        var names = files.Select(Path.GetFileName).Where(n => n is not null).Select(n => n!).ToArray();
+        return (total, files.Length, names);
+    }
 
-    [Fact(Skip = "C4.6 is NOT met, and configuring AofSizeLimit does not fix it. Measured at " +
-                 "production scale with a 32 MB limit: 12,000 x 8 KB messages -> 102 MB of AOF; " +
-                 "24,000 -> 205 MB. Exactly linear in total history. Garnet's checkpoint does " +
-                 "call TruncateUntil, so truncation is LOGICAL - the begin address moves and " +
-                 "disk is not returned. Kept and skipped so the gap stays visible and the next " +
-                 "attempt starts from a measurement.")]
+    [Fact(Skip = "C4.6 is NOT met. Feature 034 experiment with AofSegmentSize='32m' confirms " +
+                 "physical segment reclamation does not occur on disk in Garnet's TsavoriteLog: " +
+                 "Wave 1 (12k msgs x 8KB): 102.3 MB (4 segment files: aof.log.0..3). " +
+                 "Wave 2 (12k msgs x 8KB): 204.6 MB (7 segment files: aof.log.0..6). " +
+                 "Old segment files are not deleted by TsavoriteLog during commit; log growth is strictly linear.")]
     public async Task SustainedTraffic_DoesNotGrowTheLogWithoutBound()
     {
         // 32 MB is Garnet's floor for an AOF page (it must be twice the 16 MB main-log page),
@@ -166,10 +171,12 @@ public class AofGrowthTests : IDisposable
             .WithPort(port)
             .WithDataDir(_dataDir)
             .WithOptions(o => o.AofSizeLimitBytes = limit)
+            .WithAofSegmentSize("32m")
             .Build();
         server.Start();
 
-        var db = ConnectionMultiplexer.Connect($"localhost:{port}").GetDatabase();
+        var muxer = ConnectionMultiplexer.Connect($"localhost:{port}");
+        var db = muxer.GetDatabase();
         var blob = new string('x', 8192);
         var payload = Encoding.UTF8.GetBytes(
             "{\"v\":1,\"src\":\"t\",\"ts\":\"2026-08-09T00:00:00Z\",\"body\":{\"Blob\":\"" + blob + "\"}}");
@@ -184,23 +191,22 @@ public class AofGrowthTests : IDisposable
             }
         }
 
-        // ~8 KB x 12,000 x 3 ops is well past several pages.
+        // ~8 KB x 12,000 x 3 ops is well past several 32 MB segments (~100 MB per wave).
         Drive(0, 12_000);
-        await Task.Delay(TimeSpan.FromSeconds(12));   // enforcement is a background task
-        var afterFirst = AofBytes();
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        var (bytes1, files1, names1) = AofStats();
 
         Drive(12_000, 12_000);
-        await Task.Delay(TimeSpan.FromSeconds(12));
-        var afterSecond = AofBytes();
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        var (bytes2, files2, names2) = AofStats();
 
-        // Growth, not absolute size. A log that is genuinely bounded grows sub-linearly with
-        // total history; an unbounded one doubles when the traffic doubles.
-        var growth = afterSecond - afterFirst;
+        var growth = bytes2 - bytes1;
 
-        growth.Should().BeLessThan(afterFirst,
+        // File count decreasing is the signal; total bytes alone can be explained by checkpoint timing.
+        growth.Should().BeLessThan(bytes1,
             $"the second batch of identical traffic must not grow the log as much as the first " +
-            $"({afterFirst} bytes -> {afterSecond} bytes). An unbounded log grows linearly with " +
-            "total history, which is what makes a year-old broker slow to start");
+            $"({bytes1} bytes in {files1} files [{string.Join(",", names1)}] -> {bytes2} bytes in {files2} files [{string.Join(",", names2)}]). " +
+            "An unbounded log grows linearly with total history, which is what makes a year-old broker slow to start");
     }
 }
 

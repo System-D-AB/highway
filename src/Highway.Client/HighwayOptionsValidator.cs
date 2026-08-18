@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.Extensions.Logging;
 
 namespace Highway.Client;
 
@@ -54,6 +55,44 @@ internal static class HighwayOptionsValidator
         if (options.DiscoveryCacheTtl < TimeSpan.Zero)
             throw new InvalidOperationException(
                 $"HighwayOptions.DiscoveryCacheTtl cannot be negative, but was {options.DiscoveryCacheTtl}.");
+
+        ValidateTls(options);
+    }
+
+    public static void ValidateTls(HighwayOptions options, ILogger? logger = null)
+    {
+        if (!string.IsNullOrEmpty(options.Password) && options.Tls is not { Enabled: true })
+        {
+            logger?.LogWarning(
+                "Transport security (TLS) is disabled while authentication is configured; credentials will cross the network in clear text. Enable TLS with WithTls(...) / HighwayOptions.Tls.");
+        }
+
+        if (options.Tls is { Enabled: true } tls)
+        {
+            if (tls.IsEphemeral)
+            {
+                logger?.LogWarning(
+                    "Using ephemeral self-signed certificate for TLS; clients must not use this configuration in production environments without proper certificate validation.");
+            }
+
+            if (tls.Protocols is { } protocols)
+            {
+#pragma warning disable CS0618, SYSLIB0039
+                const System.Security.Authentication.SslProtocols deprecated =
+                    System.Security.Authentication.SslProtocols.Ssl2 |
+                    System.Security.Authentication.SslProtocols.Ssl3 |
+                    System.Security.Authentication.SslProtocols.Tls |
+                    System.Security.Authentication.SslProtocols.Tls11;
+#pragma warning restore CS0618, SYSLIB0039
+
+                if ((protocols & deprecated) != 0)
+                {
+                    logger?.LogWarning(
+                        "TLS protocol '{Protocols}' includes deprecated versions (< TLS 1.2). Use TLS 1.2 or TLS 1.3 for secure communication.",
+                        protocols);
+                }
+            }
+        }
     }
 
     /// <summary>

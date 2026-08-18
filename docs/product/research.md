@@ -859,3 +859,14 @@ Full detail in `docs/features/012-introduce-security/design.md`.
 Part 3's architectural conclusions stand. For **what Highway currently guarantees**, and
 which of those guarantees the code actually keeps, the authority is
 [`constraints.md`](constraints.md) — numbered, with an implementation status on every line.
+
+## Addendum (2026-08-11): the research folder
+
+Standalone research documents now live in [`research/`](research/), one dated file per
+investigation. These are explorations *around* Highway, not Highway features — they carry
+their own status lines.
+
+- [`research/2026-08-11-garnet-document-store.md`](research/2026-08-11-garnet-document-store.md) —
+  Could Garnet carry a YesSQL-style document store for .NET (a sibling project, Marten ↔
+  Wolverine analogy with Highway playing Wolverine)? Verdict: feasible, ~4–6 months to v1,
+  5–10 GB workable if documents live in the disk-tiered main store and indexes stay in RAM.

@@ -1,3 +1,4 @@
+using Highway.Client.Engine;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -39,11 +40,13 @@ public static class CacheServiceCollectionExtensions
                 "HighwayCacheOptions.Server is required. " +
                 "Provide the Highway/Garnet server connection string.");
 
-        // Create a dedicated connection for cache-only mode.
-        var mux = ConnectionMultiplexer.Connect(options.Server);
-        var cache = new HighwayCache(mux, options);
-
-        services.TryAddSingleton<IDistributedCache>(cache);
+        services.TryAddSingleton<HighwayCacheOptions>(options);
+        services.TryAddSingleton<HighwayConnectionSource>(sp =>
+            new HighwayConnectionSource(sp.GetRequiredService<HighwayCacheOptions>()));
+        services.TryAddSingleton<HighwayCache>(sp =>
+            new HighwayCache(sp.GetRequiredService<HighwayConnectionSource>(), sp.GetRequiredService<HighwayCacheOptions>()));
+        services.TryAddSingleton<IDistributedCache>(sp => sp.GetRequiredService<HighwayCache>());
+        services.TryAddSingleton<IBufferDistributedCache>(sp => sp.GetRequiredService<HighwayCache>());
 
         return services;
     }

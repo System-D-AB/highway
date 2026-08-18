@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Highway.Assurance.Reconciler</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Reconciler references NO Highway client/engine code (D5).
+      Only Ledger model/serialization and standard tools.
+    -->
+    <ProjectReference Include="..\Highway.Assurance.Ledger\Highway.Assurance.Ledger.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" />
+  </ItemGroup>
+
+</Project>

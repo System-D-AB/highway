@@ -2,6 +2,12 @@
 
   <PropertyGroup>
     <RootNamespace>Highway.Server.Dashboard</RootNamespace>
+    <!-- Not packaged. The dashboard ships inside the `highways` distribution (031), where it
+         runs in the broker process and sees the flight recorder live. A NuGet package would
+         only serve someone hosting a broker themselves, which is the deployment shape 031
+         exists to replace — and it would drag the ASP.NET Core shared framework into every
+         test host that referenced it. -->
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>
@@ -15,6 +21,10 @@
   <!-- Embed static web assets -->
   <ItemGroup>
     <EmbeddedResource Include="wwwroot\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>

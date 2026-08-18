@@ -1,0 +1,16 @@
+# Highway Access Control List (ACL) Configuration
+# Feature 034: Shipped default for trusted network deployment (D6 / R3.1).
+# 
+# One always-on user ('default') with no password required ('nopass'), granting access
+# to all keys (~*), denying all built-in commands (-@all),
+# and allowlisting only the commands required by Highway:
+# - Connection & Handshake: +@connection (PING, HELLO, CLIENT, ECHO, QUIT, SELECT, AUTH)
+# - Liveness: +ping
+# - Doorbells (RESP pub/sub): SUBSCRIBE, UNSUBSCRIBE
+# - Distributed Cache (026): GET, SET, DEL, EXPIRE
+# - Startup Data Check: SCAN
+# - Protocol Commands: all 18 HW.* custom commands and custom command registration (+@custom)
+#
+# Administrative and dangerous commands (FLUSHALL, CONFIG, KEYS, SHUTDOWN, etc.) are refused.
+
+user default on nopass ~* -@all +@connection +ping +subscribe +unsubscribe +get +set +del +expire +scan +hw.call +hw.reply +hw.dequeue +hw.ack +hw.publish +hw.subscribe +hw.unsubscribe +hw.heartbeat +hw.discover +hw.stats +hw.replay +hw.dlq +hw.qsend +hw.qclaim +hw.qack +hw.fail +hw.job +hw.touch +@custom

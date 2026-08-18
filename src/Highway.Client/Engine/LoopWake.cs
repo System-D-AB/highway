@@ -7,7 +7,7 @@ namespace Highway.Client.Engine;
 /// </summary>
 internal sealed class LoopWake
 {
-    private readonly SemaphoreSlim _signal = new(0);
+    private readonly SemaphoreSlim _signal = new(0, 1);
 
     /// <summary>Idempotent wake: at most one pending signal is kept.</summary>
     public void Signal()

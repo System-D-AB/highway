@@ -473,10 +473,11 @@ which asks to take seriously.
 
 ---
 
-## Planned: 027, 029–030
+## Planned: 027, 029–031
 
 Registered 2026-08-10 as empty feature folders; each gets the full requirements → design →
 tasks treatment when its discussion happens. Order within the list is not commitment order.
+(031 arrived fully specced on 2026-08-11 — its discussion happened first.)
 
 ### 027 — Distributed Rate Limiter
 
@@ -502,6 +503,119 @@ skew lets two holders proceed), so this ships **only with a fencing token** — 
 *can* mint because it owns the server, and a generic Redis wrapper cannot. The open question
 is whether anything needs it that 029 does not already cover; if no concrete need surfaces
 during the discussions, this folder closes as a cookbook pattern instead of a feature.
+
+### 031 — Server Distribution
+
+**Lane:** connective tissue — delivers `product.md`'s hosting promise ("run as a single
+binary", "deployed as a standalone process in production"); today the broker runs
+standalone only by writing your own host. **Fully specced 2026-08-11, simplified
+2026-08-12** — `docs/features/031-server-distribution/`: a MongoDB-style zip per RID —
+`bin/highways` (exe + DLLs) running broker and embedded dashboard as one process,
+`config/highway.json` with full-coverage options incl. the authentication on/off switch,
+`data/`, `logs/`, and `scripts/` holding what an operator actually double-clicks: run it
+standalone, install or remove it as a Windows service, install or remove it as a systemd
+daemon. **No container image** (D8, 2026-08-12): the broker embeds like SQLite, so an
+app that hosts it already *is* the image, and a shared broker wraps this zip in the
+cluster's own base image. 021's broker-side sibling — exactly the deployment shape 021
+carved out as a non-goal, reusing its installer analysis. Decision history recorded in
+the spec: OD3 revised to folder publish; OD9 (separate dashboard executable) added and
+reverted — the dashboard stays embedded where its flight recorder lives; OD1 revised
+2026-08-12 to `highways`. Phase 1 shipped bar T14 (host + configuration layer, 70 tests
+green); T14 carries the rename and the fixes a 2026-08-12 review found; Phases 2–6
+pending.
+
+### 032 — The Assurance Rig
+
+**Status:** Complete (2026-08-18)
+
+**Lane:** connective tissue — proves existing guarantees rather than adding any. **Fully
+delivered 2026-08-18** — `docs/features/032-assurance-rig/`: three applications as real
+processes against one `highways` broker under load (50–100 msg/s aggregate), covering every
+verb in every direction, with a durable email queue whose consumers deliberately arrive 75
+seconds late. Every participant writes an append-only ledger; an independent reconciler proves
+by set operations on correlation ids that nothing was lost across 7 correctness invariants,
+cross-checked against the broker's own `HW.STATS` and flight recorder. Delivered with a
+fast-running CI integration suite (<60s) and a full 4-minute multi-process soak run.
+Registers **033** for crash-recovery, disk-full and connection-churn. Claims no throughput
+figure (C5) and measures AOF/directory storage. Evidence recorded in `assurance/RUNLOG.md` and
+`docs/features/032-assurance-rig/runs.md`.
+
+---
+
+### 033 — Chaos & Fault Injection Assurance Rig
+
+**Status:** Planned
+
+**Lane:** connective tissue — extends Feature 032 harness to destructive broker and environmental failures.
+
+**Scope:**
+- Broker abrupt process kill & recovery validation across active traffic
+- Disk-full and backpressure handling under sustained load
+- Network partition simulation and rapid connection churn / reconnect storms
+- Cross-checking storage recovery and AOF replay correctness against ledger invariants
+
+---
+
+### 035 — NuGet Packages ✅
+
+**Status:** Complete (2026-08-18)
+
+**Lane:** connective tissue — closes the gap between `product.md`'s founding claim ("the
+client is a NuGet package") and reality, where no package metadata exists anywhere. **Shipped 2026-08-18** — `docs/features/035-nuget-packages/`: four packages
+(`Highway.Abstractions`, `Highway.Client`, `Highway.Server`, `Highway.Server.Dashboard`),
+with the `highways` executable deliberately excluded because its channel is 031's Release
+zip. Two channels, one version property: **Releases** for deploying a broker, **NuGet** for
+building against Highway and running one in-process for tests.
+
+**The blocker turned out not to be one.** `Highway.Server` referenced Garnet from source
+because `Garnet.host` marks its dependencies `PrivateAssets="All"`. Verified 2026-08-18:
+`Garnet.host.csproj` packs those dependencies into `lib/{tfm}` anyway, and the restored
+`microsoft.garnet/2.1.3` package carries ten assemblies including `Garnet.server.dll` and
+`Tsavorite.core.dll` — everything Highway compiles against. The submodule survives as an
+opt-in build mode (`-p:UseGarnetSource=true`) for debugging and for the option of carrying a
+patch, which is the only lever available for C4.6 if 034's experiment fails.
+
+---
+
+## Deferred to v2: Traffic Capture and Replay
+
+**Postponed 2026-08-18 by the user, deliberately and with the reasoning kept** — the
+priority is finishing v1 and putting it into production, not widening the surface.
+
+The idea: persist the flight recorder to disk asynchronously with 1–2 days of retention;
+export a capture; import it into a **staging broker** through the dashboard; re-run it
+against nodes that serve those messages, diffing the new replies against the recorded ones.
+A regression harness built from real production traffic.
+
+Why it is v2 and not v1:
+
+- **It adds a paradigm.** The connective-tissue gate is *"closes a recorded gap or
+  strengthens an existing guarantee; never adds a paradigm."* Capture-and-replay is a new
+  one, so it needs to enter as a deliberate product decision rather than as an extension of
+  the assurance rig.
+- **It is four features, not one**: a durable recorder (server-side, async, bounded); an
+  export/import format with redaction; a replay engine; dashboard import. The **durable
+  recorder has standalone value** for post-incident diagnosis and is the piece to build
+  first if any of it is revived.
+- **The constraints it must respect are already written.** C7.1 — a diagnostic write can
+  never delay, block or fail a delivery — means the disk drain must drop when it lags, never
+  block. C2.5 stays true: the production broker is not becoming a replayable log; a capture
+  is re-injected as *new* traffic into a *separate* broker. C5 means "staging broker", not
+  a Highway cluster — there is no clustering.
+- **Sizing, measured from 032's own run** (~108 recorded events/s): full payloads cost
+  ~9.3 GB/day, ~19 GB for two days, against a recorder capped today at 64 MB and one hour.
+  The default would have to be `HeadersOnly` with `Full` opted in per name — in a product
+  whose C4.6 disk-growth constraint is *already unmet*.
+- **The workload makes it a data-protection question.** Password-reset and transactional
+  email payloads mean a capture holds reset tokens and email addresses, and moving one to
+  staging is a production-PII export. Redaction on export is a first-class step, not a flag.
+- **A prerequisite is unmet**: `HW.REPLAY` has never been read successfully by the rig
+  (`recorder-replay.jsonl` is 0 bytes across all three 032 runs, from a malformed call), so
+  nobody has yet looked at the content a persistence format would have to carry.
+
+Revive by specifying the durable recorder alone. The rest follows only if it earns its way.
+
+---
 
 ---
 

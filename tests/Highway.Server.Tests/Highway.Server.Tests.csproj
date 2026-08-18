@@ -5,9 +5,16 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <UseGarnetSource Condition="'$(UseGarnetSource)' == ''">false</UseGarnetSource>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\Highway.Server\Highway.Server.csproj" />
-    <!-- Needed to use GarnetServerOptions directly in tests -->
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseGarnetSource)' == 'true'">
+    <!-- Needed to use GarnetServerOptions directly in tests when building against source -->
     <ProjectReference Include="..\..\libs\garnet\libs\server\Garnet.server.csproj" />
     <ProjectReference Include="..\..\libs\garnet\libs\storage\Tsavorite\cs\src\core\Tsavorite.core.csproj" />
   </ItemGroup>

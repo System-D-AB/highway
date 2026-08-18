@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Highway.Assurance.Runner</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Highway.Assurance.Contracts\Highway.Assurance.Contracts.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Ledger\Highway.Assurance.Ledger.csproj" />
+    <ProjectReference Include="..\Highway.Assurance.Reconciler\Highway.Assurance.Reconciler.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" />
+  </ItemGroup>
+
+</Project>

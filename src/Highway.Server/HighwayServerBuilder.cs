@@ -145,6 +145,16 @@ public sealed class HighwayServerBuilder
     }
 
     /// <summary>
+    /// Configures the AOF segment file size (e.g. "32m", "64m", "1g").
+    /// </summary>
+    public HighwayServerBuilder WithAofSegmentSize(string segmentSize)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(segmentSize);
+        _opts.AofSegmentSize = segmentSize;
+        return this;
+    }
+
+    /// <summary>
     /// Configures the flight recorder and activity emission (feature 002).
     ///
     /// <para>Defaults are useful with no configuration. The one setting worth a
@@ -205,6 +215,20 @@ public sealed class HighwayServerBuilder
     {
         ArgumentNullException.ThrowIfNull(settings);
         _opts.Authentication.Settings = settings;
+        return this;
+    }
+
+    /// <summary>
+    /// Configures the server to authenticate using an ACL configuration file.
+    /// </summary>
+    public HighwayServerBuilder WithAclFile(string aclFilePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(aclFilePath);
+        var fullPath = Path.GetFullPath(aclFilePath);
+        if (!File.Exists(fullPath))
+            throw new FileNotFoundException($"ACL configuration file '{fullPath}' does not exist.", fullPath);
+
+        _opts.Authentication.Settings = new Garnet.server.Auth.Settings.AclAuthenticationPasswordSettings(aclConfigurationFile: fullPath);
         return this;
     }
 
@@ -419,8 +443,11 @@ public sealed class HighwayServerBuilder
     ///
     /// <para>1 = pre-013. 2 = 013's versioned entry framings. 3 = 018, which removed
     /// <c>HW.RECEIVE</c> and <c>HW.RACK</c> and thereby shifted every stored-procedure id.</para>
+    ///
+    /// <para>Public so the highways host's <c>--version</c> can print it (feature 031): an
+    /// operator upgrading in place can compare formats before touching a data directory.</para>
     /// </summary>
-    private const int StorageFormatVersion = 3;
+    public const int StorageFormatVersion = 3;
 
     private const string StorageFormatFile = "highway.format";
 
@@ -502,6 +529,11 @@ public sealed class HighwayServerBuilder
             // Transport security (feature 012). Null when TLS is not configured, which is
             // the default and is Garnet's own default too.
             TlsOptions = opts.Tls.CreateTlsOptions(null),
+
+            // In Highway, custom commands (HW.*) are registered programmatically during startup
+            // rather than via external C# binary modules, so strict custom command ACL validation
+            // must be disabled to allow explicit HW.* custom command rules in users.acl.
+            AclStrictCustomCommands = false,
         };
 
         if (opts.DataDir is not null)
@@ -523,6 +555,8 @@ public sealed class HighwayServerBuilder
             if (opts.AofSizeLimitBytes > 0)
                 garnet.AofSizeLimit = opts.AofSizeLimitBytes.ToString(CultureInfo.InvariantCulture);
 
+            if (!string.IsNullOrWhiteSpace(opts.AofSegmentSize))
+                garnet.AofSegmentSize = opts.AofSegmentSize;
 
             if (opts.WaitForCommit)
                 garnet.WaitForCommit = true;

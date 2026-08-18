@@ -2,6 +2,14 @@
 
   <PropertyGroup>
     <RootNamespace>Highway.Abstractions</RootNamespace>
+    <PackageId>Highway.Abstractions</PackageId>
+    <Description>Contracts, interfaces, and declarative message attributes for Highway distributed messaging, queues, pub/sub, RPC, and caching. Zero third-party dependencies.</Description>
+    <PackageTags>highway;messaging;microservices;queues;pubsub;rpc;contracts;abstractions</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
 </Project>

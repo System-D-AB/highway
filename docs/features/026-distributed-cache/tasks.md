@@ -54,3 +54,16 @@
   *Requirements:* R8.1–R8.4
   *Depends on:* T7, T8, T9
   **Done when:** full test suite green; `dotnet build --no-incremental` zero warnings; samples run unchanged (caching additions are new commands, not changes to existing ones); RUNLOG updated.
+
+---
+
+## Found after shipping
+
+- **2026-08-11 — the cache connection ignores the client's credentials (CLOSED — fixed in Feature 034).**
+  `ServiceCollectionExtensions.AddHighway` previously opened the cache's multiplexer from the raw
+  server string — no TLS, no password, no username, no `ConfigureConnection`.
+  **Fixed in Feature 034**: Unified canonical configuration builder `HighwayConnectionConfiguration`
+  and single singleton `HighwayConnectionSource` introduced, with `IHighwayConnectionSettings` shared
+  between engine and cache. Zero eager connection at container build time, single shared multiplexer,
+  credentials and TLS propagated identically. Verified with `TlsTests.FullClientBehaviour_WorksOverTls`
+  and `AddHighwayCacheRegistrationTests`.

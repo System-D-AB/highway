@@ -271,3 +271,249 @@ four rules into the UserGuide with rule 3 corrected (024 T7).
 Implicit-mode accident warning, topology manifest, can-use half to the dashboard, the four
 rules) and `docs/features/025-subscription-groups/` (claimant-is-the-group design forced by
 Prepare-declarability, membership mirror, group-aware retirement, last-member purge).
+
+
+---
+
+## 2026-08-18 — Logical application responsibility and functional dependency cycles
+
+*Watermark: GPT5.6 SOl — architectural review note.*
+
+*Context: immediately before production, the question was whether Highway should make every
+node adopt a responsibility convention, and whether functional cycles — not DLL references,
+but flows such as application A calling application B by RPC and B calling A — should be
+forbidden. The goal is to keep Highway simple for ordinary .NET developers without making an
+event-driven system's topology invisible or allowing durable feedback loops to grow forever.*
+
+### What Highway already knows
+
+Feature 024 built the correct first layer, and it should be preserved:
+
+- **Inbound responsibility is knowable.** `HostingMode.Declared` hosts handlers from the entry
+  assembly plus explicitly declared modules; `ExplicitOnly` requires every handler assembly to
+  be declared. `HostAssembly(...)` and `[assembly: HighwayHostModule]` are the two consent
+  mechanisms. `Implicit` remains the default and warns when a referenced assembly contributes
+  handlers without consent.
+- **Each process has a topology manifest.** `PROVIDES` names its hosted RPC services, queue
+  processors, subscribers and recurring jobs. `CAN USE` names RPC, queue and channel contracts
+  found through references. The manifest is logged at startup, exposed through
+  `IHighwayEngine.Topology`, sent in the heartbeat catalog and rendered on the node page.
+- **The honesty label matters.** `CAN USE` is addressability, not proof of calling. A process
+  referencing a contracts package can address its routes even when no line of its code ever
+  calls them. A shared catch-all contracts package can therefore make every node appear to be
+  able to use everything.
+- **The contracts-assembly convention solves the binary problem.** Contract libraries reference
+  only `Highway.Abstractions` and contain no handlers. Applications depend on contracts, never
+  on each other's executable or implementation assemblies.
+- **Operations can be observed, but lineage cannot yet be reconstructed.** The flight recorder
+  and `ActivitySource` show individual operations. The envelope has trace context, source and
+  message identity, but no durable root-causation identity, hop count or handler-to-child edge
+  from which Highway could prove a functional cycle.
+
+This means Highway can accurately answer *"what can this deployment receive?"* and can offer a
+conservative hint for *"what could it send?"* It cannot yet answer *"what does this handler
+actually call?"* Static cycle detection over `CAN USE` would produce false positives and must
+not be presented as authoritative.
+
+### Current gaps in that foundation
+
+Two implementation/documentation defects should be fixed before the topology manifest is treated
+as authoritative guidance:
+
+1. `TopologyManifest.Build` still writes `NodeName` as every subscriber's group even after
+   feature 025 introduced `EffectiveSubscriptionGroup`. A replica configured with
+   `SubscriptionGroup = "billing"` is therefore described incorrectly.
+2. Feature 024 T7 is checked complete, but the current UserGuide has no `HostingMode`, hosting
+   consent or topology-manifest section. The protection exists in code and XML documentation but
+   is missing from the path most developers will read.
+
+There is also a deliberate limitation rather than a defect: `TopologyManifest.CanUse` excludes
+routes the process itself provides. That keeps the startup block readable, but it means the
+manifest cannot be reused unchanged as a complete dependency or self-call graph.
+
+### Decision: responsibility means a business capability, not a transport role
+
+Every **logical application** should own one coherent bounded business responsibility. A node is
+a physical instance or replica of that application; it should not be modelled as a
+"publisher node", "subscriber node" or "processor node".
+
+An Orders application may legitimately provide order RPC operations, process order jobs,
+publish order facts and subscribe to payment facts. Splitting those by messaging interface would
+turn one cohesive capability into several tiny deployments and make the system harder, not
+simpler. The convention is therefore:
+
+> One logical application owns one business capability and explicitly hosts its inbound routes.
+> It may use every Highway verb needed to fulfil that responsibility.
+
+Do not add `[HighwayRole(Publisher)]`, `[ProducedBy]` or `[ConsumedBy]` declarations. They either
+cannot be enforced — any code holding `IHighwayClient` can send — or become deployment claims in
+contract packages that drift and eventually lie. Hosting consent is enforceable; outbound role
+labels are not.
+
+### Decision: synchronous RPC dependencies form a DAG
+
+The logical-application RPC graph should be acyclic by convention:
+
+```
+BAD
+
+Orders  -- RPC, waits -->  Payments
+   ^                         |
+   +------ RPC, waits -------+
+```
+
+This rule applies even when the reverse call occurs in a different method rather than in the
+same request. Bidirectional synchronous ownership creates circular availability requirements,
+multiplies latency and timeout budgets, amplifies retries, encourages worker-pool starvation and
+makes neither service independently understandable or operable. A same-request cycle is worse:
+it becomes distributed recursion and normally ends only when a timeout breaks it.
+
+When B needs information from A in order to answer A:
+
+1. put the required information in A's original request;
+2. move the decision to the application that owns the data and invariant;
+3. extract a third capability both may depend on; or
+4. make B's later outcome an event instead of a synchronous call back to A.
+
+Highway should continue to be technically capable of making a reverse RPC call. The catalog does
+not know the real call graph, migrations and integration adapters sometimes need temporary
+exceptions, and a universal protocol-level ban would reject valid systems. The default design
+guidance should nevertheless treat an RPC cycle as an architecture error, and optional strict
+tooling may enforce that rule where the application declares enough truth to do so.
+
+### Decision: asynchronous topology cycles are allowed; causal loops are not
+
+A directed cycle on a topology diagram is not automatically a defect. Feature 032's
+`Edge -> UserSignedUp -> Notifications -> EmailDispatched -> Edge` flow is reasonable: the
+messages are different facts, state advances and the causal chain terminates.
+
+```
+GOOD
+
+Orders  -- OrderPlaced -->  Billing
+Orders  <-- InvoiceIssued -- Billing
+```
+
+An asynchronous cycle is acceptable only when all of these are true:
+
+- each message represents a distinct state transition rather than an echo of its input;
+- one application clearly owns the workflow or aggregate state;
+- processing is idempotent under Highway's at-least-once delivery;
+- progress is monotonic toward a named terminal state;
+- an incoming message cannot blindly reproduce an ancestor message; and
+- the causal chain has a bounded hop budget and a loud terminal outcome when that budget is
+  exhausted.
+
+The dangerous form is `A receives X -> publishes Y; B receives Y -> publishes X`. With durable
+queues this is not ordinary recursion: it persists, retries and can amplify after the original
+caller has gone away. It must be prevented or dead-lettered, not merely displayed after damage.
+The same rule applies to two applications sending jobs back and forth.
+
+### Production convention using today's library
+
+The safe, still-simple default for a production application is:
+
+```csharp
+services.AddHighway(options =>
+{
+    options.NodeName = "orders-1";
+    options.HostingMode = HostingMode.Declared;
+});
+```
+
+Handlers should normally live in the entry application assembly, so `Declared` adds one option
+and no per-handler registration. Use `HostAssembly(...)` at the composition root for an
+intentional shared handler module. Prefer it over `[HighwayHostModule]` when the decision is
+specific to one deployment; the assembly attribute deliberately makes the module hostable by
+every referencing declared-mode application.
+
+Contract packages should stay inert and be divided by business capability where practical.
+`Orders.Contracts`, `Payments.Contracts` and `Notifications.Contracts` make `CAN USE` a useful
+architectural hint; one `Everything.Contracts` package makes it truthful but nearly useless.
+
+If compatibility permits before v1, reconsider making `Declared` the default. Its rule is the
+one most .NET developers will assume: the application hosts handlers in its own assembly, and a
+library reference does not silently make it run another assembly's handlers. If existing users
+make that change too risky, production samples and documentation should still opt into
+`Declared`, while `Implicit` retains its startup warning until the next breaking version.
+
+### Recommended evolution of Highway's topology safety
+
+#### 1. Name the logical application separately from its replicas
+
+Add a stable logical application identity — for example `ApplicationName = "orders"`, defaulted
+from the entry assembly and overridable. `NodeName` remains the unique process instance;
+`SubscriptionGroup` remains the logical pub/sub consumer. Neither is a reliable substitute for
+the bounded capability whose dependency graph an architect wants to see.
+
+The manifest and dashboard would then group:
+
+```
+application orders
+  nodes orders-1, orders-2
+  provides ...
+  can use ...
+```
+
+#### 2. Add automatic causal lineage to every verb
+
+Carry a root operation id, immediate causation id and hop count through RPC, queue and pub/sub
+envelopes. When a handler sends a child message, Highway should inherit and advance this context
+automatically; application code should not have to remember to copy it. Preserve the existing
+W3C trace context, but do not treat a sampled telemetry trace as the durable correctness field.
+
+This unlocks three different protections:
+
+- attribution: *which handler caused this send?*;
+- detection: *has this route or logical application appeared earlier in the active chain?*; and
+- containment: *has this chain exceeded its maximum permitted hops?*
+
+For RPC, a repeated route in the active synchronous chain should fail quickly with a specific,
+diagnosable loop outcome instead of consuming nested timeout budgets. For queues and pub/sub,
+exhausting the hop budget should dead-letter the message with its lineage and a clear
+`LOOP_DETECTED` reason rather than dropping it or continuing indefinitely.
+
+#### 3. Distinguish possible topology from observed topology
+
+Keep the current `CAN USE` list, but add runtime-derived edges:
+
+```
+CAN USE          reference-derived possibility
+OBSERVED CALLS   handler/application -> verb -> route, with count and last seen
+```
+
+The dashboard may render possible edges as hints and observed edges as facts. It should mark a
+possible cycle differently from an observed causal cycle; combining them under one red warning
+would recreate the false-authority problem feature 024 carefully avoided.
+
+#### 4. Offer an optional strict outbound policy
+
+A composition root may optionally declare the outbound RPC, queue and channel routes the logical
+application intends to use. `HighwayClient` can enforce that allowlist because every outbound
+operation passes through it. This is different from an unenforceable publisher-role attribute:
+the policy applies to the actual client operation, not to an assembly label.
+
+Strict declarations would also make startup/build-time RPC-DAG validation possible. They should
+remain opt-in so Highway's basic experience stays assembly-scanned and low-ceremony.
+
+#### 5. Add a Roslyn analyzer as guidance, not the source of runtime truth
+
+An analyzer/source generator can discover ordinary typed calls to `ExecuteAsync`, `SendAsync`
+and `PublishAsync`, produce a useful project-level outbound manifest and warn about reciprocal
+RPC edges. It cannot see every wrapper, dynamic call or externally supplied delegate, so its
+result must be labelled static evidence and may not replace runtime causation.
+
+### Recommended order
+
+1. Fix the manifest's `SubscriptionGroup` value and add the missing UserGuide section.
+2. Use `HostingMode.Declared` in production guidance and samples; decide whether pre-v1 is the
+   right moment to make it the default.
+3. Write the RPC-DAG rule and the asynchronous-cycle acceptance checklist into the UserGuide.
+4. Add logical `ApplicationName`, causation id and hop count as one message-safety feature.
+5. Record and display observed handler-to-route edges, including detected loops.
+6. Add optional strict outbound declarations and an analyzer only after runtime truth exists.
+
+The resulting mental model stays small:
+
+> A logical application owns a business capability. Hosting is explicit. RPC points downstream
+> and never back. Events may return as new facts, but every causal chain must terminate.

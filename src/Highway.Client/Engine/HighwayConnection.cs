@@ -35,60 +35,15 @@ namespace Highway.Client.Engine;
 
 
 /// <summary>
-
-
-
-
-
-/// The wire surface of <see cref="HighwayConnection"/> — every HW.* command
-
-
-
-
-
+    /// The wire surface of <see cref="HighwayConnection"/> â€” every HW.* command
 /// shape, the reply-slot operations, and doorbell subscription. Loops, the
-
-
-
-
-
-/// registry, and the client depend on this interface (mockable in unit tests);
-
-
-
-
-
+    /// registry, and the client depend on this interface (mockable in unit tests);
 /// the command names and argument orders themselves live in exactly one place:
-
-
-
-
-
-/// <see cref="HighwayConnection"/>.
-
-
-
-
-
+    /// <see cref="HighwayConnection"/>.
 /// </summary>
-
-
-
-
-
-/// <summary>
-
-
-
-
-
+    /// <summary>
 /// Outcome of the <c>HW.HEARTBEAT</c> liveness form (feature 006).
-
-
-
-
-
-/// </summary>
+    /// </summary>
 
 
 
@@ -125,29 +80,9 @@ internal enum HeartbeatReply
 
 
     /// <summary>
-
-
-
-
-
-    /// The server holds no registration for this node — it was never registered,
-
-
-
-
-
+    /// The server holds no registration for this node â€” it was never registered,
     /// was pruned, or the registry was lost with the server. The node must send
-
-
-
-
-
     /// the registration form before it can be discovered again.
-
-
-
-
-
     /// </summary>
 
 
@@ -222,7 +157,7 @@ internal interface IHighwayConnection
 
     Task SubscribeGroupAsync(string channel, string group, string node, CancellationToken ct = default);
 
-    /// <summary>HW.JOB SET — registers/updates a recurring-job schedule (028). Last wins, loudly.</summary>
+    /// <summary>HW.JOB SET â€” registers/updates a recurring-job schedule (028). Last wins, loudly.</summary>
     Task JobSetAsync(string queue, string job, string expression, byte[] template, CancellationToken ct = default);
 
 
@@ -292,7 +227,7 @@ internal interface IHighwayConnection
     // Recoverability (feature 015)
 
 
-    /// <summary>HW.TOUCH — renew a claimed message's lease (019). True when it was renewed.</summary>
+    /// <summary>HW.TOUCH â€” renew a claimed message's lease (019). True when it was renewed.</summary>
     Task<bool> TouchAsync(
         string kind, string name, string scope, string id, CancellationToken ct = default);
 
@@ -360,7 +295,7 @@ internal interface IHighwayConnection
 
 
 
-    /// <summary>HW.HEARTBEAT &lt;node&gt; BYE PURGE — retire forever (017). Returns what it destroyed.</summary>
+    /// <summary>HW.HEARTBEAT &lt;node&gt; BYE PURGE â€” retire forever (017). Returns what it destroyed.</summary>
 
     Task<(int Groups, long Messages, long Bytes)> PurgeAsync(string nodeId, CancellationToken ct = default);
 
@@ -393,72 +328,17 @@ internal interface IHighwayConnection
 
 
 /// <summary>
-
-
-
-
-
-/// Owns the single <see cref="ConnectionMultiplexer"/> shared by all Highway
-
-
-
-
-
+    /// Owns the single <see cref="ConnectionMultiplexer"/> shared by all Highway
 /// traffic on this node, and every wire shape against the 004/004.1 contract.
-
-
-
-
-
-/// All command names and argument orders live in exactly this class.
-
-
-
-
-
+    /// All command names and argument orders live in exactly this class.
 ///
-
-
-
-
-
-/// <para><b>Error classification (004.1 contract):</b> server errors starting
-
-
-
-
-
+    /// <para><b>Error classification (004.1 contract):</b> server errors starting
 /// with <c>ERR HW_</c> are permanent (<see cref="HighwayTransportException"/>);
-
-
-
-
-
-/// the bare <c>ERR Transaction failed.</c> is a transient watch-conflict abort
-
-
-
-
-
-/// (<see cref="HighwayTransientException"/>) — safe to retry; anything else is
-
-
-
-
-
-/// permanent. Transient aborts (and connection interruptions) are retried here
-
-
-
-
-
+    /// the bare <c>ERR Transaction failed.</c> is a transient watch-conflict abort
+/// (<see cref="HighwayTransientException"/>) â€” safe to retry; anything else is
+    /// permanent. Transient aborts (and connection interruptions) are retried here
 /// with bounded backoff before surfacing.</para>
-
-
-
-
-
-/// </summary>
+    /// </summary>
 
 
 
@@ -566,6 +446,12 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
+    internal static HighwayConnection FromMultiplexer(IConnectionMultiplexer redis)
+    {
+        ArgumentNullException.ThrowIfNull(redis);
+        return new HighwayConnection((ConnectionMultiplexer)redis);
+    }
+
     private HighwayConnection(ConnectionMultiplexer redis)
 
 
@@ -609,23 +495,8 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
     /// Connects to the configured server, failing fast with a descriptive
-
-
-
-
-
-    /// exception — no silent retry loop at startup.
-
-
-
-
-
+    /// exception â€” no silent retry loop at startup.
     /// </summary>
 
 
@@ -651,71 +522,16 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
     /// Connects with optional credentials and transport security (feature 012).
-
-
-
-
-
     ///
-
-
-
-
-
     /// <para><b>Precedence, defined rather than incidental:</b> the connection string is
-
-
-
-
-
     /// parsed first, <paramref name="credentials"/> overwrite what it set, and the
-
-
-
-
-
     /// caller's <c>ConfigureConnection</c> delegate runs last so it can override anything.
-
-
-
-
-
     /// "Which one wins" is the question a developer hits at 2am, so it is answered here
-
-
-
-
-
     /// and on each option.</para>
-
-
-
-
-
     ///
-
-
-
-
-
     /// <para>Every path out of this method redacts the configuration string. It routinely
-
-
-
-
-
     /// carries a password now, and an exception message is not a safe place for one.</para>
-
-
-
-
-
     /// </summary>
 
 
@@ -723,314 +539,31 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     public static async Task<HighwayConnection> ConnectAsync(
-
-
-
-
-
         string configuration, HighwayOptions? credentials, CancellationToken ct = default)
-
-
-
-
-
     {
-
-
-
-
-
-        ConfigurationOptions options;
-
-
-
-
-
+        var options = HighwayConnectionConfiguration.Build(configuration, credentials);
         try
-
-
-
-
-
         {
-
-
-
-
-
-            options = ConfigurationOptions.Parse(configuration);
-
-
-
-
-
-        }
-
-
-
-
-
-        catch (Exception ex)
-
-
-
-
-
-        {
-
-
-
-
-
-            throw new ArgumentException(
-
-
-
-
-
-                $"'{ConnectionStringRedactor.Redact(configuration)}' is not a valid Highway server configuration: {ex.Message}",
-
-
-
-
-
-                nameof(configuration), ex);
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-        options.AbortOnConnectFail = true;
-
-        // The node names its own connection, so the broker can answer "where is this node?"
-        // without the node ever declaring an address (023 T8). CLIENT SETNAME is a RESP
-        // built-in and the address on the other end is one the broker OBSERVED -- which is
-        // the only kind worth showing. A node behind NAT that reports its own IP reports a
-        // number nobody can reach.
-        if (credentials is { NodeName.Length: > 0 })
-            options.ClientName = Sanitise(credentials.NodeName);
-
-
-
-
-
-
-
-
-
-
-
-        if (credentials is not null)
-
-
-
-
-
-        {
-
-
-
-
-
-            if (!string.IsNullOrEmpty(credentials.Username)) options.User = credentials.Username;
-
-
-
-
-
-            if (!string.IsNullOrEmpty(credentials.Password)) options.Password = credentials.Password;
-
-
-
-
-
-
-
-
-
-
-
-            if (credentials.Tls is { Enabled: true } tls)
-
-
-
-
-
-            {
-
-
-
-
-
-                options.Ssl = true;
-
-
-
-
-
-                if (!string.IsNullOrEmpty(tls.TargetHost)) options.SslHost = tls.TargetHost;
-
-
-
-
-
-                if (tls.Protocols is { } protocols) options.SslProtocols = protocols;
-
-
-
-
-
-            }
-
-
-
-
-
-
-
-
-
-
-
-            credentials.ConfigureConnection?.Invoke(options);
-
-
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-        try
-
-
-
-
-
-        {
-
-
-
-
-
             var redis = await ConnectionMultiplexer.ConnectAsync(options).ConfigureAwait(false);
-
-
-
-
-
             return new HighwayConnection(redis);
-
-
-
-
-
         }
-
-
-
-
-
         catch (RedisConnectionException ex) when (IsAuthenticationFailure(ex))
-
-
-
-
-
         {
-
-
-
-
-
             // Distinguished from an unreachable server because the remedies are opposite:
-
-
-
-
-
             // one is "check the network", the other is "check the password". Reporting a
-
-
-
-
-
             // wrong password as an unreachable host sends people to the wrong place.
-
-
-
-
-
             throw new HighwayAuthenticationException(
-
-
-
-
-
                 $"The Highway server at '{ConnectionStringRedactor.Redact(configuration)}' rejected the supplied " +
-
-
-
-
-
                 "credentials. Check the password, and that the server was started with WithPassword.", ex);
-
-
-
-
-
         }
-
-
-
-
-
         catch (RedisConnectionException ex)
-
-
-
-
-
         {
-
-
-
-
-
             throw new HighwayServerUnreachableException(ConnectionStringRedactor.Redact(configuration), ex);
-
-
-
-
-
         }
-
-
-
-
-
     }
+
+    internal static ConfigurationOptions BuildConfigurationOptions(string configuration, IHighwayConnectionSettings? credentials)
+        => HighwayConnectionConfiguration.Build(configuration, credentials);
 
 
 
@@ -1043,29 +576,9 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
     /// Whether a connect failure was really an authentication failure. StackExchange.Redis
-
-
-
-
-
     /// wraps the server's <c>NOAUTH</c> / <c>WRONGPASS</c> reply in a connection exception,
-
-
-
-
-
     /// so the distinction is only visible in the message chain.
-
-
-
-
-
     /// </summary>
 
 
@@ -1235,23 +748,8 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
-    /// HW.DEQUEUE &lt;service&gt; &lt;nodeId&gt; → (requestId, payload), or null when
-
-
-
-
-
+    /// HW.DEQUEUE &lt;service&gt; &lt;nodeId&gt; â†’ (requestId, payload), or null when
     /// the queue is empty (the server replies a nil array: RedisResult.IsNull).
-
-
-
-
-
     /// </summary>
 
 
@@ -1445,41 +943,11 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
-    /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; [AT &lt;ticks&gt;] → group count.
-
-
-
-
-
+    /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; [AT &lt;ticks&gt;] â†’ group count.
     ///
-
-
-
-
-
     /// <para>The delivery time is sent as an <b>absolute</b> .NET UTC tick count rather
-
-
-
-
-
     /// than a relative delay: the server stores what it is told, so a slow round trip
-
-
-
-
-
     /// cannot silently extend the delay and AOF replay cannot re-delay from replay time.</para>
-
-
-
-
-
     /// </summary>
 
 
@@ -1552,7 +1020,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-    /// <summary>HW.SUBSCRIBE &lt;channel&gt; &lt;group&gt; &lt;node&gt; — the node identifies itself so the server can track group membership (025).</summary>
+    /// <summary>HW.SUBSCRIBE &lt;channel&gt; &lt;group&gt; &lt;node&gt; â€” the node identifies itself so the server can track group membership (025).</summary>
 
 
 
@@ -1621,23 +1089,6 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     // -------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-    /// <summary>Reads the reply slot; null when absent.</summary>
-
-
-
-
-
     // -------------------------------------------------------------------------
 
 
@@ -1770,7 +1221,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-    /// <summary>HW.QCLAIM &lt;queue&gt; &lt;nodeId&gt; → (messageId, payload), or null when empty.</summary>
+    /// <summary>HW.QCLAIM &lt;queue&gt; &lt;nodeId&gt; â†’ (messageId, payload), or null when empty.</summary>
 
 
 
@@ -1897,22 +1348,12 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-    /// HW.FAIL &lt;kind&gt; &lt;name&gt; &lt;scope&gt; &lt;id&gt; &lt;type&gt; &lt;detail&gt; — records why a
-
-
+    /// HW.FAIL &lt;kind&gt; &lt;name&gt; &lt;scope&gt; &lt;id&gt; &lt;type&gt; &lt;detail&gt; â€” records why a
     /// handler failed, without acknowledging (feature 015).
-
-
     /// </summary>
-
-
     /// <returns>True when the message was found and annotated; false when it was already gone.</returns>
-
-
     /// <summary>
-    /// HW.TOUCH &lt;kind&gt; &lt;name&gt; &lt;scope&gt; &lt;id&gt; — says "still working" about a claimed
+    /// HW.TOUCH &lt;kind&gt; &lt;name&gt; &lt;scope&gt; &lt;id&gt; â€” says "still working" about a claimed
     /// message, so a slow handler is not duplicated underneath itself (019).
     /// </summary>
     /// <returns>True when the entry was found and renewed; false when it was already gone.</returns>
@@ -1954,7 +1395,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-    /// <summary>Subscribes to a queue doorbell — a latency optimisation, never correctness.</summary>
+    /// <summary>Subscribes to a queue doorbell â€” a latency optimisation, never correctness.</summary>
 
 
 
@@ -2099,41 +1540,11 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
     /// Attempts to claim the right to run a handler for one delivery.
-
-
-
-
-
     ///
-
-
-
-
-
     /// <para><c>SET NX EX</c> is atomic, so two concurrent redeliveries cannot both claim.
-
-
-
-
-
     /// The loser reads what the winner left: a response if the handler finished, or the
-
-
-
-
-
-    /// in-progress marker if it is still running — or crashed.</para>
-
-
-
-
-
+    /// in-progress marker if it is still running â€” or crashed.</para>
     /// </summary>
 
 
@@ -2399,41 +1810,11 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
     /// Drops the marker so the delivery can be retried immediately.
-
-
-
-
-
     ///
-
-
-
-
-
-    /// <para>Used when the handler could not be run at all — a transport failure before
-
-
-
-
-
+    /// <para>Used when the handler could not be run at all â€” a transport failure before
     /// any work happened. Leaving the marker would block the redelivery for the whole
-
-
-
-
-
     /// window over something that never ran.</para>
-
-
-
-
-
     /// </summary>
 
 
@@ -2669,23 +2050,8 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
     /// Subscribes to a doorbell channel. SE.Redis auto-resubscribes after a
-
-
-
-
-
     /// reconnect (verified by ClientReconnectTests), so no re-issue logic is needed.
-
-
-
-
-
     /// </summary>
 
 
@@ -2813,23 +2179,8 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
-    /// HW.HEARTBEAT &lt;nodeId&gt; &lt;catalogJson&gt; — the registration form.
-
-
-
-
-
+    /// HW.HEARTBEAT &lt;nodeId&gt; &lt;catalogJson&gt; â€” the registration form.
     /// Sent once at start and again whenever the server asks for it.
-
-
-
-
-
     /// </summary>
 
 
@@ -2879,47 +2230,12 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
-    /// HW.HEARTBEAT &lt;nodeId&gt; — the liveness form. The catalog never crosses
-
-
-
-
-
+    /// HW.HEARTBEAT &lt;nodeId&gt; â€” the liveness form. The catalog never crosses
     /// the wire here, so beat cost is independent of catalog size.
-
-
-
-
-
     ///
-
-
-
-
-
     /// <para><c>+REGISTER</c> is a normal reply, not a failure: the server holds
-
-
-
-
-
     /// no record for this node and needs the catalog before it can be discovered
-
-
-
-
-
     /// again. It must never be classified as a transport or transient error.</para>
-
-
-
-
-
     /// </summary>
 
 
@@ -2981,23 +2297,8 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
-    /// HW.HEARTBEAT &lt;nodeId&gt; BYE — graceful departure. The node leaves
-
-
-
-
-
+    /// HW.HEARTBEAT &lt;nodeId&gt; BYE â€” graceful departure. The node leaves
     /// discovery immediately instead of after the expiry window.
-
-
-
-
-
     /// </summary>
 
 
@@ -3039,15 +2340,10 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-    /// HW.HEARTBEAT &lt;node&gt; BYE PURGE — the node is never coming back (017).
-
+    /// HW.HEARTBEAT &lt;node&gt; BYE PURGE â€” the node is never coming back (017).
     ///
-
     /// <para>Unlike <see cref="DepartAsync"/>, this destroys the node's subscriber queues.
-
     /// It returns what it destroyed so an irreversible act leaves a record.</para>
-
     /// </summary>
 
     public Task<(int Groups, long Messages, long Bytes)> PurgeAsync(string nodeId, CancellationToken ct = default)
@@ -3077,23 +2373,8 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
-    /// HW.DISCOVER &lt;service&gt; → live nodes hosting the service, with the age
-
-
-
-
-
+    /// HW.DISCOVER &lt;service&gt; â†’ live nodes hosting the service, with the age
     /// of each one's last beat. Empty when nobody hosts it.
-
-
-
-
-
     /// </summary>
 
 
@@ -3215,23 +2496,8 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
-    /// HW.STATS [name] → the flat field/value reply as a map. Reply shape is
-
-
-
-
-
+    /// HW.STATS [name] â†’ the flat field/value reply as a map. Reply shape is
     /// self-describing so new fields extend the map rather than breaking callers.
-
-
-
-
-
     /// </summary>
 
 
@@ -3502,7 +2768,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-                // Brief interruption while SE.Redis reconnects — bounded retry.
+                // Brief interruption while SE.Redis reconnects â€” bounded retry.
 
 
 
@@ -3574,7 +2840,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-    /// <summary>True for the bare watch-conflict abort — the only transient class.</summary>
+    /// <summary>True for the bare watch-conflict abort â€” the only transient class.</summary>
 
 
 
@@ -3599,53 +2865,13 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
     /// <summary>
-
-
-
-
-
     /// Maps a server/connection error to the typed permanent/transient split.
-
-
-
-
-
     ///
-
-
-
-
-
     /// <para>Authentication and authorization failures are <b>permanent</b>: retrying a
-
-
-
-
-
     /// wrong password wastes the backoff budget and trips attempt counters on systems that
-
-
-
-
-
     /// keep them. They are given their own types because the remedy differs from every
-
-
-
-
-
-    /// other permanent failure — one is a configuration problem, not a code or network
-
-
-
-
-
+    /// other permanent failure â€” one is a configuration problem, not a code or network
     /// problem.</para>
-
-
-
-
-
     /// </summary>
 
 
@@ -3784,13 +3010,13 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-            // Garnet's reply does not name the command — it is literally
+            // Garnet's reply does not name the command â€” it is literally
 
 
 
 
 
-            // "NOPERM this user has no permissions to run the command" — so the caller
+            // "NOPERM this user has no permissions to run the command" â€” so the caller
 
 
 

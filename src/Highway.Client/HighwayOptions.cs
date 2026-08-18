@@ -6,7 +6,7 @@ namespace Highway.Client;
 /// Configuration options for the Highway client.
 /// Options are snapshotted by the engine at start; mutation afterwards has no effect.
 /// </summary>
-public sealed class HighwayOptions
+public sealed class HighwayOptions : IHighwayConnectionSettings
 {
     /// <summary>
     /// Unique name for this node in the cluster.

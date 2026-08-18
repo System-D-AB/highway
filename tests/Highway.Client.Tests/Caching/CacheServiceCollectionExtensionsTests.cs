@@ -41,6 +41,29 @@ public class CacheServiceCollectionExtensionsTests : IDisposable
     }
 
     [Fact]
+    public void AddHighwayCache_RegistersIBufferDistributedCache()
+    {
+        var services = new ServiceCollection();
+        services.AddHighwayCache(o => o.Server = _server.ConnectionString);
+
+        using var sp = services.BuildServiceProvider();
+        var cache = sp.GetService<IBufferDistributedCache>();
+
+        cache.Should().NotBeNull();
+        cache.Should().BeOfType<HighwayCache>();
+    }
+
+    [Fact]
+    public void AddHighwayCache_NoBrokerRunning_BuildServiceProviderDoesNotThrow()
+    {
+        var services = new ServiceCollection();
+        services.AddHighwayCache(o => o.Server = "127.0.0.1:1,abortConnect=true");
+
+        var act = () => services.BuildServiceProvider();
+        act.Should().NotThrow();
+    }
+
+    [Fact]
     public async Task AddHighwayCache_CacheOperationsWork_AgainstGarnet()
     {
         var services = new ServiceCollection();

@@ -4,5 +4,35 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
+
+    <!-- Central Versioning (Feature 035 / D5) -->
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <VersionSuffix>preview.1</VersionSuffix>
+
+    <!-- Central Package Metadata (R1.2 / R3.1) -->
+    <Authors>System D AB</Authors>
+    <Company>System D AB</Company>
+    <Copyright>Copyright (c) System D AB</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/systemdab/highway</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/systemdab/highway</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+
+    <!-- Packaging, Symbols & Documentation (R4.1-R4.4) -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <!-- Triage missing documentation warnings on internal/non-public types -->
+    <NoWarn>$(NoWarn);CS1591;CS1573;CS1587</NoWarn>
+  </PropertyGroup>
+
+  <!-- Suppress docs and packaging for tests, samples, and assurance projects -->
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true' or $(MSBuildProjectName.EndsWith('.Tests')) or $(MSBuildProjectName.StartsWith('Highway.Assurance')) or $(MSBuildProjectName.StartsWith('Highway.Samples'))">
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 </Project>

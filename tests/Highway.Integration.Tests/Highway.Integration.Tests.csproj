@@ -8,6 +8,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Highway.Client\Highway.Client.csproj" />
     <ProjectReference Include="..\..\src\Highway.Server\Highway.Server.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Contracts\Highway.Assurance.Contracts.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Ledger\Highway.Assurance.Ledger.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Reconciler\Highway.Assurance.Reconciler.csproj" />
+    <ProjectReference Include="..\..\assurance\Highway.Assurance.Runner\Highway.Assurance.Runner.csproj" />
   </ItemGroup>
 
   <ItemGroup>
