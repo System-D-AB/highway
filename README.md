@@ -28,10 +28,9 @@ round trip through an in-memory store rather than a hop into somebody else's clo
 the **.NET 10 SDK** and nothing else — no Docker, no external infrastructure, not even for
 the integration tests.
 
-> **Pre-1.0.** The core is complete and in use. The packages below are **not on nuget.org
-> yet** — until the first preview is pushed, build from source (see
-> [Contributor & Sample Workflow](#contributor--sample-workflow)). Two storage guarantees are
-> also not met: see [Status](#status) and [Known limits](#known-limits).
+> **Pre-1.0.** The core is complete and in use, and the packages are on nuget.org as
+> `1.0.0-preview.1`. The broker distribution and two storage guarantees are still
+> outstanding — see [Status](#status) and [Known limits](#known-limits).
 
 ---
 
@@ -234,7 +233,9 @@ written, and the specs record the decisions that were rejected as well as the on
 Core-complete and pre-1.0. Queues, pub/sub, RPC, dead letters, delayed delivery, recurring
 jobs, distributed cache, dashboard, authentication, TLS, and NuGet packaging (`1.0.0-preview.1`) all ship today. **968 tests pass.**
 
-**Not yet done:** metrics (`Meter`) and health endpoints. Tracked on the [roadmap](docs/product/roadmap.md).
+**Not yet done:** the packaged broker distribution (the `highways` zip and its service
+installers — until it lands, run the broker from source), metrics (`Meter`) and health
+endpoints. Tracked on the [roadmap](docs/product/roadmap.md).
 
 ---
 
