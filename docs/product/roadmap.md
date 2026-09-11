@@ -577,6 +577,41 @@ patch, which is the only lever available for C4.6 if 034's experiment fails.
 
 ---
 
+### 037 — The RocksDB Engine
+
+**Status:** Specced 2026-09-11, not started — `docs/features/037-rocksdb-engine/`
+
+**Lane:** foundation. Replaces the storage engine and **nothing else** — `HW.*`, RESP,
+SE.Redis and `Highway.Client` are all untouched, which is the point: one variable changes, so
+a failed assurance run is diagnosable.
+
+**Why.** C4.6 is not a configuration problem. Highway's queue is a Garnet List object, its
+lease table a SortedSet object, its registry a Set object — each a large, shared, mutable
+managed value under an exclusive lock, which is the same root cause a sibling project measured
+independently and named. On an ordered LSM engine none of those is an object: a queue is a key
+range, and space reclamation is compaction, which is what RocksDB does for a living.
+
+**This closes the lever 035 left open.** That entry notes the Garnet submodule survives *"for
+the option of carrying a patch, which is the only lever available for C4.6 if 034's experiment
+fails."* 034's experiment did fail — `AofSegmentSize` was verified at full scale and older
+segments are never deleted. 037 replaces the lever rather than pulling it.
+
+**Also in scope, because a rewrite is the cheap moment for them:** C4.1 (retention — the
+register says it *"needs a breaking framing change first"*), C4.7 (the byte budget bounds a
+queue, not the process), C9 (TTL) and C19 (change feed — close to free, since
+`GetUpdatesSince` is exactly the primitive it was postponed for want of). Each is adopted or
+deferred **with a reason**; deciding by omission is a spec failure.
+
+**Removed by it:** feature 026's distributed cache, which existed because Garnet's native
+`GET`/`SET` were free underneath.
+
+**Not in it:** replication. That is stage 2, deliberately deferred —
+[`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md)
+Part VI holds the design and the open fork (two nodes with operator promotion, or three with a
+quorum; **with two and no external arbiter, automatic failover is not available at any price**).
+
+---
+
 ## Deferred to v2: Traffic Capture and Replay
 
 **Postponed 2026-08-18 by the user, deliberately and with the reasoning kept** — the
@@ -675,4 +710,4 @@ because it owns the server and a naive Redis wrapper cannot.
 |---|---|
 | Sagas / Process Managers | Long-running workflows with compensation |
 | Transactional Outbox | Atomic DB write + message publish |
-| Clustering | Multi-server Highway.Server deployment |
+| Clustering | Multi-server Highway.Server deployment. **2026-09-11:** not reachable on Garnet's AOF — it depends on the storage-engine change, now specced as **037**. Design in [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) Part VI; the node-count fork is open |

@@ -330,6 +330,8 @@ The test `SustainedTraffic_DoesNotGrowTheLogWithoutBound` is kept and **skipped*
 restart replays all of it. A busy broker needs its data directory watched, and a periodic
 planned restart against a fresh directory is currently the only remedy.
 
+> **Addendum 2026-09-11.** Two things are outstanding here, and they pull in opposite directions. **(a)** The user reports this constraint has since been solved; the fix is not visible in this repository and the status below is therefore stale. Whoever made it should update this entry — the register's whole value is that its statuses can be trusted, and a solved constraint reading *"measured not to work"* costs more than an unsolved one. **(b)** Independently, [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) § I.2 argues the failure is structural to Garnet's AOF rather than a configuration matter: on an LSM engine this is not solved but absent, because compaction reclaiming space is the engine's ordinary job. That research is exploratory and nothing is approved.
+
 ### C4.7 — The byte budget bounds a queue, not the process
 
 **Status: Deliberately unmet** — feature 016, decision 1.
