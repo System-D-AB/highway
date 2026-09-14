@@ -31,12 +31,14 @@ public class HostArgumentsTests
     public void ValueFlags_ConsumeTheirValue()
     {
         var parsed = HostArguments.Parse(
-            ["--config", "conf/highway.json", "--port", "6600", "--bind", "0.0.0.0", "--data-dir", "d:"]);
+            ["--config", "config/highway.json", "--port", "6600", "--bind", "0.0.0.0", "--data-dir", "d:", "--service-name", "CustomHw", "--service-display", "Custom Highway"]);
 
         parsed.ConfigPath.Should().EndWith("highway.json");
         parsed.Port.Should().Be(6600);
         parsed.BindAddress.Should().Be("0.0.0.0");
         parsed.DataDir.Should().Be("d:");
+        parsed.ServiceName.Should().Be("CustomHw");
+        parsed.ServiceDisplayName.Should().Be("Custom Highway");
     }
 
     [Fact]

@@ -65,7 +65,7 @@ runs code defaults; an integration test starts an ephemeral broker from a temp
 the host's cancellation path; the dashboard comes up when configured. *(Shipped before
 the 2026-08-12 amendments; T14 carries them.)*
 
-### - [ ] T14 — Amendments: the rename, the `enabled` switch, and the review findings
+### - [x] T14 — Amendments: the rename, the `enabled` switch, and the review findings
 
 *Requirements:* R1.4, R1.6, R2.1, R2.2, R3.1
 *Depends on:* T3
@@ -100,7 +100,7 @@ green:
 
 ## Phase 2 — the artifact
 
-### - [ ] T4 — Publish pipeline, layout, zip
+### - [x] T4 — Publish pipeline, layout, zip
 
 *Requirements:* R3.1–R3.4
 *Depends on:* T1, T14
@@ -113,7 +113,7 @@ stamps agree across folder name, README header and `--version`. Note the reposit
 no central version property yet and `--version` currently prints `1.0.0+{sha}`: this
 task establishes the property and decides whether the artifact name carries the suffix.
 
-### - [ ] T15 — The run scripts: standalone in one double-click
+### - [x] T15 — The run scripts: standalone in one double-click
 
 *Requirements:* R4.1–R4.4
 *Depends on:* T4
@@ -124,7 +124,7 @@ own location, so they work from any working directory; extra arguments pass thro
 running one on a freshly unpacked zip is the README's first instruction and part of the
 verification.
 
-### - [ ] T5 — The distribution's own documents
+### - [x] T5 — The distribution's own documents
 
 *Requirements:* R3.5, R7.3
 *Depends on:* T4, T15
@@ -137,7 +137,7 @@ directories (design § Host Lifecycle: a taken port does not reliably refuse).
 
 ## Phase 3 — service installation
 
-### - [ ] T6 — Windows verbs: the SCM, precisely
+### - [x] T6 — Windows verbs: the SCM, precisely
 
 *Requirements:* R5.2–R5.6
 *Depends on:* T3
@@ -151,7 +151,7 @@ any change); paths with spaces survive quoting; every verb is safe to run twice;
 elevated install → status → stop → start → uninstall round-trip is recorded with its
 machine in the RUNLOG.
 
-### - [ ] T7 — Windows scripts the zip promises
+### - [x] T7 — Windows scripts the zip promises
 
 *Requirements:* R5.1
 *Depends on:* T6

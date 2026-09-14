@@ -147,6 +147,8 @@ public sealed class ObservabilitySection
     public int DefaultCapacity { get; set; } = 1_000;
     public TimeSpan DefaultRetention { get; set; } = TimeSpan.FromHours(1);
     public PayloadCapture DefaultCapture { get; set; } = PayloadCapture.Full;
+
+    [JsonConverter(typeof(SizeJsonConverter))]
     public long MaxBytes { get; set; } = 64L * 1024 * 1024;
     public TimeSpan SweepInterval { get; set; } = TimeSpan.FromSeconds(10);
     public bool ReplayEnabled { get; set; } = true;

@@ -1,0 +1,69 @@
+{
+  // ── Broker ────────────────────────────────────────────────────────────
+  "server": {
+    "port": 6500,                          // Garnet RESP listener
+    "bindAddress": "127.0.0.1",            // loopback default; "0.0.0.0" to expose
+    "dataDir": "../data",                  // relative -> config file's directory
+    "ephemeral": false,                    // true = memory-only, nothing survives
+    "aofSizeLimitBytes": "512m",           // checkpoint + truncate threshold
+    "maxQueueBytes": "1g",                 // per-queue cap
+    "lease": "00:05:00",                   // RPC processing lease
+    "replySlotTtl": "00:05:00",
+    "maxPayloadBytes": 1048576,
+    "maxIdentifierBytes": 256,
+    "nodeExpiry": "00:00:30",
+    "pruningEnabled": true,
+    "maxCatalogBytes": 262144,
+    "subscriberRetirementThreshold": "1.00:00:00",
+    "maxDeliveryAttempts": 5,
+    "maxDeadLetterEntries": 10000,
+    "pubSubBackoffEnabled": false,
+    "rpcBackoffEnabled": false,
+    "maxBackoff": "00:01:00",
+    "receiveDefaultCount": 10,
+    "receiveMaxCount": 500,
+    "waitForCommit": false,
+    "observability": {
+      "recorderEnabled": true,
+      "defaultCapacity": 1000,
+      "defaultRetention": "01:00:00",
+      "defaultCapture": "Full",            // Full | HeadersOnly | Off
+      "maxBytes": "64m",
+      "sweepInterval": "00:00:10",
+      "replayEnabled": true,
+      "replayDefaultLimit": 100,
+      "replayMaxLimit": 1000,
+      "replayDefaultWindow": "00:05:00",
+      "activitiesEnabled": true
+    }
+  },
+
+  // ── Authentication ───────────────────────────────────────────────────
+  "authentication": {
+    "password": null,                      // shared password; username is 'default'
+    "aclFile": null                        // Garnet ACL file -> named users
+  },
+
+  // ── TLS ──────────────────────────────────────────────────────────────
+  "tls": {
+    "certFile": null,                      // PFX path; XOR with certSubjectName
+    "certPassword": null,
+    "certSubjectName": null,               // machine certificate store lookup
+    "clientCertificateRequired": false,    // mTLS
+    "revocationMode": "NoCheck",           // NoCheck | Online | Offline
+    "issuerCertificatePath": null,         // private CA for client certs
+    "refreshFrequencySeconds": 0           // cert rotation without restart
+  },
+
+  // ── Dashboard ────────────────────────────────────────────────────────
+  "dashboard": {
+    "enabled": true,
+    "port": 7500,
+    "bindAddress": "127.0.0.1",
+    "pathBase": "",
+    "apiKey": null,                        // required wherever the dashboard is exposed
+    "maxConcurrentStreams": 4,
+    "streamBufferCapacity": 512,
+    "keepAliveInterval": "00:00:15"
+  }
+}

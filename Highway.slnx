@@ -40,6 +40,7 @@
     <Project Path="samples/Highway.Samples.Broker/Highway.Samples.Broker.csproj" />
     <Project Path="samples/Highway.Samples.OrderService/Highway.Samples.OrderService.csproj" />
     <Project Path="samples/Highway.Samples.Storefront/Highway.Samples.Storefront.csproj" />
+    <Project Path="samples/Highway.Samples.Host/Highway.Samples.Host.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Highway.Abstractions/Highway.Abstractions.csproj" />
@@ -47,6 +48,7 @@
     <Project Path="src/Highway.Server/Highway.Server.csproj" />
     <Project Path="src/Highway.Server.Dashboard/Highway.Server.Dashboard.csproj" />
     <Project Path="src/Highway.Server.Host/Highway.Server.Host.csproj" />
+    <Project Path="src/Highway.Client.Hosting/Highway.Client.Hosting.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Highway.Abstractions.Tests/Highway.Abstractions.Tests.csproj" />
@@ -55,5 +57,6 @@
     <Project Path="tests/Highway.Server.Host.Tests/Highway.Server.Host.Tests.csproj" />
     <Project Path="tests/Highway.Assurance.Tests/Highway.Assurance.Tests.csproj" />
     <Project Path="tests/Highway.Integration.Tests/Highway.Integration.Tests.csproj" />
+    <Project Path="tests/Highway.Client.Hosting.Tests/Highway.Client.Hosting.Tests.csproj" />
   </Folder>
 </Solution>

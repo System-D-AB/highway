@@ -720,3 +720,47 @@ service log:     [job] reconciling orders (scheduled run)      × exactly 1
 
 One fire in one interval, processed by the ordinary queue machinery, visible in the manifest
 at boot and on the dashboard with next/last fire. Nothing else in the samples changed.
+
+
+---
+
+## 2026-08-29 — feature 036 (Service Hosting)
+
+**Libraries:** `Highway.Client.Hosting` — one-line host + service verbs.
+**Ran:** `Highway.Samples.Host` as a console app and through verb dispatch.
+
+### Console run
+
+```
+> dotnet run --project samples/Highway.Samples.Host
+
+22:26:45 info: TickWorker[0] TickWorker started
+22:26:45 info: Microsoft.Hosting.Lifetime[0] Application started. Press Ctrl+C to shut down.
+22:26:45 info: Microsoft.Hosting.Lifetime[0] Hosting environment: Production
+22:26:45 info: TickWorker[0] tick — 22:26:45
+^C
+22:26:52 info: TickWorker[0] TickWorker stopped
+```
+
+### Verb dispatch (status)
+
+```
+> dotnet run --project samples/Highway.Samples.Host -- status --name nonexistent-test
+
+Service 'nonexistent-test' is not installed.
+```
+
+Exit code 0. The verb path returns immediately — no host is built.
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| Console run: starts, ticks, Ctrl+C stops cleanly | ✅ |
+| Verb `status` on non-existent service: reports not installed, exit 0 | ✅ |
+| Verb path: returns instantly, no host construction | ✅ |
+| No Highway services registered (highway: null) | ✅ |
+| `HIGHWAY-PROTOCOL.md` untouched | ✅ (git diff confirms zero changes) |
+| `product.md` package list updated | ✅ |
+| All 107 hosting tests pass | ✅ |
+| All 69 server host tests pass (re-pointed, behavior preserved) | ✅ |

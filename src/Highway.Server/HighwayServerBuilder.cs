@@ -447,7 +447,7 @@ public sealed class HighwayServerBuilder
     /// <para>Public so the highways host's <c>--version</c> can print it (feature 031): an
     /// operator upgrading in place can compare formats before touching a data directory.</para>
     /// </summary>
-    public const int StorageFormatVersion = 3;
+    public static readonly int StorageFormatVersion = 3;
 
     private const string StorageFormatFile = "highway.format";
 

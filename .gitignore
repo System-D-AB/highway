@@ -42,3 +42,5 @@ assurance/runs/
 
 # Local package-verification output (feature 035 T5)
 build/dist/
+
+artifacts/

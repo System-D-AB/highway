@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Highway.Client.Hosting</RootNamespace>
+    <PackageId>Highway.Client.Hosting</PackageId>
+    <Description>One-line host and service verbs (install, uninstall, start, stop, status) for any .NET app — Windows services and systemd units. Optional Highway integration.</Description>
+    <PackageTags>highway;hosting;windows-service;systemd;topshelf;worker;daemon</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Highway.Client.Hosting.Tests" />
+    <InternalsVisibleTo Include="highways" />
+    <InternalsVisibleTo Include="Highway.Server.Host.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Highway.Client\Highway.Client.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

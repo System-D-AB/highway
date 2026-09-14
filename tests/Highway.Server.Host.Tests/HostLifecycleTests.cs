@@ -124,18 +124,18 @@ public class HostLifecycleTests
 
             Program.DiscoverConfigFile().Should().BeNull("nothing exists yet");
 
-            var confDir = Path.Combine(dir, "conf");
-            Directory.CreateDirectory(confDir);
-            var confPath = Path.Combine(confDir, "highway.json");
-            File.WriteAllText(confPath, "{}");
+            var configDir = Path.Combine(dir, "config");
+            Directory.CreateDirectory(configDir);
+            var configPath = Path.Combine(configDir, "highway.json");
+            File.WriteAllText(configPath, "{}");
 
-            Program.DiscoverConfigFile().Should().Be(confPath, "conf/highway.json is the distribution layout");
+            Program.DiscoverConfigFile().Should().Be(configPath, "config/highway.json is the distribution layout");
 
             var cwdPath = Path.Combine(dir, "highway.json");
             File.WriteAllText(cwdPath, "{}");
 
             Program.DiscoverConfigFile().Should().Be(cwdPath,
-                "a file in the working directory beats conf/ — the operator's copy wins");
+                "a file in the working directory beats config/ — the operator's copy wins");
         }
         finally
         {

@@ -248,6 +248,7 @@ Four NuGet packages with clean separation of concerns, plus a standalone executa
 | **`Highway.Abstractions`** | Contracts, interfaces, attributes, base classes. Zero dependencies. | Everyone — shared contract assemblies, client apps, server. |
 | **`Highway.Client`** | The client library. Engine, assembly scanning, DI wiring, queues, pub/sub, RPC, distributed caching, resilience. | Any application that hosts services, workers, or publishes/calls messages. |
 | **`Highway.LocalServer`** | The broker, in-process. `HighwayTestServer` for integration tests, `HighwayServerBuilder` for a local run. Named for what it is for: production deploys the `highways` distribution from Releases, not a host written around this package. | Test projects and local development. |
+| **`Highway.Client.Hosting`** | One-line host and service verbs (`install`, `uninstall`, `start`, `stop`, `status`). Runs any .NET app as a Windows service or systemd unit. Optional Highway integration — works standalone. | Any app that needs TopShelf-style hosting on Windows or Linux. |
 
 The dashboard assembly (`Highway.Server.Dashboard`) is **not packaged**. It ships inside the
 `highways` distribution, where it runs in the broker process and reads the flight recorder

@@ -34,17 +34,13 @@ public class ProgramTests
     }
 
     [Theory]
-    [InlineData("--install")]
-    [InlineData("--uninstall")]
     [InlineData("--status")]
-    [InlineData("--start")]
-    [InlineData("--stop")]
-    public void ServiceVerbs_AreKnown_ButReportUnavailableUntilPhase3(string verb)
+    public void ServiceVerbs_StatusQuery_ExecutesCleanly(string verb)
     {
-        var (exit, _, stderr) = RunWith(verb);
+        var (exit, stdout, _) = RunWith(verb, "--service-name", "NonExistentServiceForTest" + Guid.NewGuid().ToString("N")[..8]);
 
-        exit.Should().NotBe(ExitCodes.Success, $"{verb} lands with Phase 3");
-        stderr.Should().Contain(verb, "the message names the verb that was refused");
+        exit.Should().Be(ExitCodes.Success);
+        stdout.Should().Contain("is not installed");
     }
 
     private static (int Exit, string StdOut, string StdErr) RunWith(params string[] args)

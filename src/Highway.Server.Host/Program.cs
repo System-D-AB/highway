@@ -45,9 +45,13 @@ public static class Program
 
         if (parsed.Verb is not null)
         {
-            Console.Error.WriteLine(
-                $"{parsed.Verb} is not available in this build — service verbs land with feature 031 Phase 3.");
-            return ExitCodes.Unexpected;
+            if (OperatingSystem.IsWindows())
+            {
+                return WindowsServiceManager.Dispatch(parsed);
+            }
+
+            Console.Error.WriteLine("Windows service verbs are only supported on Windows.");
+            return ExitCodes.PlatformUnsupported;
         }
 
         if (parsed.Validate)
@@ -82,7 +86,7 @@ public static class Program
 
             if (configPath is null)
                 Console.Error.WriteLine(
-                    "warning: no highway.json found (looked in the working directory, its conf/ subdirectory " +
+                    "warning: no highway.json found (looked in the working directory, its config/ subdirectory " +
                     "and beside the executable) — running with code defaults: loopback, durable beside the " +
                     "executable, no dashboard.");
 
@@ -114,7 +118,7 @@ public static class Program
 
     /// <summary>
     /// Configuration discovery (design § Host Lifecycle): the working directory first
-    /// (where the operator is standing), then its <c>conf/</c> subdirectory, then beside
+    /// (where the operator is standing), then its <c>config/</c> subdirectory, then beside
     /// the executable (where a bare <c>bin/highways</c> invocation runs). An explicit
     /// <c>--config</c> always wins and never reaches this method.
     /// </summary>
@@ -123,9 +127,9 @@ public static class Program
         string[] candidates =
         [
             Path.Combine(Directory.GetCurrentDirectory(), "highway.json"),
-            Path.Combine(Directory.GetCurrentDirectory(), "conf", "highway.json"),
+            Path.Combine(Directory.GetCurrentDirectory(), "config", "highway.json"),
             Path.Combine(AppContext.BaseDirectory, "highway.json"),
-            Path.Combine(AppContext.BaseDirectory, "conf", "highway.json"),
+            Path.Combine(AppContext.BaseDirectory, "config", "highway.json"),
         ];
 
         return candidates.FirstOrDefault(File.Exists);
@@ -161,15 +165,15 @@ public static class Program
     private static string Usage() => """
           --version                 print version, storage format and RID, then exit
           --validate                load and validate configuration, print it masked, exit
-          --config <path>           configuration file (default: discovery in CWD, conf/, beside exe)
+          --config <path>           configuration file (default: discovery in CWD, config/, beside exe)
           --port <n>                override server.port
           --bind <addr>             override server.bindAddress
           --data-dir <path>         override server.dataDir
-          --install [--start]       install as a service/daemon (Phase 3)
-          --uninstall               stop if running, then remove the service/daemon (Phase 3)
-          --status                  report service/daemon state (Phase 3)
-          --start | --stop          control an installed service/daemon (Phase 3)
-          --service-name <name>     service identity for install verbs (Phase 3)
-          --service-display <name>  service display name for install verbs (Phase 3)
+          --install [--start]       install as a service/daemon
+          --uninstall               stop if running, then remove the service/daemon
+          --status                  report service/daemon state
+          --start | --stop          control an installed service/daemon
+          --service-name <name>     service identity for install verbs
+          --service-display <name>  service display name for install verbs
         """;
 }
