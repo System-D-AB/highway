@@ -1,5 +1,26 @@
 # Feature 037 — The RocksDB Engine: Tasks
 
+> **Decomposed 2026-09-14; re-cut 2026-09-15.** This feature's phases execute as
+> **four features** shaped by the product's spine (the three verbs), not by process
+> scaffolding; 037 remains the architecture authority (D1–D7, R1–R11, OD1–OD5, gates)
+> they cite instead of restating. The 09-15 re-cut, by the owner's direction: no spike
+> feature — **G0 is settled by 040-resp-server's first passing SE.Redis test**, and the
+> RocksDB-mechanics questions are answered by imported sibling evidence
+> (`C:\Software\ai\stow-rocksdb\spike`, spec `v2-001-engine-bakeoff`) plus 038's
+> contract tests; and no cache feature — the cache is an add-on that existed because
+> Garnet was underneath, so it is a **task inside 041**, not a headline.
+>
+> | 037 phase | Executes as |
+> |---|---|
+> | Phase 0 decisions (OD1/OD2, WAL sync, read-view) | **038-storage-engine T0** — decisions on paper against imported evidence |
+> | Phase 2 (seam, stores, write path — G1) | **038-storage-engine** |
+> | Phase 3 (port the 23 commands) | **039-command-port** |
+> | Phase 1 + 4 (G0, RESP server, auth R11, doorbells, OD3) | **040-resp-server** (+ the embedded test-server replacement) |
+> | Phase 5 (Garnet + cache removal) + Phase 6 (proof — G2/G3/G4) | **041-garnet-removal** |
+>
+> The task list below is kept as the original inventory; per-task state lives in the
+> four feature specs.
+
 **T1 comes before everything, and it is half a day.** The entire feature rests on D1 — that
 SE.Redis will talk to a server we wrote. That is the one assumption which, if wrong, invalidates the
 plan rather than delaying it. A stub that answers `PING` and round-trips one `HW.*` command settles
@@ -60,6 +81,34 @@ Everything downstream assumes this works.
 derived by reading the ~106 existing call sites rather than by designing forward. No RocksDB or
 Garnet type appears on it.
 
+> **A draft seam already exists** at `src/Highway.Server/Storage/IHighwayStore.cs`
+> (plus `IStoreSnapshot.cs`, `IStoreBatch.cs`), written from a full inventory of the
+> current Garnet call sites. It compiles against `Highway.Server` with no engine type
+> on it. Two findings from that inventory are baked into it and worth knowing before
+> touching it:
+> - **`SetMembers` is new.** Garnet's commands never called it — they kept a Main-store
+>   mirror string beside every Set because a `Prepare`-phase Set read registered a watch
+>   the exclusive lock then failed (004.1). With no `Prepare`, the mirrors collapse
+>   (their own task is T3.3), and a set read is just `SetMembers`.
+> - **`Increment` carries the per-queue seq, not just the channel seq.** List keys need a
+>   monotonic per-queue sequence allocated *in the same batch* — the B1 trap documented
+>   in the reference material.
+> - **`DeleteRange` is on the seam.** Group retirement and node decommission are one range
+>   delete over a key prefix, not an enumerate-and-`DELETE` loop — and that range delete
+>   plus compaction is the mechanical answer to C4.6 (T6.3).
+>
+> **Reference material** is copied under `reference/`:
+> - `reference/stow-engine/` — the RocksDB source for every primitive here, from a sibling
+>   project (the code you port).
+> - `reference/stow-tech/` — the sibling's design docs (`keyspace.md`, `document-layout.md`,
+>   `storage-model.md`, `transactions.md`, `index-structures.md`) that explain the physical
+>   layout and, crucially, the failure/replay behaviour the code alone does not show —
+>   including the fault-idempotent commit-ordering lesson the seam cannot express by itself.
+>
+> `reference/README.md` maps each file to a Highway concept and names the four hazards that
+> project already paid for. It is prior art, not a dependency: port the idea, do not
+> reference the folder.
+
 ### - [ ] T2.2 — `InMemoryStore`
 
 *Requirements:* R3.3
@@ -73,6 +122,19 @@ the commands need rather than by what RocksDB happens to do.
 **Done when:** the same contract suite passes on RocksDB; the key layout is documented; seq
 allocation happens **inside the same batch** as its write (`design.md` §1); and OD5 — expiry field
 versus compaction filter — is decided and recorded.
+
+> **The key layout is already decided and coded** (settles OD4). See
+> [`physical-layout.md`](physical-layout.md) for the design — the four families
+> (`q`/`z`/`s`/`k`, plus the `n` counter family), every current Garnet key mapped onto
+> them, the column-family split, and why there is **no collection/document model**
+> underneath. The realizing code is in `src/Highway.Server/Storage/Layout/`:
+> `KeyWriter` + `KeyEncoding` (order-preserving encoders, ported from stow),
+> `HighwayKeyspace` (the family key builders), `HighwayNames` (the logical-name
+> vocabulary — the direct translation of the old `HighwayKeys`, with the mirror keys
+> gone), and `HighwayColumnFamilies`. It compiles clean. What T2.3 still owns:
+> the `RocksDbStore` that opens the DB and wires these into `IHighwayStore`, the
+> in-batch seq allocator (physical-layout.md §5), the head/tail seq scheme choice
+> (§5), and OD5 (the reply-slot expiry mechanism).
 
 ### - [ ] T2.4 — The transactional write path *(gate G1)*
 
@@ -164,6 +226,16 @@ subset return an error **naming the subset** rather than a plausible `+OK`.
 **Done when:** `SUBSCRIBE`/`UNSUBSCRIBE` and push frames work against SE.Redis's separate subscriber
 connection, restricted mode is honoured, and **the rig passes with `DoorbellsEnabled == false`** —
 which is what proves the delivery guarantees never depended on it.
+
+### - [ ] T4.5b — Auth: config users, connection-level `AUTH`
+
+*Requirements:* R11
+**Done when:** config-file users (hashed passwords + a documented hash recipe) validate
+both `AUTH` forms; an unauthenticated connection can send only `AUTH`/`PING` and gets
+`-NOAUTH` naming the fix otherwise; `WithoutAuthentication()` and the loopback
+exemption behave exactly as C6.x states; the client's `user:pass@` connection string
+and `HighwayAuthenticationException` path work **unmodified**; C6.x amended and the
+012 `@dangerous`/`nopass` findings retired with dated notes.
 
 ### - [ ] T4.6 — Document the subset
 

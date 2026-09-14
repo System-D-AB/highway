@@ -81,6 +81,14 @@ Settled in the research document and by the user on 2026-09-11.
 `HW.*` command names, argument order and reply shapes are unchanged. `Highway.Client` is not
 modified.
 
+> **Amendment 2026-09-14, revised 2026-09-15:** the distributed cache (feature 026)
+> lives in `src/Highway.Client/Caching/`, so its removal (T5.2) necessarily touches the
+> client — found in review; R1 as originally worded contradicted it. Resolution: the
+> cache is an add-on and its removal is a **task inside 041-garnet-removal** (it dies
+> with the engine that made it free); that task's client diff is the one recorded
+> justification. R1's empty-diff criterion applies to every other change in features
+> 038–041.
+
 #### Acceptance Criteria
 
 1. `HIGHWAY-PROTOCOL.md` requires **no** correction on account of this feature. If it does, that
@@ -209,6 +217,35 @@ A rewrite is the cheap moment for exactly the constraints blocked on *"this woul
 This costs almost nothing now and is the escape hatch if D1 is ever revisited — including for the
 narrow case research Part VIII names: a **producer-only** HTTP ingress (`send`, `publish`, `call`),
 which has no lease state machine and therefore no second conformance surface.
+
+### Requirement 11: Our own auth — config-file users, connection-level, binary
+
+Garnet's ACL leaves with Garnet. Its replacement is deliberately simpler, because 012
+already learned that Highway's real model is connection-level shared credentials — the
+per-command roles were specced and descoped there, and the category machinery only ever
+produced the `+@all -@dangerous` trap.
+
+#### Acceptance Criteria
+
+1. Users live in the server config (`users`: name + **password hash** — PBKDF2 or
+   equivalent; never plaintext in the file). A documented way to produce the hash ships
+   with it.
+2. `AUTH password` and `AUTH user password` are both accepted — whichever the SE.Redis
+   connection string implies. The client-side experience is unchanged:
+   `user:pass@host` in the connection string works as today.
+3. Enforcement is **binary and at the connection**: an unauthenticated connection may
+   send `AUTH` and `PING` only; anything else returns `-NOAUTH` with a sentence naming
+   the fix. There is no per-command authorization — the server serves only `HW.*` plus
+   the handshake subset, so authenticated *is* authorized. Roles are deferred until
+   someone needs them.
+4. C6.x semantics are preserved and re-proven: auth required by default,
+   `WithoutAuthentication()` remains the explicit opt-out, loopback remains exempt,
+   failures remain permanent and legible (the client's existing
+   `HighwayAuthenticationException` path works unmodified).
+5. The 012 Garnet findings are **retired with dated amendments** in `constraints.md`
+   and `research.md`: `@dangerous` categories and the `nopass` bypass cannot exist in a
+   model with no categories and no default user. C6.x carries its mechanics amendment
+   (T6.4's list gains C6.x).
 
 ---
 

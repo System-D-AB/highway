@@ -711,3 +711,20 @@ because it owns the server and a naive Redis wrapper cannot.
 | Sagas / Process Managers | Long-running workflows with compensation |
 | Transactional Outbox | Atomic DB write + message publish |
 | Clustering | Multi-server Highway.Server deployment. **2026-09-11:** not reachable on Garnet's AOF — it depends on the storage-engine change, now specced as **037**. Design in [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) Part VI; the node-count fork is open |
+
+### The 037 train (added 2026-09-15; re-cut same day)
+
+Feature 037 (the RocksDB engine) executes as **four features** shaped by the product's
+spine — the three verbs — with 037 as the architecture authority they cite. The
+2026-09-15 re-cut dropped the spike feature (G0 folds into 040's first passing
+SE.Redis test; RocksDB mechanics are covered by imported sibling evidence from
+`stow-rocksdb`'s bake-off) and the cache-retirement feature (an add-on's removal is a
+task in 041, not a headline). Order is dependency order — each gate must hold before
+the next feature starts.
+
+| Feature | Owns | Gate | Status |
+|---|---|---|---|
+| [038-storage-engine](../features/038-storage-engine/requirements.md) | Paper decisions (OD1/OD2, WAL sync, read-view), `IHighwayStore`, contract suite, InMemory + RocksDB stores, physical layout, crash proofs | **G1** | Specced |
+| [039-command-port](../features/039-command-port/requirements.md) | 23 `HW.*` commands onto the seam, mirror collapse, in-process command suites | — | Specced |
+| [040-resp-server](../features/040-resp-server/requirements.md) | Reader/writer, Kestrel + TLS (non-HTTP ALPN), handshake subset (OD3 verified here), auth (037 R11), doorbells, embedded test server | **G0** | Specced |
+| [041-garnet-removal](../features/041-garnet-removal/requirements.md) | Cache add-on removed; Garnet deleted; full suite, assurance rig ×2, C4.6 measured, constraints register amended | **G2 G3 G4** | Specced |
