@@ -339,7 +339,6 @@ public sealed class HighwayServerBuilder
 
         ResolveDataDirectory(_opts);
 
-        var garnetOpts = BuildGarnetOptions(_opts);
         var logger = _loggerFactory?.CreateLogger<HighwayServerBuilder>();
 
         // Applied after the bind address is resolved above, because the whole rule is
@@ -350,8 +349,11 @@ public sealed class HighwayServerBuilder
             "Building Highway server: bind={BindAddress}, port={Port}, dataDir={DataDir}, lease={Lease}",
             _opts.BindAddress, _opts.Port, _opts.DataDir ?? "(memory-only)", _opts.Lease);
 
-        var garnet = new HighwayGarnetServer(garnetOpts, _loggerFactory);
-        return new HighwayServer(garnet, _opts, _loggerFactory, _componentFactories);
+        // Feature 041 T1 — the flip: the broker runs the 040 RESP server over the 038 RocksDB
+        // store, not Garnet. The Garnet construction path (BuildGarnetOptions / HighwayGarnetServer
+        // / HighwayServer) stays compiled but off the running path until 041 T4 deletes it.
+        var certificate = _opts.Tls.LoadServerCertificate();
+        return new RespHighwayServer(_opts, _loggerFactory, certificate, _componentFactories);
     }
 
     /// <summary>

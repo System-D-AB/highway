@@ -431,9 +431,15 @@ per event (the claimant IS the group); retirement counts the youngest member; `B
 destroys a queue only for the last member. Protocol 4.4. The default (group = node name) is
 the pre-025 behavior exactly.
 
-### 026 — Distributed Cache  ✅
+### 026 — Distributed Cache  ✅ → **removed (feature 041, 2026-08-29)**
 
-**Status:** Complete
+**Status:** Complete, then **retired**. The distributed-cache add-on was removed in
+[**041**](../features/041-garnet-removal/requirements.md) (R1.5) together with the Garnet engine
+that made it free: it existed only because Garnet was natively a cache-store exposing `GET`/`SET`
+underneath. RocksDB is a durable log-structured store, not a cache substrate, so the add-on lost
+its reason to exist. `AddHighwayCache`, `HighwayCache`, `HighwayCacheOptions` and the
+`IDistributedCache`/`IBufferDistributedCache` registrations are gone; this is a breaking client
+change, announced in the release notes. History below kept as recorded.
 
 **Shipped** — `docs/features/026-distributed-cache/`. Garnet is
 natively a cache-store; this exposes it through `IDistributedCache` / `IBufferDistributedCache`
@@ -710,7 +716,7 @@ because it owns the server and a naive Redis wrapper cannot.
 |---|---|
 | Sagas / Process Managers | Long-running workflows with compensation |
 | Transactional Outbox | Atomic DB write + message publish |
-| Clustering | Multi-server Highway.Server deployment. **2026-09-11:** not reachable on Garnet's AOF — it depends on the storage-engine change, now specced as **037**. Design in [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) Part VI; the node-count fork is open |
+| Clustering | Multi-server Highway.Server deployment. **2026-09-11:** not reachable on Garnet's AOF — it depends on the storage-engine change, now specced as **037**. Design in [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) Part VI. **2026-09-15:** replication is now fully specced as [**042**](../features/042-replication/requirements.md) — priorities + fencing, no elections, 2 nodes with optional witness; the O10 node-count fork is **closed** by its RD6 |
 
 ### The 037 train (added 2026-09-15; re-cut same day)
 
@@ -728,3 +734,4 @@ the next feature starts.
 | [039-command-port](../features/039-command-port/requirements.md) | 23 `HW.*` commands onto the seam, mirror collapse, in-process command suites | — | Specced |
 | [040-resp-server](../features/040-resp-server/requirements.md) | Reader/writer, Kestrel + TLS (non-HTTP ALPN), handshake subset (OD3 verified here), auth (037 R11), doorbells, embedded test server | **G0** | Specced |
 | [041-garnet-removal](../features/041-garnet-removal/requirements.md) | Cache add-on removed; Garnet deleted; full suite, assurance rig ×2, C4.6 measured, constraints register amended | **G2 G3 G4** | Specced |
+| [042-replication](../features/042-replication/requirements.md) | Stage 2 (after 041): WAL-shipping replication — one primary + priority replicas, slots-with-cap, epoch fencing, two-timeout deadman, optional witness, **no elections**; CI failover harness. Closes O10 | — | Specced 2026-09-15 |

@@ -181,14 +181,18 @@ engine sequence advances on *any* write, so it cannot be reserved under a per-li
 concurrent pushes to different lists would both read the same "next" and collide. A per-list
 counter, incremented in-batch, is reserved by the same batch atomicity that commits the entry.
 
-`ListLeftPush` (redeliver-to-head) needs a seq *below* the current head. Two workable schemes,
-decided in T2.3:
+`ListLeftPush` (redeliver-to-head) needs a seq *below* the current head. Two workable schemes:
 1. a signed seq with the head growing downward from 0 and the tail upward — head-push decrements a
    low-water counter, tail-push increments a high-water counter; or
 2. a single unsigned seq space with head-push reusing gaps below the lowest live key.
 
-Scheme 1 is simpler and is the default unless T2.3 measures a reason otherwise. Either way the
-counter(s) live in the `n` family beside the list.
+> **Chosen: scheme 1 (feature 038 T4, 2026-09-15).** The seq is a *signed* i64 encoded
+> order-preservingly (§4), so a negative head seq sorts below every non-negative tail seq
+> automatically — no separate comparator, no gap-reuse bookkeeping. Two `n`-family counters
+> per list beside it: a high-water the tail increments from 0 up, a low-water the head
+> decrements from 0 down (`ListSequence(name)` and `ListSequence(name) + ":low"`). Proven on
+> both stores by `Seq_MultipleHeadPushes_PopInReverseInsertionOrder` and the concurrent
+> tail-push tests (038 T4).
 
 ---
 

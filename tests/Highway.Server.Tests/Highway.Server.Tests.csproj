@@ -11,6 +11,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Highway.Server\Highway.Server.csproj" />
+    <!-- Built alongside the tests so the T6 crash-replay test can spawn it as a child
+         process. ReferenceOutputAssembly=false: we invoke it via `dotnet exec`, not link it. -->
+    <ProjectReference Include="..\Highway.Storage.CrashHarness\Highway.Storage.CrashHarness.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseGarnetSource)' == 'true'">

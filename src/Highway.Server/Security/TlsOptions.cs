@@ -99,6 +99,31 @@ public sealed class TlsOptions
         }
     }
 
+    /// <summary>
+    /// Loads the server certificate for the RESP transport (feature 041), or null when TLS is not
+    /// configured. Garnet-free: a PFX file via <see cref="X509CertificateLoader"/>, or a machine-store
+    /// lookup by subject name. This is the cert <see cref="Resp.RespServer"/>'s Kestrel endpoint uses;
+    /// the Garnet <see cref="CreateTlsOptions"/> path is retired with Garnet.
+    /// </summary>
+    internal X509Certificate2? LoadServerCertificate()
+    {
+        if (CertFileName is not null)
+            return X509CertificateLoader.LoadPkcs12FromFile(Path.GetFullPath(CertFileName), CertPassword);
+
+        if (CertSubjectName is not null)
+        {
+            using var store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+            store.Open(OpenFlags.ReadOnly);
+            var match = store.Certificates.Find(X509FindType.FindBySubjectName, CertSubjectName, validOnly: false);
+            if (match.Count == 0)
+                throw new InvalidOperationException(
+                    $"No certificate with subject name '{CertSubjectName}' was found in the LocalMachine\\My store.");
+            return match[0];
+        }
+
+        return null;
+    }
+
     internal IGarnetTlsOptions? CreateTlsOptions(ILogger? logger)
     {
         if (Settings is not null) return Settings;

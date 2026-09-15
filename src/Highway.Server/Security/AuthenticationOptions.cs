@@ -44,6 +44,20 @@ public sealed class AuthenticationOptions
     public string? Password { get; set; }
 
     /// <summary>
+    /// Config users with hashed passwords (feature 040 / 037 R11). Each carries a name and a
+    /// <see cref="PasswordHash"/> string (<c>PBKDF2$iterations$salt$key</c>); mint one with the
+    /// documented recipe. When non-empty this is the credential directory the RESP server's
+    /// <c>AUTH</c> verifies against — either <c>AUTH &lt;password&gt;</c> (matched against the
+    /// <c>default</c> user) or <c>AUTH &lt;name&gt; &lt;password&gt;</c>.
+    ///
+    /// <para>Independent of the RESP transport's own auth; when both this and
+    /// <see cref="Password"/> are set the users list takes precedence for the RESP server. The
+    /// Garnet-era <see cref="Settings"/> escape hatch is unaffected (it is removed with Garnet in
+    /// 041).</para>
+    /// </summary>
+    public IList<HighwayUser> Users { get; } = [];
+
+    /// <summary>
     /// Escape hatch: a fully-formed Garnet authenticator, used verbatim in place of
     /// anything Highway would construct. This is how ACL configuration files, named
     /// users, per-command rules and Entra ID remain reachable without waiting for
@@ -86,7 +100,7 @@ public sealed class AuthenticationOptions
     /// Whether this server will authenticate its clients. Drives the bind-address rule
     /// and the startup log line.
     /// </summary>
-    public bool IsConfigured => Settings is not null || !string.IsNullOrWhiteSpace(Password);
+    public bool IsConfigured => Settings is not null || !string.IsNullOrWhiteSpace(Password) || Users.Count > 0;
 
     /// <summary>
     /// Builds the Garnet authenticator, or <see langword="null"/> when this server runs
@@ -127,5 +141,22 @@ public sealed class AuthenticationOptions
                 "WithoutAuthentication() was called on a server that also has authentication " +
                 "configured. Remove one: the two say opposite things and the result would " +
                 "depend on call order.");
+
+        foreach (var user in Users)
+        {
+            if (string.IsNullOrWhiteSpace(user.Name))
+                throw new InvalidOperationException("A configured user has a blank name.");
+            if (!PasswordHash.IsHash(user.PasswordHash))
+                throw new InvalidOperationException(
+                    $"User '{user.Name}' has a password that is not a PBKDF2 hash string " +
+                    $"('{PasswordHash.Scheme}$iterations$salt$key'). Hash it with the documented recipe; " +
+                    "never store a plaintext password in the users list.");
+        }
     }
 }
+
+/// <summary>
+/// A config user (040 / 037 R11): a name and a <see cref="PasswordHash"/> string. The RESP server's
+/// <c>AUTH</c> verifies a supplied password against the matching user's hash in constant time.
+/// </summary>
+public sealed record HighwayUser(string Name, string PasswordHash);

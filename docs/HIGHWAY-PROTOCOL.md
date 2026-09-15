@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 3.0** — reflects everything shipped through feature 014 and its follow-up.
+**Protocol version 4.5** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
 
 ## About
 
@@ -958,6 +958,37 @@ A client built only from the `HW.*` commands cannot function. These stock comman
 | `AUTH <password>` or `AUTH <user> <password>` | **Required against a secured server.** Highway's own client sends the password alone; the username defaults to Garnet's `default`. |
 
 **The reply doorbell is node-global.** Every client subscribed to `hw:door:rep` receives a notification for **every** reply on the server, not just its own. A client must ignore request IDs it did not issue, and in particular must never `DEL` a slot it does not own — doing so destroys another caller's reply and hangs that call until its timeout. This is a real defect that occurred during development, not a hypothetical.
+
+### The served RESP subset (040, as built)
+
+As of feature 040 the broker is Highway's own RESP server, not a Garnet extension. The
+table above still describes what a *client* must issue; this section is the *server's*
+side of that contract — the exhaustive list of what it answers. The server serves the
+`HW.*` command set plus exactly the stock commands below, and nothing else: an
+unrecognized command receives `ERR unknown command '<name>'. This is a Highway broker;
+served commands are the HW.* set: …` (naming the set), never a plausible `+OK`.
+
+| Command | As-built behaviour |
+|---|---|
+| `AUTH` | Both forms (`AUTH password`, `AUTH user password`). Failure is `-WRONGPASS`. **Pre-auth gate:** an unauthenticated connection may issue only `AUTH` and `QUIT`; everything else — `PING` included, because `PING` is SE.Redis's connect handshake — answers `-NOAUTH Authentication required.` (037 R11.3 as amended 2026-09-15). |
+| `QUIT` | `+OK`, then the connection closes. Allowed in every state. |
+| `PING` | `+PONG`, or a bulk echo of its argument. Post-auth only. |
+| `HELLO` | RESP2 only: `HELLO` / `HELLO 2` answer a minimal server map; `HELLO 3` is refused with `NOPROTO`, and SE.Redis falls back to RESP2. |
+| `ECHO` | Bulk echo. |
+| `SELECT` | `+OK` for any index — a single logical database. |
+| `CLIENT` | `+OK` for every subcommand, **accepted and ignored**. In particular `CLIENT LIST` no longer returns connection records (the Garnet-era observed-address join is gone). |
+| `COMMAND` | Empty array — no command catalogue. |
+| `CONFIG` | `CONFIG GET …` answers an empty array ("no matching keys" — SE.Redis probes this on connect); any other subcommand `+OK`. Never an error, which would abort a client's connect. |
+| `INFO` | A minimal bulk string declaring a standalone master, for SE.Redis's server-type detection. |
+| `SUBSCRIBE` / `UNSUBSCRIBE` | Doorbell channels only. A subscribed connection is in RESP2 restricted mode: only `SUBSCRIBE`, `UNSUBSCRIBE`, `PING`, `QUIT`. `PUBLISH` is **not** served — doorbells are published server-internally. |
+| `GET` | Served for the two raw-key families a client reads: reply slots `hw:rep:*` and idempotency markers `hw:idem:*`. Any other key answers a null bulk — the honest reply to SE.Redis's tiebreaker probe; there is no general keyspace. |
+| `SET` | Idempotency claim **only** (`hw:idem:*`), with `EX`/`PX`/`NX` honoured. A `SET` on any other key is refused with `ERR HW_INVALID_ARG` naming this boundary. |
+| `SETEX` / `PSETEX` | Idempotency record writes (`hw:idem:*` only) — SE.Redis's unconditional expiring write. |
+| `DEL` / `UNLINK` | One key, from the reply-slot or idempotency families only; answers `:1` (the delete is idempotent — `:1` whether or not the key still existed). Any other key is refused with an error naming the two families. |
+| `TTL` / `PTTL` | Idempotency markers, Redis semantics: `-2` no key, `-1` no expiry, else remaining time. |
+
+`KEYS`, `SCAN`, `EVAL`, transactions, cluster commands and streams are not served — 037
+R6.3's rule is that the broker serves its protocol, not a keyspace.
 
 ### Authentication and transport security
 

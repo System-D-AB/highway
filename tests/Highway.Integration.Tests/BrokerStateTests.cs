@@ -94,15 +94,16 @@ public class BrokerStateTests
     }
 
     /// <summary>
-    /// The one configuration a self-connection genuinely cannot serve: the server demands a
-    /// client certificate that a connection from the broker to itself has no way to present.
-    ///
-    /// <para><b>It must degrade, not fail.</b> 018's version of this took the whole broker down.
-    /// Here the broker runs, the state read reports why it cannot answer, and the reason names
-    /// the setting rather than reporting a bare timeout.</para>
+    /// Under Garnet, the state read rode a self-connection that could not present a client
+    /// certificate, so mutual TLS forced a documented degradation (the previous version of
+    /// this test asserted the degradation reason). <b>040 removed the self-connection</b> —
+    /// the state read is a direct in-process store read (T8) — so the limitation is gone:
+    /// under mutual TLS the broker starts AND its state stays fully readable. The test now
+    /// asserts the improvement; if a future change reintroduces a wire hop here, this fails
+    /// and the degradation contract discussion reopens deliberately.
     /// </summary>
     [Fact]
-    public async Task DegradesWithAReason_UnderMutualTls()
+    public async Task StateReadStaysAvailable_UnderMutualTls()
     {
         var pfx = WriteSelfSignedCertificate();
         try
@@ -117,9 +118,9 @@ public class BrokerStateTests
             // The broker started. That is half the assertion.
             var result = await server.ReadQueueStateAsync();
 
-            result.Unavailable.Should().NotBeNull("a self-connection cannot present a client certificate");
-            result.Unavailable.Should().Contain("ClientCertificateRequired",
-                "the reason names the setting, so an operator is not left reading a timeout");
+            result.Unavailable.Should().BeNull(
+                "the 040 state read is in-process — mutual TLS no longer costs observability");
+            result.Rows.Should().NotBeNull();
         }
         finally { File.Delete(pfx); }
     }

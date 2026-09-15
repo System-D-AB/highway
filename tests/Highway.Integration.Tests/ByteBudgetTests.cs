@@ -33,11 +33,8 @@ public class ByteBudgetTests : IDisposable
             "{\"v\":1,\"src\":\"t\",\"ts\":\"2026-08-09T00:00:00Z\",\"body\":{\"Blob\":\""
             + new string('x', bytes) + "\"}}");
 
-    private static long Counter(IDatabase db, string queue)
-    {
-        var raw = db.Execute("GET", $"hw:q:{queue}:bytes");
-        return raw.IsNull ? 0 : (long)raw;
-    }
+    private long Counter(string queue)
+        => _server.Inspect.Counter($"hw:q:{queue}:bytes");
 
     // ---- the counter ----------------------------------------------------------
 
@@ -46,18 +43,18 @@ public class ByteBudgetTests : IDisposable
     {
         var db = Db();
 
-        Counter(db, "bb.count").Should().Be(0, "an untouched queue has no counter key at all");
+        Counter("bb.count").Should().Be(0, "an untouched queue has no counter key at all");
 
         db.Execute("HW.QSEND", "bb.count", "m-1", Payload());
-        var afterOne = Counter(db, "bb.count");
+        var afterOne = Counter("bb.count");
         afterOne.Should().BeGreaterThan(0);
 
         db.Execute("HW.QSEND", "bb.count", "m-2", Payload());
-        Counter(db, "bb.count").Should().BeGreaterThan(afterOne, "a second message adds to it");
+        Counter("bb.count").Should().BeGreaterThan(afterOne, "a second message adds to it");
 
         // A claim moves the message out of the live queue, so the bytes go with it.
         db.Execute("HW.QCLAIM", "bb.count", "node-a");
-        Counter(db, "bb.count").Should().Be(afterOne,
+        Counter("bb.count").Should().Be(afterOne,
             "a claimed message has left the live queue - the budget governs what is waiting");
     }
 
@@ -82,10 +79,10 @@ public class ByteBudgetTests : IDisposable
         db.Execute("HW.QSEND", q, "m-late", Payload(512));
 
         // Recompute the truth from the structure itself and compare.
-        var entries = (RedisResult[])db.Execute("LRANGE", $"hw:q:{q}:q", "0", "-1")!;
-        var actual = entries.Sum(e => ((byte[])e!).Length);
+        var entries = _server.Inspect.ListEntries($"hw:q:{q}:q");
+        var actual = entries.Sum(e => e.Length);
 
-        Counter(db, q).Should().Be(actual,
+        Counter(q).Should().Be(actual,
             "the counter is maintained by hand on every path, so it is only correct while every " +
             "path remembers - this test is what notices when one stops");
     }
@@ -113,7 +110,7 @@ public class ByteBudgetTests : IDisposable
         refusal.Message.Should().Contain("not stored");
 
         // Nothing was discarded to make room: every accepted message is still there.
-        ((long)db.Execute("LLEN", $"hw:q:{q}:q")).Should().Be(accepted,
+        (_server.Inspect.ListLength($"hw:q:{q}:q")).Should().Be(accepted,
             "refusing the producer is honest; dropping the oldest would lose exactly the " +
             "unprocessed work the queue exists to protect");
     }
@@ -184,7 +181,7 @@ public class ByteBudgetTests : IDisposable
 
         // shipping joins afterwards, so its queue starts empty and healthy.
         db.Execute("HW.SUBSCRIBE", channel, "shipping");
-        var shippingBefore = (long)db.Execute("LLEN", $"hw:q:{channel}@shipping:q");
+        var shippingBefore = _server.Inspect.ListLength($"hw:q:{channel}@shipping:q");
         shippingBefore.Should().Be(0, "a group registered after the fact starts empty (C2.4)");
 
         var act = () => db.Execute("HW.PUBLISH", channel, Payload());
@@ -193,7 +190,7 @@ public class ByteBudgetTests : IDisposable
         thrown.WithMessage("*HW_QUEUE_FULL*");
         thrown.WithMessage("*billing*");   // which subscriber to go and fix
 
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@shipping:q")).Should().Be(shippingBefore,
+        (_server.Inspect.ListLength($"hw:q:{channel}@shipping:q")).Should().Be(shippingBefore,
             "a publish reaches every registered group or none - delivering to the groups that " +
             "fit would quietly downgrade C2.1 to 'at least once, unless full'");
     }
@@ -209,9 +206,9 @@ public class ByteBudgetTests : IDisposable
 
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@billing:q")).Should().Be(1);
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@shipping:q")).Should().Be(1);
-        Counter(db, $"{channel}@billing").Should().BeGreaterThan(0,
+        (_server.Inspect.ListLength($"hw:q:{channel}@billing:q")).Should().Be(1);
+        (_server.Inspect.ListLength($"hw:q:{channel}@shipping:q")).Should().Be(1);
+        Counter($"{channel}@billing").Should().BeGreaterThan(0,
             "a group queue is a queue, so it is accounted for like one");
     }
 
@@ -269,7 +266,7 @@ public class ByteBudgetTests : IDisposable
         flat.Any(f => f.Contains("SendRefused")).Should().BeTrue("the refusal is recorded");
 
         var published = flat.Count(f => f == "Published");
-        var queueLen = (long)db.Execute("LLEN", $"hw:q:{channel}@grp:q");
+        var queueLen = _server.Inspect.ListLength($"hw:q:{channel}@grp:q");
         published.Should().Be((int)queueLen,
             "exactly the publishes that were stored may be recorded as Published - a refused " +
             "one wrote nothing");
@@ -284,7 +281,7 @@ public class ByteBudgetTests : IDisposable
         for (var i = 0; i < 40; i++)
             db.Execute("HW.QSEND", "bb.unlimited", $"m-{i}", Payload());
 
-        ((long)db.Execute("LLEN", "hw:q:bb.unlimited:q")).Should().Be(40,
+        (unlimited.Inspect.ListLength("hw:q:bb.unlimited:q")).Should().Be(40,
             "zero is documented as 'no limit', and an operator who sets it means it");
     }
 }

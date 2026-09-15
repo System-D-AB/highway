@@ -30,8 +30,7 @@ public class QueueCommandTests : IDisposable
         return (arr[0].ToString()!, arr[1].ToString()!);
     }
 
-    private static async Task<long> LenAsync(IDatabase db, string key)
-        => (long)(await db.ExecuteAsync("LLEN", key));
+    private long Len(string key) => _server.Inspect.ListLength(key);
 
     [Fact]
     public async Task SendThenClaimThenAck_RoundTrips()
@@ -46,7 +45,7 @@ public class QueueCommandTests : IDisposable
         claimed.Value.Payload.Should().Be("body");
 
         ((long)(await db.ExecuteAsync("HW.QACK", Queue, "worker-a", "m-1"))).Should().Be(1);
-        (await LenAsync(db, $"hw:q:{Queue}:proc:worker-a")).Should().Be(0);
+        (Len($"hw:q:{Queue}:proc:worker-a")).Should().Be(0);
     }
 
     /// <summary>
@@ -59,7 +58,7 @@ public class QueueCommandTests : IDisposable
         var db = await ConnectAsync();
 
         await db.ExecuteAsync("HW.QSEND", Queue, "later-1", "body"u8.ToArray());
-        (await LenAsync(db, $"hw:q:{Queue}:q")).Should().Be(1, "the message waits");
+        (Len($"hw:q:{Queue}:q")).Should().Be(1, "the message waits");
 
         var claimed = await ClaimAsync(db, "worker-arriving-late");
         claimed!.Value.Id.Should().Be("later-1");
@@ -133,8 +132,8 @@ public class QueueCommandTests : IDisposable
         }
         await db.ExecuteAsync("HW.QCLAIM", Queue, "worker-a");
 
-        ((long)(await db.ExecuteAsync("LLEN", $"hw:q:{Queue}:dlq"))).Should().Be(1);
-        ((long)(await db.ExecuteAsync("LLEN", $"hw:q:{Queue}:q"))).Should().Be(0,
+        (strict.Inspect.ListLength($"hw:q:{Queue}:dlq")).Should().Be(1);
+        (strict.Inspect.ListLength($"hw:q:{Queue}:q")).Should().Be(0,
             "a dead-lettered message must not still be queued");
     }
 

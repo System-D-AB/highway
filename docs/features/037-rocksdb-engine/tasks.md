@@ -302,6 +302,10 @@ and C24 (deletion is logical until compaction) need restating against RocksDB.
 - [ ] **Replication and failover.** Stage 2 — research Part VI. The 2-node-versus-3-node fork
       (**O10**) should be settled before it starts: with two nodes and no external arbiter,
       automatic failover is not available at any price.
+      **2026-09-15: specced as feature 042** — O10 is closed by its RD6 (priorities +
+      two-timeout self-fencing, optional witness, no elections); "not available at any
+      price" is amended: not available *without either a fencing rule or a witness*,
+      and 042 ships the fencing rule.
 - [ ] **The epoch and the primary-only mutation gate.** D7. They serve replication only.
 - [ ] **Protocol improvements** — batch claim, multi-queue claim, piggybacked ack, SSE doorbell.
       All evaluated in research Part III.6; all belong to a protocol change this feature is not.

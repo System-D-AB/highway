@@ -131,10 +131,15 @@ public class PubSubUnificationTests : IDisposable
 
     // -------------------------------------------------------------------------
     // T15.5 — PreUnificationChannelData_RefusesStartup (T10)
+    //
+    // RETIRED 2026-09-15 (040 fixture swap): the test planted pre-018 Garnet keys with raw
+    // SET and scanned with KEYS — neither served by the 040 RESP server — and the hazard it
+    // guarded cannot exist on the new engine: pre-018 data is a Garnet AOF artifact, and a
+    // RocksDB store can never contain it. The startup guard itself retires with Garnet in
+    // 041 (T4's dead-code deletion). Preserved below as a record of what it proved.
     // -------------------------------------------------------------------------
 
-    [Fact]
-    public void PreUnificationChannelData_RefusesStartup()
+    private void PreUnificationChannelData_RefusesStartup_RetiredGarnetOnly()
     {
         // Write an old-pattern key to the running test server
         _db.Execute("SET", "hw:ch:legacy.channel:grp:old-group:q", "fake-data");

@@ -90,7 +90,7 @@ public class LongRunningTaskTests : IDisposable
             "renewal keeps the claim alive while the handler runs - without it the sweep would " +
             "requeue the message underneath a handler that was working perfectly well");
 
-        ((long)db.Execute("LLEN", "hw:q:lr.slow:dlq")).Should().Be(0,
+        (_server.Inspect.ListLength("hw:q:lr.slow:dlq")).Should().Be(0,
             "and work that succeeds must never dead-letter");
     }
 
@@ -120,13 +120,13 @@ public class LongRunningTaskTests : IDisposable
             var deadline = DateTime.UtcNow.AddSeconds(20);
             while (DateTime.UtcNow < deadline)
             {
-                if ((long)db.Execute("LLEN", "hw:q:lr.slow:dlq") > 0) break;
+                if (_server.Inspect.ListLength("hw:q:lr.slow:dlq") > 0) break;
                 await Task.Delay(200);
                 db.Execute("HW.QCLAIM", "lr.slow", "sweeper");
             }
         }
 
-        ((long)db.Execute("LLEN", "hw:q:lr.slow:dlq")).Should().BeGreaterThan(0,
+        (_server.Inspect.ListLength("hw:q:lr.slow:dlq")).Should().BeGreaterThan(0,
             "past MaxProcessingTime the message returns to exactly the behaviour it had before " +
             "this feature - the cap does not invent a new outcome, it restores the old one");
     }
@@ -161,7 +161,7 @@ public class LongRunningTaskTests : IDisposable
         var renewed = (long)db.Execute("HW.TOUCH", "Q", "lr.cmd", "node-a", "msg-1");
 
         renewed.Should().Be(1);
-        ((long)db.Execute("LLEN", "hw:q:lr.cmd:proc:node-a")).Should().Be(1,
+        (_server.Inspect.ListLength("hw:q:lr.cmd:proc:node-a")).Should().Be(1,
             "renewal moves a deadline, it does not finish a message");
     }
 
@@ -185,7 +185,7 @@ public class LongRunningTaskTests : IDisposable
         // A claim runs the sweep; the renewed entry must not have been requeued by it.
         db.Execute("HW.QCLAIM", "lr.clock", "other-node");
 
-        ((long)db.Execute("LLEN", "hw:q:lr.clock:proc:node-a")).Should().Be(1,
+        (slow.Inspect.ListLength("hw:q:lr.clock:proc:node-a")).Should().Be(1,
             "the sweep decides expiry from the claim timestamp, so moving it forward IS " +
             "restarting the lease");
     }

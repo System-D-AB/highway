@@ -105,7 +105,9 @@ public sealed class ProcessManager : IAsyncDisposable, IDisposable
         if (!Directory.Exists(procDir)) Directory.CreateDirectory(procDir);
     }
 
-    public ManagedProcess StartDotnetAssembly(string name, string dllOrExePath, string arguments)
+    public ManagedProcess StartDotnetAssembly(
+        string name, string dllOrExePath, string arguments,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var logFile = Path.Combine(_runDir, "processes", $"{name}.stdout.log");
         var logStream = new FileStream(logFile, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
@@ -124,6 +126,12 @@ public sealed class ProcessManager : IAsyncDisposable, IDisposable
             CreateNoWindow = true,
             WorkingDirectory = targetDir
         };
+
+        // Out-of-band harness configuration (the doorbells-off run, 041 R3.2). Passed through the
+        // environment so the applications' argument contract and business logic stay untouched.
+        if (environment is not null)
+            foreach (var (key, value) in environment)
+                psi.Environment[key] = value;
 
         var process = new Process { StartInfo = psi };
         process.OutputDataReceived += (_, e) => { if (e.Data != null) logWriter.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] {e.Data}"); };

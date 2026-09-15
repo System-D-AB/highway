@@ -23,8 +23,13 @@ public static class Program
         var defaultRunDir = Path.Combine(Directory.GetCurrentDirectory(), "assurance", "runs", timestamp);
         var runDir = Path.GetFullPath(GetArg(args, "--run-dir", defaultRunDir));
 
+        // --doorbells off runs the second gate-G3 pass: DoorbellsEnabled == false on every
+        // workload, leaving only the backstop sweep to drive correctness (041 R3.2). Default on.
+        var doorbells = GetArg(args, "--doorbells", "on").ToLowerInvariant();
+        var doorbellsEnabled = doorbells is not ("off" or "false" or "0" or "no");
+
         var orchestrator = new Orchestrator();
-        var result = await orchestrator.ExecuteRunAsync(runDir, profile);
+        var result = await orchestrator.ExecuteRunAsync(runDir, profile, doorbellsEnabled);
 
         return result.ExitCode;
     }

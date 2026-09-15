@@ -1,11 +1,9 @@
 using System.Reflection;
 using Highway.Abstractions;
-using Highway.Client.Caching;
 using Highway.Client.Engine;
 using Highway.Client.Execution;
 using Highway.Client.Hosting;
 using Highway.Client.Scanning;
-using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -120,23 +118,14 @@ public static class ServiceCollectionExtensions
 
         services.TryAddSingleton<IHighwayClient, HighwayClient>();
 
-        // 8. Register connection source and distributed cache (feature 026, 034).
-        // TryAdd semantics — defers to existing registrations. Exactly 1 multiplexer per process,
-        // connected lazily on first use with zero eager I/O during AddHighway.
+        // 8. Register the connection source — exactly one multiplexer per process, connected
+        // lazily on first use with zero eager I/O during AddHighway. TryAdd defers to an
+        // existing registration.
+        //
+        // The distributed-cache add-on (feature 026) was removed in feature 041 with the Garnet
+        // engine that made it free — see the release notes. The connection source stays: the
+        // engine depends on it.
         services.TryAddSingleton<HighwayConnectionSource>(sp => new HighwayConnectionSource(options));
-        var cacheOptions = new HighwayCacheOptions
-        {
-            Server = options.Server,
-            Username = options.Username,
-            Password = options.Password,
-            Tls = options.Tls,
-            ConfigureConnection = options.ConfigureConnection
-        };
-        services.TryAddSingleton<HighwayCacheOptions>(cacheOptions);
-        services.TryAddSingleton<HighwayCache>(sp =>
-            new HighwayCache(sp.GetRequiredService<HighwayConnectionSource>(), sp.GetRequiredService<HighwayCacheOptions>()));
-        services.TryAddSingleton<IDistributedCache>(sp => sp.GetRequiredService<HighwayCache>());
-        services.TryAddSingleton<IBufferDistributedCache>(sp => sp.GetRequiredService<HighwayCache>());
 
         return services;
     }

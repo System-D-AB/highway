@@ -96,7 +96,7 @@ public class NodeDecommissioningTests : IDisposable
         var act = () => db.Execute("HW.PUBLISH", channel, Payload());
         act.Should().NotThrow("retiring the dead group releases its byte budget");
 
-        ((long)db.Execute("EXISTS", $"hw:q:{channel}@dead-node:q")).Should().Be(0,
+        (_server.Inspect.ListLength($"hw:q:{channel}@dead-node:q")).Should().Be(0,
             "the retired group's queue is deleted, not merely unregistered");
     }
 
@@ -117,9 +117,9 @@ public class NodeDecommissioningTests : IDisposable
         db.Execute("HW.SUBSCRIBE", channel, "live-one");
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
-        ((long)db.Execute("EXISTS", $"hw:q:{channel}@dead-one:q")).Should().Be(0,
+        (_server.Inspect.ListLength($"hw:q:{channel}@dead-one:q")).Should().Be(0,
             "the stale group is retired");
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@live-one:q")).Should().Be(1,
+        (_server.Inspect.ListLength($"hw:q:{channel}@live-one:q")).Should().Be(1,
             "a live subscriber must be unaffected by its neighbour's retirement");
     }
 
@@ -147,7 +147,7 @@ public class NodeDecommissioningTests : IDisposable
 
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@batch-node:q")).Should().Be(2,
+        (_server.Inspect.ListLength($"hw:q:{channel}@batch-node:q")).Should().Be(2,
             "retirement is driven by LIVENESS EVIDENCE, not a consumption gap - a group nobody " +
             "has consumed from is not dead, but a group whose node stopped heartbeating is");
     }
@@ -163,7 +163,7 @@ public class NodeDecommissioningTests : IDisposable
         db.Execute("HW.PUBLISH", channel, Payload(64));
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@anon-node:q")).Should().Be(2,
+        (_server.Inspect.ListLength($"hw:q:{channel}@anon-node:q")).Should().Be(2,
             "absence of a registration is not evidence of death - only a record that EXISTS " +
             "and has gone stale proves the node was here and stopped");
     }
@@ -187,7 +187,7 @@ public class NodeDecommissioningTests : IDisposable
         ((long)result[1]).Should().Be(2, "two messages discarded");
         ((long)result[2]).Should().BeGreaterThan(0, "and the bytes they occupied");
 
-        ((long)db.Execute("EXISTS", $"hw:q:{channel}@going-node:q")).Should().Be(0);
+        (_server.Inspect.ListLength($"hw:q:{channel}@going-node:q")).Should().Be(0);
     }
 
     /// <summary>
@@ -206,7 +206,7 @@ public class NodeDecommissioningTests : IDisposable
 
         db.Execute("HW.HEARTBEAT", "restarting-node", "BYE");
 
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@restarting-node:q")).Should().Be(1,
+        (_server.Inspect.ListLength($"hw:q:{channel}@restarting-node:q")).Should().Be(1,
             "a node that shuts down cleanly still expects its pending messages when it returns");
     }
 
@@ -248,7 +248,7 @@ public class NodeDecommissioningTests : IDisposable
         Register(db, "back-node");
         db.Execute("HW.SUBSCRIBE", channel, "back-node");
 
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@back-node:q")).Should().Be(0,
+        (_server.Inspect.ListLength($"hw:q:{channel}@back-node:q")).Should().Be(0,
             "retirement is irreversible by design - this is C2.4 working as intended, not a bug");
     }
 
@@ -269,7 +269,7 @@ public class NodeDecommissioningTests : IDisposable
         Thread.Sleep(400);
         db.Execute("HW.PUBLISH", "dc.off", Payload(64));
 
-        ((long)db.Execute("LLEN", "hw:q:dc.off@kept-node:q")).Should().Be(2,
+        (never.Inspect.ListLength("hw:q:dc.off@kept-node:q")).Should().Be(2,
             "a deployment may prefer the outage to the deletion, and zero means it");
     }
 
@@ -300,7 +300,7 @@ public class NodeDecommissioningTests : IDisposable
         // Long enough for a heartbeat to have resurrected it, had the loops still been running.
         await Task.Delay(1_500);
 
-        ((long)db.Execute("EXISTS", $"hw:reg:node:forever-node")).Should().Be(0,
+        (_server.Inspect.KvGet("hw:reg:node:forever-node")).Should().BeNull(
             "the node must still be gone after a full heartbeat interval - stopping the loops " +
             "AFTER the purge would let the next beat re-register it");
         _ = channel;
@@ -360,7 +360,7 @@ public class NodeDecommissioningTests : IDisposable
         await Task.Delay(2_500);
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
-        ((long)db.Execute("LLEN", $"hw:q:{channel}@fading-node:q")).Should().Be(1,
+        (slow.Inspect.ListLength($"hw:q:{channel}@fading-node:q")).Should().Be(1,
             "suspect is a warning, not a retirement - nothing is destroyed yet");
 
         // HW.REPLAY returns an array of field/value arrays; ToString() on the outer entries
@@ -399,10 +399,10 @@ public class NodeDecommissioningTests : IDisposable
 
         db.Execute("HW.HEARTBEAT", "both-node", "BYE", "PURGE");
 
-        ((long)db.Execute("EXISTS", $"hw:q:{channel}@both-node:q")).Should().Be(0,
+        (_server.Inspect.ListLength($"hw:q:{channel}@both-node:q")).Should().Be(0,
             "the subscriber's messages were addressed to it alone - nobody else can process them");
 
-        ((long)db.Execute("LLEN", $"hw:svc:{service}:q")).Should().Be(1,
+        (_server.Inspect.ListLength($"hw:svc:{service}:q")).Should().Be(1,
             "the RPC request goes back on the queue - a caller may still be waiting for it");
     }
 }

@@ -55,7 +55,7 @@ public class FailureEndToEndTests : IDisposable
             var deadline = DateTime.UtcNow.AddSeconds(20);
             while (DateTime.UtcNow < deadline)
             {
-                if ((long)await db.ExecuteAsync("LLEN", "hw:q:e2e.poison:dlq") > 0) break;
+                if (_server.Inspect.ListLength("hw:q:e2e.poison:dlq") > 0) break;
                 await Task.Delay(150);
                 await db.ExecuteAsync("HW.QCLAIM", "e2e.poison", "sweeper");
             }

@@ -33,6 +33,11 @@ public static class Program
             o.NodeName = node;
             o.Server = server;
             o.SubscriptionGroup = "edge";
+
+            // Harness toggle for the doorbells-off assurance run (041 R3.2). Set by the rig via
+            // the environment, out of band from the workload's own argument contract and logic.
+            if (string.Equals(Environment.GetEnvironmentVariable("HIGHWAY_ASSURANCE_DOORBELLS"), "off", StringComparison.OrdinalIgnoreCase))
+                o.DoorbellsEnabled = false;
         });
 
         builder.Services.AddHostedService(sp => new EdgeLoadGeneratorService(

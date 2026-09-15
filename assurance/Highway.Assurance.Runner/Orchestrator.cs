@@ -14,11 +14,19 @@ public sealed class Orchestrator
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public async Task<ReconciliationResult> ExecuteRunAsync(string runDir, RunProfile profile, CancellationToken ct = default)
+    public async Task<ReconciliationResult> ExecuteRunAsync(
+        string runDir, RunProfile profile, bool doorbellsEnabled = true, CancellationToken ct = default)
     {
+        // The doorbells-off run (041 R3.2) is the port's sharpest test: it removes the pub/sub
+        // latency mask and leaves only BackstopSweeper correctness. DoorbellsEnabled is a client
+        // (HighwayOptions) setting, so this env var is set on the WORKLOAD processes only — never
+        // the broker — and applied without touching any application's argument contract or logic.
+        var workloadEnv = doorbellsEnabled
+            ? null
+            : new Dictionary<string, string> { ["HIGHWAY_ASSURANCE_DOORBELLS"] = "off" };
         Console.WriteLine($"===============================================================================");
         Console.WriteLine($"[Runner] Starting Assurance Rig Run: {profile.Name} at {DateTime.UtcNow:u}");
-        Console.WriteLine($"[Runner] Target Rate: {profile.TargetRatePerSec} msg/s | Lease: {profile.LeaseSeconds}s");
+        Console.WriteLine($"[Runner] Target Rate: {profile.TargetRatePerSec} msg/s | Lease: {profile.LeaseSeconds}s | Doorbells: {(doorbellsEnabled ? "on" : "OFF")}");
         Console.WriteLine($"[Runner] Run Directory: {runDir}");
         Console.WriteLine($"===============================================================================");
 
@@ -104,9 +112,9 @@ public sealed class Orchestrator
         {
             // 6. Settle Phase (0..settleSeconds)
             Console.WriteLine($"[Runner] Phase: SETTLE (starting edge-1, accounts-1, notifications-subs-1)");
-            procManager.StartDotnetAssembly("edge-1", edgeAssembly, $"--node edge-1 --server {serverEndpoint} --run-dir \"{runDir}\" --rate {profile.TargetRatePerSec}");
-            procManager.StartDotnetAssembly("accounts-1", accountsAssembly, $"--node accounts-1 --server {serverEndpoint} --run-dir \"{runDir}\"");
-            procManager.StartDotnetAssembly("notifications-subs-1", notifsAssembly, $"--node notifications-subs-1 --server {serverEndpoint} --run-dir \"{runDir}\" --role subs");
+            procManager.StartDotnetAssembly("edge-1", edgeAssembly, $"--node edge-1 --server {serverEndpoint} --run-dir \"{runDir}\" --rate {profile.TargetRatePerSec}", workloadEnv);
+            procManager.StartDotnetAssembly("accounts-1", accountsAssembly, $"--node accounts-1 --server {serverEndpoint} --run-dir \"{runDir}\"", workloadEnv);
+            procManager.StartDotnetAssembly("notifications-subs-1", notifsAssembly, $"--node notifications-subs-1 --server {serverEndpoint} --run-dir \"{runDir}\" --role subs", workloadEnv);
 
             await WaitForSettleConditionAsync(sampler, TimeSpan.FromSeconds(profile.SettleSeconds), ct).ConfigureAwait(false);
             Console.WriteLine($"[Runner] Settle complete — all nodes visible and groups registered.");
@@ -119,8 +127,8 @@ public sealed class Orchestrator
             // 8. Arrival Phase
             Console.WriteLine($"[Runner] Phase: ARRIVAL ({profile.ArrivalSeconds}s) — Starting mailer-1 and mailer-2");
             await SetPhaseAsync(currentPhaseFile, "arrival", ct).ConfigureAwait(false);
-            procManager.StartDotnetAssembly("mailer-1", notifsAssembly, $"--node mailer-1 --server {serverEndpoint} --run-dir \"{runDir}\" --role mailer");
-            procManager.StartDotnetAssembly("mailer-2", notifsAssembly, $"--node mailer-2 --server {serverEndpoint} --run-dir \"{runDir}\" --role mailer");
+            procManager.StartDotnetAssembly("mailer-1", notifsAssembly, $"--node mailer-1 --server {serverEndpoint} --run-dir \"{runDir}\" --role mailer", workloadEnv);
+            procManager.StartDotnetAssembly("mailer-2", notifsAssembly, $"--node mailer-2 --server {serverEndpoint} --run-dir \"{runDir}\" --role mailer", workloadEnv);
             await Task.Delay(TimeSpan.FromSeconds(profile.ArrivalSeconds), ct).ConfigureAwait(false);
 
             // 9. Steady Phase
@@ -141,7 +149,7 @@ public sealed class Orchestrator
             Console.WriteLine($"[Runner] t+{profile.SubscriberGracefulRestartOffsetSeconds}s: Restarting notifications-subs-1 gracefully...");
             var subProc = procManager.GetProcess("notifications-subs-1");
             if (subProc != null) await subProc.StopGracefullyAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
-            procManager.StartDotnetAssembly("notifications-subs-1", notifsAssembly, $"--node notifications-subs-1 --server {serverEndpoint} --run-dir \"{runDir}\" --role subs");
+            procManager.StartDotnetAssembly("notifications-subs-1", notifsAssembly, $"--node notifications-subs-1 --server {serverEndpoint} --run-dir \"{runDir}\" --role subs", workloadEnv);
             Console.WriteLine($"[Runner] notifications-subs-1 restarted with same node and group identity.");
 
             // Wait until kill offset
@@ -224,7 +232,7 @@ public sealed class Orchestrator
             }
 
             // Append to assurance/RUNLOG.md
-            await AppendToRunLogAsync(runDir, result, profile, ct).ConfigureAwait(false);
+            await AppendToRunLogAsync(runDir, result, profile, doorbellsEnabled, ct).ConfigureAwait(false);
 
             // Cleanup or preserve (D10)
             if (result.Verdict == "PASSED")
@@ -363,10 +371,14 @@ public sealed class Orchestrator
         }
     }
 
-    private static async Task AppendToRunLogAsync(string runDir, ReconciliationResult result, RunProfile profile, CancellationToken ct)
+    private static async Task AppendToRunLogAsync(string runDir, ReconciliationResult result, RunProfile profile, bool doorbellsEnabled, CancellationToken ct)
     {
-        var runLogPath = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "assurance", "RUNLOG.md");
-        var fullRunLogPath = Path.GetFullPath(runLogPath);
+        // Locate assurance/RUNLOG.md by climbing to the repo root (the fixed relative climb from
+        // the build output was fragile and wrote assurance/assurance/RUNLOG.md — 041 T3 fix).
+        var repoRoot = FindRepoRoot();
+        var fullRunLogPath = repoRoot is not null
+            ? Path.Combine(repoRoot, "assurance", "RUNLOG.md")
+            : Path.GetFullPath(Path.Combine(runDir, "..", "..", "RUNLOG.md"));
         var dir = Path.GetDirectoryName(fullRunLogPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
@@ -380,10 +392,10 @@ public sealed class Orchestrator
         }
 
         var entryText = $"""
-        ## {DateTime.UtcNow:yyyy-MM-dd} — {profile.Name} ({result.Verdict})
+        ## {DateTime.UtcNow:yyyy-MM-dd} — {profile.Name} — doorbells {(doorbellsEnabled ? "on" : "OFF")} ({result.Verdict})
 
         - **Run ID:** `{result.RunId}`
-        - **Target Rate:** {profile.TargetRatePerSec} msg/s | **Lease:** {profile.LeaseSeconds}s
+        - **Target Rate:** {profile.TargetRatePerSec} msg/s | **Lease:** {profile.LeaseSeconds}s | **Doorbells:** {(doorbellsEnabled ? "on" : "off")}
         - **Verdict:** `{result.Verdict}` (Exit Code: {result.ExitCode})
         - **Total Events Processed:** {result.TotalEventsByKind.GetValueOrDefault("processed")}
         - **Duplicates Observed:** {result.Invariants.GetValueOrDefault("I5_Duplicates")?.DuplicateCount ?? 0}
@@ -416,6 +428,21 @@ public sealed class Orchestrator
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private static string? FindRepoRoot()
+    {
+        foreach (var start in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
+        {
+            var current = new DirectoryInfo(start);
+            while (current != null)
+            {
+                if (File.Exists(Path.Combine(current.FullName, "Highway.slnx")))
+                    return current.FullName;
+                current = current.Parent;
+            }
+        }
+        return null;
     }
 
     private static string? FindAssemblyPath(string assemblyName)

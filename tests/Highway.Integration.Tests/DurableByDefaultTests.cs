@@ -24,29 +24,32 @@ public class DurableByDefaultTests : IDisposable
     private readonly string _dataDir = Path.Combine(
         Path.GetTempPath(), "highway-durability-" + Guid.NewGuid().ToString("N")[..8]);
 
-    private readonly int _port = Highway.Server.Internal.EphemeralPort.Probe();
+    // A durable test server (RocksDB): Restart() reopens the same on-disk directory, exercising
+    // recovery. Feature 041 re-pointed this class off the Garnet-hosted HighwayServerBuilder +
+    // raw LLEN reads onto the shipped RESP + RocksDB stack. The post-restart assertions read the
+    // store directly through Inspect (the store keeps the hw:q:X:q logical key spellings), because
+    // the RESP server serves no raw LLEN.
+    private readonly HighwayTestServer _server;
+
+    public DurableByDefaultTests()
+        => _server = new HighwayTestServer(o =>
+        {
+            o.DataDir = _dataDir;
+            o.Ephemeral = false;
+        });
 
     public void Dispose()
     {
+        try { _server.Dispose(); } catch { /* teardown must not fail a passing test */ }
         try { if (Directory.Exists(_dataDir)) Directory.Delete(_dataDir, recursive: true); }
         catch { /* a locked file on Windows must not fail the test that already passed */ }
-    }
-
-    private IHighwayServer StartServer()
-    {
-        var server = new HighwayServerBuilder()
-            .WithPort(_port)
-            .WithDataDir(_dataDir)
-            .Build();
-        server.Start();
-        return server;
     }
 
     private static byte[] Envelope(string body = "{}")
         => Encoding.UTF8.GetBytes($$"""{"v":1,"src":"t","ts":"2026-08-09T00:00:00Z","body":{{body}}}""");
 
     private IDatabase Connect() =>
-        ConnectionMultiplexer.Connect($"localhost:{_port}").GetDatabase();
+        ConnectionMultiplexer.Connect(_server.ConnectionString).GetDatabase();
 
     /// <summary>
     /// The headline, across all three verbs at once. Each is stored differently enough that a
@@ -55,44 +58,29 @@ public class DurableByDefaultTests : IDisposable
     [Fact]
     public void AllThreeVerbs_SurviveARestart()
     {
-        var server = StartServer();
-        try
-        {
-            var db = Connect();
+        var db = Connect();
 
-            // Queue: work nobody has claimed.
-            db.Execute("HW.QSEND", "dur.queue", "msg-1", Envelope("""{"Amount":42}"""));
+        // Queue: work nobody has claimed.
+        db.Execute("HW.QSEND", "dur.queue", "msg-1", Envelope("""{"Amount":42}"""));
 
-            // Pub/Sub: a group registered but offline, so the message is sitting in its queue.
-            db.Execute("HW.SUBSCRIBE", "dur.channel", "billing");
-            db.Execute("HW.PUBLISH", "dur.channel", Envelope("""{"Order":"ORD-1"}"""));
+        // Pub/Sub: a group registered but offline, so the message is sitting in its queue.
+        db.Execute("HW.SUBSCRIBE", "dur.channel", "billing");
+        db.Execute("HW.PUBLISH", "dur.channel", Envelope("""{"Order":"ORD-1"}"""));
 
-            // RPC: a request nobody has dequeued.
-            db.Execute("HW.CALL", "dur.svc", "req-1", Envelope());
-        }
-        finally
-        {
-            server.Dispose();   // the process goes away; only the data directory remains
-        }
+        // RPC: a request nobody has dequeued.
+        db.Execute("HW.CALL", "dur.svc", "req-1", Envelope());
 
-        var restarted = StartServer();
-        try
-        {
-            var db = Connect();
+        // The process goes away; only the RocksDB directory remains, and Restart() recovers it.
+        _server.Restart();
 
-            ((long)db.Execute("LLEN", "hw:q:dur.queue:q")).Should().Be(1,
-                "a sent message survives until it is processed - including across a restart");
+        _server.Inspect.ListLength("hw:q:dur.queue:q").Should().Be(1,
+            "a sent message survives until it is processed - including across a restart");
 
-            ((long)db.Execute("LLEN", "hw:q:dur.channel@billing:q")).Should().Be(1,
-                "a subscriber that was down must still receive what it missed after a restart");
+        _server.Inspect.ListLength("hw:q:dur.channel@billing:q").Should().Be(1,
+            "a subscriber that was down must still receive what it missed after a restart");
 
-            ((long)db.Execute("LLEN", "hw:svc:dur.svc:q")).Should().Be(1,
-                "an unclaimed RPC request is queued work like any other");
-        }
-        finally
-        {
-            restarted.Dispose();
-        }
+        _server.Inspect.ListLength("hw:svc:dur.svc:q").Should().Be(1,
+            "an unclaimed RPC request is queued work like any other");
     }
 
     /// <summary>
@@ -104,24 +92,16 @@ public class DurableByDefaultTests : IDisposable
     {
         const string body = """{"Amount":42,"Currency":"SEK"}""";
 
-        var server = StartServer();
-        try
-        {
-            Connect().Execute("HW.QSEND", "dur.payload", "msg-1", Envelope(body));
-        }
-        finally { server.Dispose(); }
+        Connect().Execute("HW.QSEND", "dur.payload", "msg-1", Envelope(body));
 
-        var restarted = StartServer();
-        try
-        {
-            var claimed = (RedisResult[])Connect().Execute("HW.QCLAIM", "dur.payload", "node-a")!;
+        _server.Restart();
 
-            claimed.Should().NotBeNull();
-            ((string)claimed[0]!).Should().Be("msg-1");
-            Encoding.UTF8.GetString((byte[])claimed[1]!).Should().Contain(body,
-                "the recovered entry must decode to the bytes that were stored");
-        }
-        finally { restarted.Dispose(); }
+        var claimed = (RedisResult[])Connect().Execute("HW.QCLAIM", "dur.payload", "node-a")!;
+
+        claimed.Should().NotBeNull();
+        ((string)claimed[0]!).Should().Be("msg-1");
+        Encoding.UTF8.GetString((byte[])claimed[1]!).Should().Contain(body,
+            "the recovered entry must decode to the bytes that were stored");
     }
 }
 

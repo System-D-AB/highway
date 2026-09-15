@@ -4,7 +4,7 @@
 T0 (cache out) ──► T1 (flip) ──► T2 (suite, G2) ──► T3 (rig ×2, G3) ──► T4 (delete) ──► T5 (C4.6, G4) ──► T6 (register + docs)
 ```
 
-### - [ ] T0 — Remove the cache add-on (feature 026)
+### - [x] T0 — Remove the cache add-on (feature 026)
 
 **Fulfills:** R1.5
 Delete `src/Highway.Client/Caching/` + tests + now-unused caching package refs; sweep
@@ -14,7 +14,7 @@ constraints with dated amendments; attach the client diff to this spec as the so
 **Done when:** solution + samples green with no cache reference anywhere; every
 announcement and amendment in place.
 
-### - [ ] T1 — Flip the default to the new stack
+### - [x] T1 — Flip the default to the new stack
 
 **Fulfills:** R1.4 (prep)
 Server host boots 040's server + 038's store; dashboard, samples, distribution
@@ -22,7 +22,7 @@ scripts pointed over. Garnet still present, unreferenced by the running paths.
 **Done when:** host starts, dashboard renders, a sample round-trips, distribution
 verify script passes on a fresh zip.
 
-### - [ ] T2 — Everything green before deletion *(gate G2)*
+### - [x] T2 — Everything green before deletion *(gate G2)*
 
 **Fulfills:** R2
 Full suite: unit, contract, command, server, protocol conformance, samples.
@@ -30,7 +30,7 @@ Full suite: unit, contract, command, server, protocol conformance, samples.
 T0's recorded cache removal; conformance passes with only 040's subset section changed
 in the protocol doc.
 
-### - [ ] T3 — The assurance rig, twice *(gate G3)*
+### - [x] T3 — The assurance rig, twice *(gate G3)*
 
 **Fulfills:** R3
 Run 1 normal; run 2 `DoorbellsEnabled == false`. Turbulence (ungraceful kills) in

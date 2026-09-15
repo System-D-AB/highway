@@ -18,7 +18,7 @@ Kestrel endpoint (TLS, non-HTTP ALPN) ─► RespConnectionHandler
 
 | State | Accepts | Everything else |
 |---|---|---|
-| Unauthenticated | `AUTH`, `PING` | `-NOAUTH …` naming the fix (037 R11.3) |
+| Unauthenticated | `AUTH`, `QUIT` (R11.3 as amended 2026-09-15 — pre-auth `PING` refused: it is SE.Redis's handshake, and answering it lets a credential-less connect succeed) | `-NOAUTH Authentication required.` |
 | Authenticated | handshake subset + `HW.*` + `SUBSCRIBE` | error naming the subset (037 R6.3) |
 | Subscribed | `SUBSCRIBE`/`UNSUBSCRIBE`/`PING` (RESP2 restricted mode) | error per RESP2 |
 
@@ -60,3 +60,28 @@ integration test a handshake conformance test for free.
 | Doorbells | end-to-end `DoorbellWatcher` receipt; disconnect-mid-publish loses only that delivery |
 | Shutdown | in-flight command completes or cancels within timeout; connections closed cleanly |
 | Test server | existing fixture-based integration tests compile-and-pass with internals swapped |
+
+## As built (recorded 2026-09-15, closing T4/T8's "done when" clauses)
+
+**OD3 — the exact `CommandMap`/`ConfigurationOptions` (gate G0).** Answer: **none
+needed.** The pinned SE.Redis connects with a plain connection string — no `CommandMap`
+tailoring, no option overrides — because the server answers every connect-time probe it
+sends: `AUTH` (pre-auth gate admits it), `PING` (post-auth), `ECHO`, `SELECT`,
+`CLIENT SETNAME`/`SETINFO`, `CONFIG GET` (empty array, never an error — an error here
+aborts the connect), `COMMAND` (empty array), `INFO` (minimal standalone-master), the
+tiebreaker `GET` (null bulk), and `HELLO 3` refused with `NOPROTO` so the client stays
+on RESP2. Verified continuously: every integration test connects this way, so the whole
+suite is the handshake conformance test. The full served surface is recorded in
+`HIGHWAY-PROTOCOL.md` § "The served RESP subset (040, as built)" (T9).
+
+**Startup cost (R6.2 "measured, recorded").** Five timed cycles each of
+fixture-construct → SE.Redis connect → `PING`, after one warm-up of each kind, on the
+development machine (Windows 11, Debug build): this feature's `HighwayTestServer`
+(Kestrel + temp-dir RocksDB) **median 2038 ms** [2023–2048]; the Garnet fixture
+(`HighwayServerBuilder` + AOF data dir) **median 4123 ms** [4079–4155]. The budget was
+≤2× the Garnet fixture; the new fixture is **~0.5×** — half the startup cost.
+
+**One deviation found and fixed during the fixture swap.** The port of `HW.QCLAIM` had
+dropped the `QueueClaimed` recorder event (and `HW.DEQUEUE` its `RpcClaimed`; the base
+class skipped `AfterCommit` on validation failure, losing rejected commands from the
+recorder). All three restored to the Garnet Finalize contract — see 039's tasks note.

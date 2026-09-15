@@ -20,7 +20,7 @@ public class AssuranceRigShortenedTests
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
-            var result = await orchestrator.ExecuteRunAsync(tempRunDir, profile, cts.Token);
+            var result = await orchestrator.ExecuteRunAsync(tempRunDir, profile, ct: cts.Token);
             sw.Stop();
 
             sw.Elapsed.TotalSeconds.Should().BeLessThan(60, "The shortened assurance run must execute in under 60 seconds (R8.1)");

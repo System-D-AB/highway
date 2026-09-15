@@ -20,7 +20,7 @@ namespace Highway.Server.Internal;
 /// <c>PublishNow</c> safely returns 0 — doorbells are best-effort by contract.
 /// </para>
 /// </summary>
-internal sealed class DoorbellBridge(HighwayGarnetServer server)
+internal sealed class DoorbellBridge(HighwayGarnetServer server) : Highway.Server.Commands.Runtime.IDoorbell
 {
     /// <summary>
     /// Publishes <paramref name="payload"/> to the Garnet pub/sub channel

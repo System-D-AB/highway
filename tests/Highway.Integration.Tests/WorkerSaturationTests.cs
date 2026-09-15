@@ -135,7 +135,7 @@ public class WorkerSaturationTests : IDisposable
         await WaitForAsync(() => Volatile.Read(ref SlowService.Entered) >= 1);
         await Task.Delay(400);   // give a mis-ordered loop time to over-claim
 
-        var claimed = (long)(await db.ExecuteAsync("LLEN", "hw:svc:sat.slow:proc:sat-rpc-host"));
+        var claimed = _server.Inspect.ListLength("hw:svc:sat.slow:proc:sat-rpc-host");
 
         // The handler is known to have entered (asserted by the wait above), so this is not
         // vacuous: something was claimed and processed. The property under test is the upper
@@ -164,7 +164,7 @@ public class WorkerSaturationTests : IDisposable
         await WaitForAsync(() => Volatile.Read(ref SlowQueueProcessor.Entered) >= 1);
         await Task.Delay(400);
 
-        var claimed = (long)(await db.ExecuteAsync("LLEN", "hw:q:sat.queue:proc:sat-q-host"));
+        var claimed = _server.Inspect.ListLength("hw:q:sat.queue:proc:sat-q-host");
 
         Volatile.Read(ref SlowQueueProcessor.Entered).Should().BeGreaterThan(0);
         claimed.Should().Be(1,

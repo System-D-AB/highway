@@ -14,6 +14,7 @@
     <InternalsVisibleTo Include="Highway.Server.Tests" />
     <InternalsVisibleTo Include="Highway.Integration.Tests" />
     <InternalsVisibleTo Include="Highway.Server.Dashboard" />
+    <InternalsVisibleTo Include="Highway.Storage.CrashHarness" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -22,6 +23,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Highway.Abstractions\Highway.Abstractions.csproj" />
+  </ItemGroup>
+
+  <!-- Feature 040: Kestrel is the socket (037 D3). The ASP.NET Core shared framework carries
+       Kestrel + the connection abstractions; referenced as a framework, not a pinned package. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseGarnetSource)' == 'true'">
@@ -38,6 +45,8 @@
     <!-- Used at startup only: the pre-018 data check scans for old channel keys
          by connecting to ourselves via SE.Redis. One SCAN that matches nothing on a clean broker. -->
     <PackageReference Include="StackExchange.Redis" />
+    <!-- Feature 037/038: the RocksDB storage engine behind IHighwayStore. -->
+    <PackageReference Include="RocksDB" />
   </ItemGroup>
 
   <ItemGroup>

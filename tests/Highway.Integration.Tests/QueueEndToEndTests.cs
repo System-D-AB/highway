@@ -90,7 +90,7 @@ public class QueueEndToEndTests : IDisposable
             """{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{"Tag":"waited"}}""");
         await db.ExecuteAsync("HW.QSEND", "it.invoices", Guid.NewGuid().ToString("N"), envelope);
 
-        ((long)(await db.ExecuteAsync("LLEN", "hw:q:it.invoices:q")))
+        (_server.Inspect.ListLength("hw:q:it.invoices:q"))
             .Should().Be(1, "the message waits with nothing running");
         ProcessedCount().Should().Be(0);
 

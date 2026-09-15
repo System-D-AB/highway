@@ -4,6 +4,79 @@ This log records every standard soak and integration run executed against Highwa
 
 ---
 
+## Run `2026-09-15T13-28-31` — doorbells OFF
+
+- **Timestamp:** 2026-09-15 13:28:31 UTC
+- **Profile:** `shortened-ci` (Settle 2s, Gap 4s, Arrival 4s, Steady 4s, Turbulence 8s, Drain 8s, Shutdown 2s)
+- **Target Load Rate:** 25 msg/s aggregate
+- **Lease Duration:** 3s
+- **Broker Version:** highways (**RocksDB + RESP** — the post-Garnet stack, feature 041)
+- **Doorbells:** **OFF** — every workload ran `DoorbellsEnabled == false`; only the `BackstopSweeper` drove progress (037 R7.1 / 041 R3.2)
+- **Overall Verdict:** `PASSED` (Exit Code: 0)
+- **Artifacts Path:** `assurance/runs/2026-09-15T13-28-31/`
+
+### Invariants Verification
+
+| Invariant | Verdict | Sent / Total | Processed | Notes |
+|---|---|---|---|---|
+| **I1_QueueCompleteness** | 🟢 PASS | 20 | 20 | All 20 sent messages were successfully processed. |
+| **I2_NoPhantoms** | 🟢 PASS | 20 | 20 | Zero phantom messages found. |
+| **I3_RpcNeverSilent** | 🟢 PASS | 20 | 20 | All 20 executed RPC calls received replies or timeouts. |
+| **I4_PubSubPerLiveGroup** | 🟢 PASS | 40 | 40 | All 40 published events reached expected subscription groups. |
+| **I5_Duplicates** | 🟢 PASS | 0 | 20 | Observed 0 duplicate delivery(s) out of 20 processed events (0.00%). |
+| **I6_DeadLetters** | 🟢 PASS | 0 | 0 | Zero dead letters in broker DLQ. |
+| **I7_NothingLeftBehind** | 🟢 PASS | 0 | 0 | Final queue depths reached 0 on drain. |
+
+### Observations & Empirical Evidence
+
+1. **The sharpest port test.** With doorbells removed the pub/sub latency mask is gone, so
+   correctness rides entirely on the backstop sweep. Every workload logged *"Doorbells
+   disabled — engine runs on the backstop sweep only"* and every invariant still passed —
+   confirming 037 R7.1: no delivery guarantee depends on pub/sub.
+2. **Throughput, not correctness, is what changes.** At backstop-interval latency the same
+   short window completes fewer messages (20 sent vs 132 with doorbells on) — expected, and
+   the reason the doorbells-off run is judged on invariants, not counts.
+3. **Turbulence held.** Graceful restart of `notifications-subs-1` and the mid-flight
+   ungraceful kill of `mailer-2` both survived on the sweep alone; `mailer-1` picked up the
+   lease redeliveries. Zero loss, zero duplicates, zero dead letters.
+
+---
+
+## Run `2026-09-15T13-27-50` — doorbells on
+
+- **Timestamp:** 2026-09-15 13:27:50 UTC
+- **Profile:** `shortened-ci` (Settle 2s, Gap 4s, Arrival 4s, Steady 4s, Turbulence 8s, Drain 8s, Shutdown 2s)
+- **Target Load Rate:** 25 msg/s aggregate
+- **Lease Duration:** 3s
+- **Broker Version:** highways (**RocksDB + RESP** — the post-Garnet stack, feature 041)
+- **Doorbells:** on (production default)
+- **Overall Verdict:** `PASSED` (Exit Code: 0)
+- **Artifacts Path:** `assurance/runs/2026-09-15T13-27-50/`
+
+### Invariants Verification
+
+| Invariant | Verdict | Sent / Total | Processed | Notes |
+|---|---|---|---|---|
+| **I1_QueueCompleteness** | 🟢 PASS | 132 | 132 | All 132 sent messages were successfully processed. |
+| **I2_NoPhantoms** | 🟢 PASS | 132 | 132 | Zero phantom messages found. |
+| **I3_RpcNeverSilent** | 🟢 PASS | 132 | 132 | All 132 executed RPC calls received replies or timeouts. |
+| **I4_PubSubPerLiveGroup** | 🟢 PASS | 264 | 264 | All 264 published events reached expected subscription groups. |
+| **I5_Duplicates** | 🟢 PASS | 0 | 132 | Observed 0 duplicate delivery(s) out of 132 processed events (0.00%). |
+| **I6_DeadLetters** | 🟢 PASS | 0 | 0 | Zero dead letters in broker DLQ. |
+| **I7_NothingLeftBehind** | 🟢 PASS | 0 | 0 | Final queue depths reached 0 on drain. |
+
+### Observations & Empirical Evidence
+
+1. **First rig run on the post-Garnet binary (041 gate G3).** The `highways` broker booted the
+   040 RESP server over the 038 RocksDB store; the unmodified applications connected over real
+   inter-process TCP with SE.Redis. 032 R6's broker-record corroboration (`HW.STATS`, DLQ,
+   flight recorder) is now served by the RESP server and the storage figure is the RocksDB data
+   directory — the AOF measurement is retired with Garnet.
+2. **Turbulence held.** Graceful restart of `notifications-subs-1` (same node + group identity)
+   and the mid-flight ungraceful kill of `mailer-2`; `mailer-1` absorbed the redeliveries.
+
+---
+
 ## Run `2026-08-18T11-29-23`
 
 - **Timestamp:** 2026-08-18 11:33:17 UTC

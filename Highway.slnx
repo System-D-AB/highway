@@ -58,5 +58,6 @@
     <Project Path="tests/Highway.Assurance.Tests/Highway.Assurance.Tests.csproj" />
     <Project Path="tests/Highway.Integration.Tests/Highway.Integration.Tests.csproj" />
     <Project Path="tests/Highway.Client.Hosting.Tests/Highway.Client.Hosting.Tests.csproj" />
+    <Project Path="tests/Highway.Storage.CrashHarness/Highway.Storage.CrashHarness.csproj" />
   </Folder>
 </Solution>

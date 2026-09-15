@@ -165,10 +165,10 @@ public class NodeExpiryTests
 
         // The dead node is gone from the worker set, so future dequeues stop
         // locking and sweeping its list — the 004.1 unbounded-growth deferral.
-        var nodeList = (string?)db.StringGet("hw:svc:orders.create:nodelist");
-        nodeList.Should().NotBeNull();
-        nodeList!.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Should().NotContain("worker-1").And.Contain("worker-2");
+        // (040 fixture swap: the newline-mirror string is gone — physical-layout §3;
+        // the set the mirror shadowed is the single source of truth now.)
+        var nodes = server.Inspect.SetMembers("hw:svc:orders.create:nodes");
+        nodes.Should().NotContain("worker-1").And.Contain("worker-2");
     }
 
     [Fact]
@@ -188,8 +188,7 @@ public class NodeExpiryTests
         db.Execute("HW.DEQUEUE", "orders.create", "worker-2").IsNull.Should().BeTrue(
             "with pruning off, recovery falls back to the slower per-entry lease sweep");
 
-        var nodeList = (string?)db.StringGet("hw:svc:orders.create:nodelist");
-        nodeList!.Split('\n', StringSplitOptions.RemoveEmptyEntries).Should().Contain("worker-1");
+        server.Inspect.SetMembers("hw:svc:orders.create:nodes").Should().Contain("worker-1");
     }
 
     /// <summary>

@@ -279,7 +279,16 @@ public class FlightRecorderTests
 
         Replay(db, "orders.create").Should().HaveCount(50, "the events exist in memory");
 
-        var recorderKeys = (RedisResult[])db.Execute("KEYS", "hw:fdr:*")!;
-        recorderKeys.Should().BeEmpty("the recorder must not put anything in the Garnet keyspace");
+        // 040 fixture swap: KEYS is not served (037 R6.3), and the guarantee is now
+        // structural — the recorder cannot write to storage because it holds no reference
+        // to it. Asserted at the type level, which is stronger than the old keyspace scan:
+        // a future field of a store type on the recorder fails this test at once.
+        typeof(Highway.Server.Observability.FlightRecorder)
+            .GetFields(System.Reflection.BindingFlags.Instance
+                     | System.Reflection.BindingFlags.NonPublic
+                     | System.Reflection.BindingFlags.Public)
+            .Where(f => typeof(Highway.Server.Storage.IHighwayStore).IsAssignableFrom(f.FieldType))
+            .Should().BeEmpty("the recorder is volatile and in-process by contract (037 R4.3); " +
+                "it must hold no path to the store");
     }
 }

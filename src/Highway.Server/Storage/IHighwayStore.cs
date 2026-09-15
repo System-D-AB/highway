@@ -141,6 +141,27 @@ public interface IHighwayStore : IDisposable
     void Delete(IStoreBatch batch, byte[] key);
 
     /// <summary>
+    /// Reads a key written by <see cref="SetEx"/>, honouring its expiry. Returns the stored
+    /// value if <paramref name="nowTicks"/> is before its expiry, or <c>null</c> if the key
+    /// is absent <b>or expired</b> — an expired reply slot reads as gone (037 R5.1: the clock
+    /// value is passed in, never read inside the store).
+    ///
+    /// <para>The only expiring key is the RPC reply slot (<c>HwReplyCommand</c> writes it,
+    /// <c>HwCall</c>/<c>HwReplay</c> read it), so this is its read path. A plain
+    /// <see cref="Get"/> on a <see cref="SetEx"/> key returns the raw framed bytes and is not
+    /// what a caller wants — use this. OD5, decided in 038 T5.</para>
+    /// </summary>
+    byte[]? GetLive(IStoreSnapshot snapshot, byte[] key, long nowTicks);
+
+    /// <summary>
+    /// Stages the physical deletion of every <see cref="SetEx"/> key whose expiry is at or
+    /// before <paramref name="nowTicks"/>. The reclamation half of OD5: <see cref="GetLive"/>
+    /// hides an expired slot immediately; this makes it physically gone. Called by the
+    /// reply-slot maintenance path; <paramref name="nowTicks"/> is passed in (037 R5.1).
+    /// </summary>
+    void SweepExpired(IStoreBatch batch, long nowTicks);
+
+    /// <summary>
     /// Atomically adds <paramref name="delta"/> to an i64 counter and returns the
     /// new value. Two concepts ride this: the per-channel message-ID sequence
     /// (<c>HwPublishCommand</c>, the only Garnet <c>Increment</c>) and, in the port,

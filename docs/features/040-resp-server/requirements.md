@@ -55,8 +55,10 @@ delivers the embedded test server 041's gates silently depend on.*
 #### Acceptance Criteria
 
 1. All five 037 R11 criteria hold: config users with hashed passwords + documented
-   hash recipe; both `AUTH` forms; binary enforcement (`AUTH`/`PING` only before
-   auth, `-NOAUTH` naming the fix otherwise); `WithoutAuthentication()` and loopback
+   hash recipe; both `AUTH` forms; binary enforcement (`AUTH`/`QUIT` only before
+   auth per R11.3's 2026-09-15 amendment — pre-auth `PING` is refused so a
+   credential-less SE.Redis connect fails legibly; `-NOAUTH` otherwise);
+   `WithoutAuthentication()` and loopback
    exemption preserved; client's `user:pass@` string and
    `HighwayAuthenticationException` path work unmodified.
 2. Constraint amendments and 012-finding retirements are staged here and land with

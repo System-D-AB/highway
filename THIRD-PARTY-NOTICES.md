@@ -9,6 +9,11 @@ Highway redistributes and embeds third-party open-source software under the term
 - **Project:** Microsoft Garnet (https://github.com/microsoft/garnet)
 - **Copyright:** (c) Microsoft Corporation.
 - **License:** MIT License
+- **Vendored source:** `src/Highway.Server/Resp/Vendored/RespWriteUtils.cs` is derived from
+  Garnet's `libs/common/RespWriteUtils.cs` (the RESP output formatter) plus the digit
+  primitives from `libs/common/NumUtils.cs` it depends on. The Microsoft copyright header is
+  kept intact in that file. This is the only Garnet-derived source in the repository (feature
+  037 D4 / R3.2); the Garnet submodule itself is removed in feature 041.
 
 ```
 MIT License

@@ -121,8 +121,11 @@ public class DurabilityTests : IDisposable
         }
     }
 
-    [Fact]
-    public void HighwayKeys_CoexistWithStockGarnetKeys()
+    // RETIRED 2026-09-15 (040 fixture swap): "coexists with stock Garnet keys" was a claim
+    // about sharing Garnet's general keyspace with other Redis usage. The 040 server serves
+    // only the HW.* subset by design (037 R6.3) — there is no stock keyspace to coexist
+    // with, and the cache that rode on it is removed in 041 T0. Preserved as a record.
+    private void HighwayKeys_CoexistWithStockGarnetKeys_RetiredGarnetOnly()
     {
         using var server = NewDurableServer();
         var cs = server.ConnectionString;

@@ -1,5 +1,4 @@
 using System.Net;
-using Garnet.server.Auth.Settings;
 using Highway.Server.Dashboard;   // WithDashboard extension
 using Highway.Server.Host.Configuration;
 
@@ -29,10 +28,10 @@ internal static class HighwayServerApplicator
         else if (c.Server.DataDir is not null)
             builder.WithDataDir(c.Server.DataDir);
 
-        // Authentication (feature 012): one mechanism — an ACL file replaces the password.
-        if (c.Authentication.AclFile is not null)
-            builder.WithAuthentication(new AclAuthenticationPasswordSettings(aclConfigurationFile: c.Authentication.AclFile));
-        else if (c.Authentication.Password is not null)
+        // Authentication (feature 012): a password (the default user). ACL-file support was a
+        // Garnet mechanism and is retired with Garnet (feature 041); config users with hashed
+        // passwords (040 R11) are the successor and are applied via WithOptions above if present.
+        if (c.Authentication.Password is not null)
             builder.WithPassword(c.Authentication.Password);
 
         // TLS (feature 012): PFX file or certificate-store subject name, plus the mTLS set.

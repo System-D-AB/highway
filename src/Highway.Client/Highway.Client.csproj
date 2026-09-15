@@ -3,8 +3,8 @@
   <PropertyGroup>
     <RootNamespace>Highway.Client</RootNamespace>
     <PackageId>Highway.Client</PackageId>
-    <Description>High-performance .NET client for Highway distributed messaging broker. Provides durable queues, pub/sub, RPC, lease renewer, distributed caching, rate limiter, and recurring jobs.</Description>
-    <PackageTags>highway;messaging;microservices;queues;pubsub;rpc;garnet;cache;distributed-systems</PackageTags>
+    <Description>High-performance .NET client for Highway distributed messaging broker. Provides durable queues, pub/sub, RPC, lease renewer, rate limiter, and recurring jobs.</Description>
+    <PackageTags>highway;messaging;microservices;queues;pubsub;rpc;distributed-systems</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
@@ -20,7 +20,6 @@
 
   <ItemGroup>
     <PackageReference Include="StackExchange.Redis" />
-    <PackageReference Include="Microsoft.Extensions.Caching.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />

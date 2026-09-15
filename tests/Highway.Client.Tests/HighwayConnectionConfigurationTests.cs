@@ -2,7 +2,6 @@ namespace Highway.Client.Tests;
 
 using System.Security.Authentication;
 using FluentAssertions;
-using Highway.Client.Caching;
 using Highway.Client.Engine;
 using StackExchange.Redis;
 using Xunit;
@@ -90,13 +89,16 @@ public class HighwayConnectionConfigurationTests
     }
 
     [Fact]
-    public void Build_HighwayCacheOptions_ImplementsSettingsAndConfiguresProperly()
+    public void Build_FromConnectionSettings_AppliesUsernamePasswordAndTls()
     {
-        var cacheOptions = new HighwayCacheOptions
+        // Any IHighwayConnectionSettings implementation flows user/password/TLS into the
+        // SE.Redis config. (Was exercised via the now-removed HighwayCacheOptions; HighwayOptions
+        // is the surviving settings implementation and proves the same Build behaviour.)
+        var settings = new HighwayOptions
         {
             Server = "127.0.0.1:6379",
-            Username = "cache_user",
-            Password = "cache_secret",
+            Username = "svc_user",
+            Password = "svc_secret",
             Tls = new HighwayTlsOptions
             {
                 Enabled = true,
@@ -104,10 +106,10 @@ public class HighwayConnectionConfigurationTests
             }
         };
 
-        var options = HighwayConnectionConfiguration.Build(cacheOptions.Server!, cacheOptions);
+        var options = HighwayConnectionConfiguration.Build(settings.Server!, settings);
 
-        options.User.Should().Be("cache_user");
-        options.Password.Should().Be("cache_secret");
+        options.User.Should().Be("svc_user");
+        options.Password.Should().Be("svc_secret");
         options.Ssl.Should().BeTrue();
         options.SslHost.Should().Be("cache.highway.internal");
     }

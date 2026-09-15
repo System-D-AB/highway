@@ -145,7 +145,7 @@ public class SubscriberFailureTests : IDisposable
 
             // The handler throws on every attempt; attempts exhaust and the sweep dead-letters.
             await WaitForAsync(() =>
-                (long)db.Execute("LLEN", "hw:q:sub.fail@sub-fail-node:dlq") > 0);
+                _server.Inspect.ListLength("hw:q:sub.fail@sub-fail-node:dlq") > 0);
         }
 
         FailingSubscriber.Invocations.Should().BeGreaterThan(0,
@@ -216,11 +216,22 @@ public class SubscriberFailureTests : IDisposable
 
         // The gate is keyed on the DERIVED QUEUE name, which is what makes it work per group
         // rather than per channel. Before 018 no such key was ever written for a subscriber.
-        var markers = ((RedisResult[])db.Execute("KEYS", "hw:idem:sub.idem@idem-node:*")!)
-            .Select(k => k.ToString())
+        // (040 fixture swap: KEYS is not served, so the message id comes from the flight
+        // recorder's Published event and the marker is read back by its exact key.)
+        var replay = (RedisResult[])db.Execute("HW.REPLAY", "sub.idem")!;
+        var messageIds = replay
+            .Select(Fields)
+            .Where(e => e.TryGetValue("eventType", out var t) && t == "Published")
+            .Select(e => e.GetValueOrDefault("messageId"))
+            .Where(id => !string.IsNullOrEmpty(id))
+            .Distinct()
             .ToArray();
+        messageIds.Should().NotBeEmpty("the publish was recorded with its message id");
 
-        markers.Should().NotBeEmpty(
+        var markerFound = messageIds.Any(id =>
+            !db.StringGet($"hw:idem:sub.idem@idem-node:{id}").IsNull);
+
+        markerFound.Should().BeTrue(
             "[Idempotent] must actually run for a subscriber - before 018 the attribute was " +
             "silently ignored on ISubscribe<T> and no marker was ever written");
     }

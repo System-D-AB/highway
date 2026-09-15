@@ -41,8 +41,7 @@ public class DeadLetterTests : IDisposable
         await Task.Delay(70);   // let the lease expire
     }
 
-    private static async Task<long> ListLengthAsync(IDatabase db, string key)
-        => (long)(await db.ExecuteAsync("LLEN", key));
+    private long ListLength(string key) => _server.Inspect.ListLength(key);
 
     /// <summary>
     /// <b>The regression this feature is for.</b> A request that is never acknowledged
@@ -61,8 +60,8 @@ public class DeadLetterTests : IDisposable
         // One more dequeue to run the sweep that moves it.
         await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
 
-        var queue = await ListLengthAsync(db, $"hw:svc:{Service}:q");
-        var dlq   = await ListLengthAsync(db, $"hw:svc:{Service}:dlq");
+        var queue = ListLength($"hw:svc:{Service}:q");
+        var dlq   = ListLength($"hw:svc:{Service}:dlq");
 
         dlq.Should().Be(1, "the request exhausted its attempts and must leave the live queue");
         queue.Should().Be(0, "a dead-lettered request must not still be queued for retry");
@@ -82,9 +81,9 @@ public class DeadLetterTests : IDisposable
         {
             await AbandonOnceAsync(db, Service, "node-a");
 
-            var queue = await ListLengthAsync(db, $"hw:svc:{Service}:q");
-            var proc  = await ListLengthAsync(db, $"hw:svc:{Service}:proc:node-a");
-            var dlq   = await ListLengthAsync(db, $"hw:svc:{Service}:dlq");
+            var queue = ListLength($"hw:svc:{Service}:q");
+            var proc  = ListLength($"hw:svc:{Service}:proc:node-a");
+            var dlq   = ListLength($"hw:svc:{Service}:dlq");
 
             (queue + proc + dlq).Should().Be(1,
                 "the request exists exactly once across the queue, the processing list and the DLQ");
@@ -108,7 +107,7 @@ public class DeadLetterTests : IDisposable
             await db.ExecuteAsync("HW.ACK", Service, "node-a", id);
         }
 
-        (await ListLengthAsync(db, $"hw:svc:{Service}:dlq")).Should().Be(0);
+        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(0);
     }
 
     /// <summary>
@@ -130,7 +129,7 @@ public class DeadLetterTests : IDisposable
         for (var i = 0; i < 8; i++)
             await AbandonOnceAsync(db, Service, "node-a");
 
-        (await ListLengthAsync(db, $"hw:svc:{Service}:dlq")).Should().Be(0,
+        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(0,
             "0 means unlimited, which is how Highway behaved before this feature");
     }
 
@@ -157,7 +156,7 @@ public class DeadLetterTests : IDisposable
             await AbandonOnceAsync(db, Service, "node-a");
         }
 
-        var dlq = await ListLengthAsync(db, $"hw:svc:{Service}:dlq");
+        var dlq = ListLength($"hw:svc:{Service}:dlq");
         dlq.Should().BeLessThanOrEqualTo(3, "the dead-letter list is capped");
     }
 }

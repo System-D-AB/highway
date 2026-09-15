@@ -3,12 +3,12 @@ namespace Highway.Client;
 using StackExchange.Redis;
 
 /// <summary>
-/// Common connection settings contract implemented by <see cref="HighwayOptions"/> and <see cref="Caching.HighwayCacheOptions"/>.
+/// Common connection settings contract implemented by <see cref="HighwayOptions"/>.
 /// </summary>
 public interface IHighwayConnectionSettings
 {
     /// <summary>
-    /// Connection string for the Highway/Garnet server endpoint.
+    /// Connection string for the Highway server endpoint.
     /// </summary>
     string? Server { get; }
 

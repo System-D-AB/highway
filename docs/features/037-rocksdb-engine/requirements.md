@@ -234,10 +234,15 @@ produced the `+@all -@dangerous` trap.
    connection string implies. The client-side experience is unchanged:
    `user:pass@host` in the connection string works as today.
 3. Enforcement is **binary and at the connection**: an unauthenticated connection may
-   send `AUTH` and `PING` only; anything else returns `-NOAUTH` with a sentence naming
-   the fix. There is no per-command authorization — the server serves only `HW.*` plus
-   the handshake subset, so authenticated *is* authorized. Roles are deferred until
-   someone needs them.
+   send `AUTH` and `QUIT` only; anything else returns `-NOAUTH`. There is no
+   per-command authorization — the server serves only `HW.*` plus the handshake
+   subset, so authenticated *is* authorized. Roles are deferred until someone needs
+   them.
+   *(Amended 2026-09-15 — originally "`AUTH` and `PING`". PING is SE.Redis's connect
+   handshake: a pre-auth PONG lets a credential-less connect succeed, deferring the
+   refusal to a later illegible `HW.*` error — breaking the client's
+   `HighwayAuthenticationException` contract and C6.3. Redis refuses pre-auth PING for
+   the same reason; found by the 040 fixture swap's auth tests.)*
 4. C6.x semantics are preserved and re-proven: auth required by default,
    `WithoutAuthentication()` remains the explicit opt-out, loopback remains exempt,
    failures remain permanent and legible (the client's existing

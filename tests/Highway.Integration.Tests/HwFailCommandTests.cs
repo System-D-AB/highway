@@ -42,7 +42,7 @@ public class HwFailCommandTests : IDisposable
         var db = await ConnectAsync();
         await ClaimOneAsync(db, "fail.svc", "node-a", "req-1");
 
-        var before = (long)await db.ExecuteAsync("LLEN", "hw:svc:fail.svc:proc:node-a");
+        var before = _server.Inspect.ListLength("hw:svc:fail.svc:proc:node-a");
         before.Should().Be(1);
 
         var result = (long)await db.ExecuteAsync(
@@ -52,7 +52,7 @@ public class HwFailCommandTests : IDisposable
 
         // The whole point: reporting is not acknowledging. The message is still claimed, so
         // the lease sweep recovers it on exactly the schedule it would have.
-        var after = (long)await db.ExecuteAsync("LLEN", "hw:svc:fail.svc:proc:node-a");
+        var after = _server.Inspect.ListLength("hw:svc:fail.svc:proc:node-a");
         after.Should().Be(1, "HW.FAIL explains a message, it does not finish with it");
     }
 
@@ -69,7 +69,7 @@ public class HwFailCommandTests : IDisposable
         // (it is idempotent by design), so the list length is what actually proves the match.
         await db.ExecuteAsync("HW.ACK", "fail.ack", "node-a", "req-1");
 
-        ((long)await db.ExecuteAsync("LLEN", "hw:svc:fail.ack:proc:node-a")).Should().Be(0,
+        (_server.Inspect.ListLength("hw:svc:fail.ack:proc:node-a")).Should().Be(0,
             "the entry HW.FAIL rewrote must still be findable by its id");
     }
 
@@ -85,7 +85,7 @@ public class HwFailCommandTests : IDisposable
         result.Should().Be(0, "a late report is a race the client cannot avoid, not an error");
 
         // And the list it scanned is intact - a miss must not eat the entries it walked past.
-        ((long)await db.ExecuteAsync("LLEN", "hw:svc:fail.unknown:proc:node-a")).Should().Be(1);
+        (_server.Inspect.ListLength("hw:svc:fail.unknown:proc:node-a")).Should().Be(1);
     }
 
     [Fact]
@@ -109,7 +109,7 @@ public class HwFailCommandTests : IDisposable
 
         await db.ExecuteAsync("HW.FAIL", "SVC", "fail.many", "node-a", "req-2", "SomeException", "d");
 
-        ((long)await db.ExecuteAsync("LLEN", "hw:svc:fail.many:proc:node-a")).Should().Be(3,
+        (_server.Inspect.ListLength("hw:svc:fail.many:proc:node-a")).Should().Be(3,
             "pop-and-restore must put back everything it took, in order");
 
         // Each one still acknowledges by id, which proves the entries were not scrambled.
@@ -117,7 +117,7 @@ public class HwFailCommandTests : IDisposable
         foreach (var id in new[] { "req-1", "req-2", "req-3" })
             await db.ExecuteAsync("HW.ACK", "fail.many", "node-a", id);
 
-        ((long)await db.ExecuteAsync("LLEN", "hw:svc:fail.many:proc:node-a")).Should().Be(0,
+        (_server.Inspect.ListLength("hw:svc:fail.many:proc:node-a")).Should().Be(0,
             "every entry the rewrite put back must still match its own id");
     }
 
@@ -134,7 +134,7 @@ public class HwFailCommandTests : IDisposable
             "HW.FAIL", "Q", "fail.queue", "node-a", "msg-1", "InvalidOperationException", "d");
 
         result.Should().Be(1);
-        ((long)await db.ExecuteAsync("LLEN", "hw:q:fail.queue:proc:node-a")).Should().Be(1);
+        (_server.Inspect.ListLength("hw:q:fail.queue:proc:node-a")).Should().Be(1);
         ((long)await db.ExecuteAsync("HW.QACK", "fail.queue", "node-a", "msg-1")).Should().Be(1);
     }
 
@@ -190,9 +190,9 @@ public class HwFailCommandTests : IDisposable
         second.Should().Be(1);
 
         // Trailers must replace, not stack: the entry stays one entry and stays acknowledgeable.
-        ((long)await db.ExecuteAsync("LLEN", "hw:svc:fail.merge:proc:node-a")).Should().Be(1);
+        (_server.Inspect.ListLength("hw:svc:fail.merge:proc:node-a")).Should().Be(1);
 
         await db.ExecuteAsync("HW.ACK", "fail.merge", "node-a", "req-1");
-        ((long)await db.ExecuteAsync("LLEN", "hw:svc:fail.merge:proc:node-a")).Should().Be(0);
+        (_server.Inspect.ListLength("hw:svc:fail.merge:proc:node-a")).Should().Be(0);
     }
 }

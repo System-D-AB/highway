@@ -159,7 +159,7 @@ public class SubscriptionGroupTests : IDisposable
         Members("sgm.events", "sgm-g").Should().Equal("node-1", "node-2");
 
         // The reverse index BYE PURGE walks.
-        ((string?)_db.StringGet("hw:reg:node:node-1:subs")).Should().Contain("sgm.events@sgm-g");
+        _server.Inspect.SetMembers("hw:reg:node:node-1:subs").Should().Contain("sgm.events@sgm-g");
     }
 
     [Fact]
@@ -193,7 +193,7 @@ public class SubscriptionGroupTests : IDisposable
         var second = (RedisResult[])_db.Execute("HW.HEARTBEAT", "sgp-node-b", "BYE", "PURGE")!;
         ((long)second[0]).Should().Be(1, "the last member's purge destroys the group");
 
-        ((string?)_db.StringGet($"hw:grp:members:sgp.events@sgp-g")).Should().BeNull();
+        _server.Inspect.SetMembers("grp:sgp.events@sgp-g:members").Should().BeEmpty("the destroyed group has no members left");
     }
 
     [Fact]
@@ -214,7 +214,7 @@ public class SubscriptionGroupTests : IDisposable
         db.Execute("HW.HEARTBEAT", "sgr-b");
         db.Execute("HW.PUBLISH", "sgr.events", "{\"d\":1}");
 
-        ((string?)db.StringGet("hw:ch:sgr.events:grplist")).Should().Contain("sgr-g",
+        server.Inspect.SetMembers("hw:ch:sgr.events:groups").Should().Contain("sgr-g",
             "one live member keeps the whole group alive — liveness is the YOUNGEST member");
 
         // Now B goes silent too. The next publish retires the group (017's mechanism,
@@ -222,7 +222,7 @@ public class SubscriptionGroupTests : IDisposable
         await Task.Delay(600);
         db.Execute("HW.PUBLISH", "sgr.events", "{\"d\":2}");
 
-        ((string?)db.StringGet("hw:ch:sgr.events:grplist") ?? "").Should().NotContain("sgr-g",
+        server.Inspect.SetMembers("hw:ch:sgr.events:groups").Should().NotContain("sgr-g",
             "a group whose every member has gone silent past the threshold is retired");
     }
 
@@ -248,8 +248,7 @@ public class SubscriptionGroupTests : IDisposable
          + SubscriberRecorder.CountEntries($"sgd-a:{data}") + SubscriberRecorder.CountEntries($"sgd-b:{data}");
 
     private string[] Members(string channel, string group)
-        => ((string?)_db.StringGet($"hw:grp:members:{channel}@{group}") ?? "")
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        => _server.Inspect.SetMembers($"grp:{channel}@{group}:members").OrderBy(m => m).ToArray();
 }
 
 // =============================================================================

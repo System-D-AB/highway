@@ -2,7 +2,7 @@
 
 High-performance .NET client library for the [Highway distributed messaging broker](https://github.com/System-D-AB/highway).
 
-Highway gives you **durable queues**, **publish/subscribe**, **RPC**, **distributed caching**, and **lease management** over a single high-throughput broker.
+Highway gives you **durable queues**, **publish/subscribe**, **RPC**, and **lease management** over a single high-throughput broker.
 
 ## Installation
 
@@ -65,9 +65,9 @@ public class CheckoutService(IHighwayClient client)
   - `SendAsync` / `IProcess<T>`: Durable queues with competing workers and dead-lettering.
   - `PublishAsync` / `ISubscribe<T>`: Fan-out pub/sub events with named subscription groups.
   - `ExecuteAsync` / `AsyncService<TReq, TResp>`: Load-balanced asynchronous RPC.
-- **Distributed Cache Integration**: Native `IDistributedCache` and zero-allocation `IBufferDistributedCache` for ASP.NET Core and `HybridCache`.
+
 - **Resilience**: Transparent heartbeat recovery, automatic lease renewal, and configurable retries.
-- **Transport Security**: Opt-in TLS 1.2/1.3 and Redis/Garnet ACL user authentication.
+- **Transport Security**: Opt-in TLS 1.2/1.3 and password authentication.
 
 ## Documentation & Resources
 

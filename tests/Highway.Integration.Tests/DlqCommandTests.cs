@@ -38,8 +38,7 @@ public class DlqCommandTests : IDisposable
         await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
     }
 
-    private static async Task<long> ListLengthAsync(IDatabase db, string key)
-        => (long)(await db.ExecuteAsync("LLEN", key));
+    private long ListLength(string key) => _server.Inspect.ListLength(key);
 
     [Fact]
     public async Task Peek_ReturnsTheEntry_WithEverythingNeededToDiagnoseIt()
@@ -74,7 +73,7 @@ public class DlqCommandTests : IDisposable
         var third = (RedisResult[])(await db.ExecuteAsync("HW.DLQ", "PEEK", "SVC", Service))!;
 
         third.Should().HaveCount(1, "looking must not consume — the operator has to see it to decide");
-        (await ListLengthAsync(db, $"hw:svc:{Service}:dlq")).Should().Be(1);
+        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(1);
     }
 
     [Fact]
@@ -86,8 +85,8 @@ public class DlqCommandTests : IDisposable
         var moved = (long)(await db.ExecuteAsync("HW.DLQ", "REQUEUE", "SVC", Service));
         moved.Should().Be(1);
 
-        (await ListLengthAsync(db, $"hw:svc:{Service}:dlq")).Should().Be(0);
-        (await ListLengthAsync(db, $"hw:svc:{Service}:q")).Should().Be(1);
+        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(0);
+        (ListLength($"hw:svc:{Service}:q")).Should().Be(1);
 
         // The attempt count was reset, so the request is deliverable again rather than
         // dead-lettering on its very next sweep.
@@ -106,8 +105,8 @@ public class DlqCommandTests : IDisposable
 
         var removed = (long)(await db.ExecuteAsync("HW.DLQ", "PURGE", "SVC", Service));
         removed.Should().Be(1);
-        (await ListLengthAsync(db, $"hw:svc:{Service}:dlq")).Should().Be(0);
-        (await ListLengthAsync(db, $"hw:svc:{Service}:q")).Should().Be(0,
+        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(0);
+        (ListLength($"hw:svc:{Service}:q")).Should().Be(0,
             "purge discards, it does not requeue");
     }
 
@@ -135,7 +134,7 @@ public class DlqCommandTests : IDisposable
 
         var purged = (long)(await db.ExecuteAsync("HW.DLQ", "PURGE", "SVC", Service, "COUNT", "3"));
         purged.Should().Be(3);
-        (await ListLengthAsync(db, $"hw:svc:{Service}:dlq")).Should().Be(2);
+        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(2);
     }
 
     [Fact]

@@ -239,6 +239,14 @@ the current defaults.**
 
 **Status: Not met.** Feature 016 found it needs a breaking framing change first.
 
+> **OD2 decision (feature 038 T0, 2026-09-15): DEFERRED.** The RocksDB port is exactly the
+> "breaking framing change" moment 016 said this was blocked on — but adopting timed
+> retention means adding a timestamp to every entry's frame and a sweep keyed on it, which
+> is command-layer behaviour (039), not storage-layer (038). 038 makes it *cheaper to add
+> later* — the delayed set's `z`-family already proves the "range-by-time then act" pattern
+> a retention sweep would reuse — but does not adopt it. Revisit as its own feature once the
+> engine swap is proven end-to-end.
+
 A queue entry is `[ver][attempts][idLen][id][payload]` — it carries **no timestamp**, so there
 is nothing to age it against. Time-based retention therefore needs either a fifth field in the
 entry framing (breaking, like 013's attempt count) or a parallel structure keyed by time.
@@ -345,9 +353,22 @@ work: a global accountant on every enqueue, plus an eviction or refusal policy a
 structures deciding whose message loses. 016 shipped the bound that could be built without
 that, and named the gap instead of letting the default imply a guarantee it does not make.
 
+> **OD2 decision (feature 038 T0, 2026-09-15): DEFERRED.** A process-wide budget is still a
+> global accountant plus a cross-structure eviction policy — unchanged by the engine swap,
+> and command-layer, not storage-layer. RocksDB does make the *observation* cheaper (the
+> live working set's real size is a property the engine already tracks for compaction), but
+> the policy question 016 named is untouched. Not adopted in 038; a candidate for a later
+> feature once OD1 pressure is real.
+
 ### C4.8 — The cache is bounded by application TTLs, not by Highway
 
-**Status: Met as scoped** — feature 026.
+**Status: Retired (feature 041, 2026-08-29).** The distributed-cache add-on this constraint
+governed was removed with the Garnet engine (041 R1.5): it existed only because Garnet was
+natively a cache-store exposing `GET`/`SET`, and RocksDB is a durable log-structured store, not a
+cache substrate. There is no cache to bound, so the constraint no longer applies. The original
+text is kept below as history.
+
+> **Was: Met as scoped** — feature 026.
 
 Cache entries given an expiration die natively in Garnet; Highway adds no sweeper and no
 quota of its own. Entries set **without** an expiration persist until deleted, exactly as
@@ -372,9 +393,28 @@ directory sizes it for the cache too.
 | **Transactional enlistment** | No DTC, no ambient transaction. An MSMQ user who depends on this is not one Highway can serve. |
 | **Message priority or selective consumption** | FIFO, no filtering. |
 | **Per-message TTL** | Retention is per queue or channel. |
-| **Characterised throughput** | No benchmark exists; no figure is claimed anywhere. |
+| **Characterised throughput** | No benchmark *measured on Highway* exists; no measured figure is claimed. See the **OD1 design target** below — a target to design against, not a benchmark result. |
 | **Second-accurate scheduled delivery** | Delay is a "not before", driven by consumer polling, not a timer. |
 | **Ordering under backoff** | Redelivery preserves head-of-queue order by default; enabling backoff trades that away. No setting gives both. This trade-off is a C5 row, not a numbered constraint — it is a property Highway declines to promise, not one it keeps. |
+
+> **OD1 — a throughput target to design against (feature 038 T0, dated 2026-09-15).**
+> Highway still claims **no measured** throughput — the row above stands. But a design
+> needs a shape to build toward, and "uncharacterised" was blocking four decisions in the
+> 037 research (RocksDB tuning, whether batching matters, whether D1 deserves revisiting).
+> The target, chosen against the **imported sibling bake-off** — 84–112 k indexed
+> saves/s at 64 writers, ~89 MB RSS flat at 1 M rows on the same `RocksDbSharp`
+> (`C:\Software\ai\stow-rocksdb`, spec `v2-001-engine-bakeoff`), a heavier per-write
+> workload than a Highway enqueue — is:
+>
+> **10 000 msg/s at 8 KB, across 20 queues and 40 concurrent consumers, on one broker,
+> with sync-per-commit durability.**
+>
+> This is a *floor to not regress below*, not a promise. The sibling's numbers make it
+> comfortable headroom (a Highway enqueue is one batch of a few small keys, lighter than
+> a document save with N index entries), which is why 038 defers RocksDB tuning and the
+> `CounterMergeOperator` until this floor is *measured* to be at risk (041/T6.3, and any
+> later tuning feature). If a measured Highway benchmark ever lands, it replaces this row;
+> until then no figure is published to users.
 
 ---
 
