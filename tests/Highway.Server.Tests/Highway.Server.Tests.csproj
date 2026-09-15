@@ -5,22 +5,12 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
-  <PropertyGroup>
-    <UseGarnetSource Condition="'$(UseGarnetSource)' == ''">false</UseGarnetSource>
-  </PropertyGroup>
-
   <ItemGroup>
     <ProjectReference Include="..\..\src\Highway.Server\Highway.Server.csproj" />
     <!-- Built alongside the tests so the T6 crash-replay test can spawn it as a child
          process. ReferenceOutputAssembly=false: we invoke it via `dotnet exec`, not link it. -->
     <ProjectReference Include="..\Highway.Storage.CrashHarness\Highway.Storage.CrashHarness.csproj"
                       ReferenceOutputAssembly="false" />
-  </ItemGroup>
-
-  <ItemGroup Condition="'$(UseGarnetSource)' == 'true'">
-    <!-- Needed to use GarnetServerOptions directly in tests when building against source -->
-    <ProjectReference Include="..\..\libs\garnet\libs\server\Garnet.server.csproj" />
-    <ProjectReference Include="..\..\libs\garnet\libs\storage\Tsavorite\cs\src\core\Tsavorite.core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

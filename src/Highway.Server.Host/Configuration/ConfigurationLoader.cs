@@ -108,7 +108,6 @@ internal static class ConfigurationLoader
     private static void ResolveRelativePaths(HostConfiguration c, string? configDir, HashSet<string> overridden)
     {
         c.Server.DataDir = Resolve(c.Server.DataDir, "server.dataDir");
-        c.Authentication.AclFile = Resolve(c.Authentication.AclFile, "authentication.aclFile");
         c.Tls.CertFile = Resolve(c.Tls.CertFile, "tls.certFile");
         c.Tls.IssuerCertificatePath = Resolve(c.Tls.IssuerCertificatePath, "tls.issuerCertificatePath");
 

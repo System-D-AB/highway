@@ -131,7 +131,7 @@ internal static class Catalogue
         IReadOnlySet<string> declaredChannels,
         IReadOnlySet<string> nodeNames)
     {
-        if (name == Commands.HwReplyCommand.RecorderName)
+        if (name == Commands.Ported.HwReplyCommand.RecorderName)
             return (EntityKind.Internal, null);
 
         var at = name.IndexOf('@');

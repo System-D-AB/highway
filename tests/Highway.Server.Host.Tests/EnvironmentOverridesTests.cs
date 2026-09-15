@@ -45,11 +45,9 @@ public class EnvironmentOverridesTests
         var configuration = Apply(new Hashtable
         {
             ["HIGHWAY_PASSWORD"] = "secret",
-            ["HIGHWAY_ACL_FILE"] = "/etc/highway/users.acl",
         });
 
         configuration.Authentication.Password.Should().Be("secret");
-        configuration.Authentication.AclFile.Should().Be("/etc/highway/users.acl");
     }
 
     [Fact]

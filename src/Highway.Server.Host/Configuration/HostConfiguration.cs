@@ -67,15 +67,10 @@ public sealed class HostConfiguration
                 "authentication.password is set but empty or whitespace — supply a real password, " +
                 "or remove it to run without authentication.");
 
-        if (Authentication.Password is not null && Authentication.AclFile is not null)
-            throw new ConfigurationException(
-                "authentication.password and authentication.aclFile are mutually exclusive — the ACL " +
-                "file replaces everything a plain password would configure. Set exactly one.");
-
-        // TLS: Garnet accepts exactly one certificate source (mirrors TlsOptions.Validate).
+        // TLS: exactly one certificate source (mirrors TlsOptions.Validate).
         if (Tls.CertFile is not null && Tls.CertSubjectName is not null)
             throw new ConfigurationException(
-                "tls.certFile and tls.certSubjectName are mutually exclusive — Garnet accepts exactly one.");
+                "tls.certFile and tls.certSubjectName are mutually exclusive — set exactly one.");
 
         if (Tls.RefreshFrequencySeconds < 0)
             throw new ConfigurationException($"tls.refreshFrequencySeconds cannot be negative, but was {Tls.RefreshFrequencySeconds}.");
@@ -172,11 +167,8 @@ public sealed class NameOverrideSection
 /// <summary>The <c>"authentication"</c> section — maps onto <c>AuthenticationOptions</c> (feature 012).</summary>
 public sealed class AuthenticationSection
 {
-    /// <summary>One shared password; the username is Garnet's <c>default</c>.</summary>
+    /// <summary>One shared password, matched against the <c>default</c> user.</summary>
     public string? Password { get; set; }
-
-    /// <summary>Garnet ACL file for named users — replaces the plain password entirely.</summary>
-    public string? AclFile { get; set; }
 }
 
 /// <summary>The <c>"tls"</c> section — maps onto <c>TlsOptions</c> (feature 012).</summary>

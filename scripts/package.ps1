@@ -58,11 +58,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish failed with exit code $LASTEXITCODE"
 }
 
-# 2. Copy config. Both files ship: highway.json is the broker's configuration, and
-# users.acl is feature 034 R3.1's nopass command allowlist — the profile that makes
-# FLUSHALL, CONFIG and KEYS unreachable on a trusted network. A distribution without
-# it leaves the operator to reconstruct a 30-command allowlist by hand.
-foreach ($cfg in @("highway.json", "users.acl")) {
+# 2. Copy config. highway.json is the broker's configuration. The Garnet-era users.acl
+# allowlist (034 R3.1) is retired with Garnet in feature 041 — the RESP server does not read
+# an ACL file; authentication is a password or the hashed config-users list.
+foreach ($cfg in @("highway.json")) {
     $srcConfig = Join-Path $repoRoot "config\$cfg"
     if (Test-Path $srcConfig) {
         Copy-Item -Path $srcConfig -Destination (Join-Path $configDir $cfg) -Force

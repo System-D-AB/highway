@@ -46,7 +46,6 @@ internal static class EffectiveConfigurationPrinter
         writer.WriteLine();
         writer.WriteLine("  authentication");
         writer.WriteLine($"    password                         : {Secret(c.Authentication.Password)}");
-        writer.WriteLine($"    aclFile                          : {Value(c.Authentication.AclFile)}");
         writer.WriteLine();
         writer.WriteLine("  tls");
         writer.WriteLine($"    certFile                         : {Value(c.Tls.CertFile)}");

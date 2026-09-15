@@ -1,6 +1,5 @@
-using System.Net;
 using FluentAssertions;
-using Garnet.server;
+using Highway.Server;
 using Highway.Server.Internal;
 using StackExchange.Redis;
 using Xunit;
@@ -13,12 +12,13 @@ namespace Highway.Server.Tests;
 /// Verifies that:
 /// 1. <see cref="EphemeralPort.Probe"/> returns a valid non-zero port.
 /// 2. Two consecutive probes return different ports (OS-assigned, not hard-coded).
-/// 3. A <see cref="HighwayGarnetServer"/> started on a probed port accepts
-///    real RESP connections — PING returns PONG via SE.Redis.
+/// 3. A broker started on a probed port accepts real RESP connections — PING returns PONG
+///    via SE.Redis. (041: re-pointed off the deleted Garnet server onto the shipped
+///    RESP + RocksDB broker.)
 /// </summary>
 public class EphemeralPortTests : IDisposable
 {
-    private HighwayGarnetServer? _server;
+    private IHighwayServer? _server;
 
     public void Dispose() => _server?.Dispose();
 
@@ -42,20 +42,14 @@ public class EphemeralPortTests : IDisposable
     }
 
     [Fact]
-    public void HighwayGarnetServer_StartsOnProbedPort_AndAcceptsPing()
+    public void Broker_StartsOnProbedPort_AndAcceptsPing()
     {
         var port = EphemeralPort.Probe();
 
-        var opts = new GarnetServerOptions
-        {
-            QuietMode = true,
-            EnableAOF = false,
-            EnableStorageTier = false,
-            DisablePubSub = false,
-            EndPoints = [new IPEndPoint(IPAddress.Loopback, port)],
-        };
-
-        _server = new HighwayGarnetServer(opts);
+        _server = new HighwayServerBuilder()
+            .WithPort(port)
+            .Ephemeral()
+            .Build();
         _server.Start();
 
         // Connect via SE.Redis and verify PING returns PONG.
@@ -72,31 +66,5 @@ public class EphemeralPortTests : IDisposable
         var ping = db.Ping();
 
         ping.Should().BeGreaterThan(TimeSpan.Zero);
-    }
-
-    [Fact]
-    public void HighwayGarnetServer_SubscribeBroker_IsAccessible()
-    {
-        var port = EphemeralPort.Probe();
-
-        var opts = new GarnetServerOptions
-        {
-            QuietMode = true,
-            EnableAOF = false,
-            EnableStorageTier = false,
-            DisablePubSub = false,
-            EndPoints = [new IPEndPoint(IPAddress.Loopback, port)],
-        };
-
-        // Construct only — no Start() — broker is initialised lazily on first SUBSCRIBE.
-        // What we verify here is that the property is reachable without reflection and
-        // does not throw.
-        _server = new HighwayGarnetServer(opts);
-
-        // Broker is non-null only after the first subscriber connects.
-        // Pre-subscribe it should be null OR non-null depending on Garnet version.
-        // Either way, the property access must not throw.
-        var act = () => _ = _server.SubscribeBroker;
-        act.Should().NotThrow();
     }
 }

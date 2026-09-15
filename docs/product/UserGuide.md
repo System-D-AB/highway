@@ -516,66 +516,80 @@ Garnet exhibits two weak TLS validation shapes that Highway detects and warns ab
 
 ---
 
-## Access Control Lists (ACL)
+## Authentication
 
-Highway supports fine-grained Access Control Lists (ACL) to restrict command execution and protect administrative operations.
+> **Updated 2026-09-15 (feature 041).** This section previously described a Garnet **ACL** model —
+> a shipped `config/users.acl` file with a `nopass` default user and per-command allowlists. That
+> model was removed with the Garnet engine: the broker now runs the RESP server over RocksDB and
+> authenticates with its own `AUTH`, not a Garnet ACL file. There is no `users.acl`, no `nopass`
+> line, and no per-command category grants. The command surface is fixed by the server — it serves
+> only the `HW.*` subset plus the handshake and the RPC reply-slot key — so an allowlist that used
+> to *refuse* `FLUSHALL`/`CONFIG`/`KEYS` is unnecessary: the broker never implemented them.
 
-### The Three Security Postures (R3.4)
+Highway authenticates connections with a password, or with a directory of named users carrying
+hashed passwords. It is optional on loopback and required off it.
 
-| Posture | Environment | Mechanism | What It Protects Against | What It Does Not Protect Against |
+### The three security postures
+
+| Posture | Environment | Mechanism | Protects against | Does not protect against |
 |---|---|---|---|---|
-| **1. Open on loopback** | Local development | No auth, loopback bind (`127.0.0.1`) | Accidental exposure (bound to loopback only) | Local processes on same machine |
-| **2. `nopass` + Allowlist** | Trusted internal network (Default) | Shipped `config/users.acl` with `default` user | Accidental `FLUSHALL`, `CONFIG`, `KEYS`, data destruction | Network eavesdropping (unless paired with TLS) |
-| **3. Password/ACL + TLS** | Exposed / multi-tenant network | Named users, passwords, TLS encryption | Eavesdropping, unauthorized command execution | Misconfigured client credentials |
+| **1. Open on loopback** | Local development | No auth, loopback bind (`127.0.0.1`) | Accidental exposure (loopback-bound only) | Other local processes on the machine |
+| **2. Password** | Trusted internal network | One shared password (`WithPassword` / `authentication.password`) | Unauthenticated access from off the machine | Network eavesdropping (unless paired with TLS) |
+| **3. Named users + TLS** | Exposed / multi-tenant network | Per-user PBKDF2-hashed passwords + TLS | Eavesdropping and unauthenticated access | Misconfigured client credentials |
 
-> [!NOTE]
-> **TLS and ACL are complementary, not alternatives.** TLS encrypts the wire and gates connection access. ACL determines what commands the connection is permitted to execute.
+Off loopback, `Build()` refuses to start without either a password/user list or an explicit
+`WithoutAuthentication()` — the bind-address rule (C6.1). TLS is always available and never
+required; without it a password crosses the wire in clear text (C6.4).
 
-### Shipped ACL Default (`config/users.acl`)
+### One shared password
 
-Highway ships with a minimal, least-privilege default configuration for trusted networks:
-
-```acl
-# config/users.acl
-user default on nopass ~* -@all +@connection +ping +subscribe +unsubscribe +get +set +del +expire +scan +hw.call +hw.reply +hw.dequeue +hw.ack +hw.publish +hw.subscribe +hw.unsubscribe +hw.heartbeat +hw.discover +hw.stats +hw.replay +hw.dlq +hw.qsend +hw.qclaim +hw.qack +hw.fail +hw.job +hw.touch +@custom
-```
-
-This configuration:
-- Operates without passwords (`nopass`) on trusted networks.
-- Grants access to all 18 `HW.*` protocol commands.
-- Grants `PING`, pub/sub doorbells (`SUBSCRIBE`, `UNSUBSCRIBE`), cache commands (`GET`, `SET`, `DEL`, `EXPIRE`), and startup check (`SCAN`).
-- Explicitly refuses destructive and administrative commands (`FLUSHALL`, `CONFIG`, `KEYS`, `SHUTDOWN`).
-
-### Handling `NOPERM` Errors
-
-If a client attempts to execute a command not in the allowlist (for example, `FLUSHALL` or `CONFIG GET *`), the broker refuses the command and returns a `NOPERM` error:
-
-```
-(error) NOPERM this user has no permissions to run the 'flushall' command
-```
-
-If an application requires additional commands, edit [`config/users.acl`](file:///c:/Software/ai/highway/config/users.acl) and reload the server.
-
-### Connecting with Named ACL Users
-
-For multi-tenant or password-authenticated deployments, define named users in `users.acl`:
-
-```acl
-user default on >admin-secret ~* +@all
-user dev-app on >dev-secret ~* -@all +@connection +ping +subscribe +unsubscribe +get +set +del +expire +scan +@custom
-```
-
-And configure credentials in client options:
+The common case is one password an administrator sets on the broker and gives to the team:
 
 ```csharp
+// server
+var server = new HighwayServerBuilder().WithPort(6500).WithPassword("s3cret").Build();
+
+// client
+builder.Services.AddHighway(o =>
+{
+    o.NodeName = "my-service";
+    o.Server   = "127.0.0.1:6500";
+    o.Password = "s3cret";           // sent to the default user
+});
+```
+
+Clients may send the password alone or pair it with the username `default`; both work.
+
+### Named users (hashed)
+
+For multi-tenant or per-application credentials, populate the server's user list with
+**PBKDF2-hashed** passwords (never plaintext) and have each client send its name and password:
+
+```csharp
+// server — each user carries a PBKDF2 hash string minted with the documented recipe
+var server = new HighwayServerBuilder()
+    .WithPort(6500)
+    .WithOptions(o =>
+    {
+        o.Authentication.Users.Add(new HighwayUser("dev-app", "PBKDF2$...$...$..."));
+    })
+    .Build();
+
+// client
 builder.Services.AddHighway(o =>
 {
     o.NodeName = "my-service";
     o.Server   = "127.0.0.1:6500";
     o.Username = "dev-app";
-    o.Password = "dev-secret";
+    o.Password = "dev-secret";       // verified against the user's hash, constant-time
 });
 ```
+
+### `NOAUTH` / `WRONGPASS` errors
+
+A connection that omits required credentials is refused with `NOAUTH`; a wrong password with
+`WRONGPASS`. Both map to typed **permanent** exceptions on the client (distinct from a network
+failure), so a bad credential fails fast rather than retrying (C6.3).
 
 ---
 

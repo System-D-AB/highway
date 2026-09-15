@@ -4,6 +4,26 @@ This log records every standard soak and integration run executed against Highwa
 
 ---
 
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-da8e2740`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 132
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-e222d5ed`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 140
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
 ## Run `2026-09-15T13-28-31` — doorbells OFF
 
 - **Timestamp:** 2026-09-15 13:28:31 UTC

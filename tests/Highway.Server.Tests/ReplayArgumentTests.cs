@@ -1,5 +1,5 @@
 using FluentAssertions;
-using Highway.Server.Commands;
+using Highway.Server.Commands.Ported;
 using Xunit;
 
 namespace Highway.Server.Tests;
@@ -18,7 +18,7 @@ public class ReplayArgumentTests
     [InlineData("-30secs", 30)]
     public void RelativeSeconds(string raw, int seconds)
     {
-        HwReplayCommand.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
+        HwReplayTime.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
         result.Should().Be(Now.AddSeconds(-seconds));
     }
 
@@ -28,7 +28,7 @@ public class ReplayArgumentTests
     [InlineData("-5mins", 5)]
     public void RelativeMinutes(string raw, int minutes)
     {
-        HwReplayCommand.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
+        HwReplayTime.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
         result.Should().Be(Now.AddMinutes(-minutes));
     }
 
@@ -38,7 +38,7 @@ public class ReplayArgumentTests
     [InlineData("-2hrs", 2)]
     public void RelativeHours(string raw, int hours)
     {
-        HwReplayCommand.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
+        HwReplayTime.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
         result.Should().Be(Now.AddHours(-hours));
     }
 
@@ -48,14 +48,14 @@ public class ReplayArgumentTests
     [InlineData("-1days")]
     public void RelativeDays(string raw)
     {
-        HwReplayCommand.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
+        HwReplayTime.TryParseTimestamp(raw, Now, out var result).Should().BeTrue();
         result.Should().Be(Now.AddDays(-1));
     }
 
     [Fact]
     public void AbsoluteIso8601()
     {
-        HwReplayCommand.TryParseTimestamp("2026-08-07T11:30:00Z", Now, out var result).Should().BeTrue();
+        HwReplayTime.TryParseTimestamp("2026-08-07T11:30:00Z", Now, out var result).Should().BeTrue();
         result.UtcDateTime.Should().Be(new DateTime(2026, 8, 7, 11, 30, 0, DateTimeKind.Utc));
     }
 
@@ -68,5 +68,5 @@ public class ReplayArgumentTests
     [InlineData("-abc")]
     [InlineData("not-a-time")]
     public void RejectsMalformed(string raw)
-        => HwReplayCommand.TryParseTimestamp(raw, Now, out _).Should().BeFalse();
+        => HwReplayTime.TryParseTimestamp(raw, Now, out _).Should().BeFalse();
 }

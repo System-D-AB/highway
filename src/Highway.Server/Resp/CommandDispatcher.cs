@@ -57,6 +57,16 @@ internal sealed class CommandDispatcher
     public IReadOnlyCollection<string> ServedCommands => (IReadOnlyCollection<string>)_commands.Keys;
 
     /// <summary>
+    /// The registered command surface — every served <c>HW.*</c> name paired with its arity.
+    /// This is the authoritative registration table <c>ProtocolConformanceTests</c> checks against
+    /// the protocol doc's Command Index, in both directions (feature 041 re-pointed it here off the
+    /// deleted Garnet <c>CommandTable</c>). Static: arity is a property of the registry, not of any
+    /// running store.
+    /// </summary>
+    internal static IReadOnlyList<(string Name, int Arity)> RegisteredCommandSurface()
+        => [.. BuildRegistry().Select(kv => (kv.Key, kv.Value.Arity))];
+
+    /// <summary>
     /// The prefix of the one raw-key surface the server serves: the RPC reply slot. The client
     /// reads its reply with <c>GET hw:rep:{requestId}</c> and clears it with <c>DEL hw:rep:{requestId}</c>
     /// (see <c>HighwayConnection.GetReplySlotAsync</c>/<c>DeleteReplySlotAsync</c>) — the one place a

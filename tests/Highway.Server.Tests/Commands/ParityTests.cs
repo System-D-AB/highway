@@ -16,9 +16,9 @@ namespace Highway.Server.Tests.Commands;
 ///   <item><b>No engine type in a ported command</b> (037 R3.2 / Gate G1 extended to the
 ///         commands): the <c>Commands/Ported/</c> sources carry no <c>using Garnet</c>/
 ///         <c>using Tsavorite</c> directive and no <c>Garnet.</c>/<c>Tsavorite.</c> qualified
-///         reference in code — the port stands entirely on <see cref="IHighwayStore"/>. (The
-///         still-live Garnet command files under <c>Commands/</c> are 040/041's to remove;
-///         this scan is scoped to <c>Ported/</c>.)</item>
+///         reference in code — the port stands entirely on <see cref="IHighwayStore"/>. Since
+///         041 deleted the Garnet command layer, <c>GarnetRemovalGuardTests</c> sweeps the whole
+///         server assembly; this scan stays scoped to <c>Ported/</c> as the focused command check.)</item>
 ///   <item><b>The R4.1 behavior suite end-to-end on <see cref="InMemoryStore"/> with no
 ///         socket</b>: sweep, attempt counting, dead-lettering, promotion, jobs and byte
 ///         accounting all exercised through the real commands, one store, no transport.</item>

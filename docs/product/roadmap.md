@@ -730,8 +730,13 @@ the next feature starts.
 
 | Feature | Owns | Gate | Status |
 |---|---|---|---|
-| [038-storage-engine](../features/038-storage-engine/requirements.md) | Paper decisions (OD1/OD2, WAL sync, read-view), `IHighwayStore`, contract suite, InMemory + RocksDB stores, physical layout, crash proofs | **G1** | Specced |
-| [039-command-port](../features/039-command-port/requirements.md) | 23 `HW.*` commands onto the seam, mirror collapse, in-process command suites | — | Specced |
-| [040-resp-server](../features/040-resp-server/requirements.md) | Reader/writer, Kestrel + TLS (non-HTTP ALPN), handshake subset (OD3 verified here), auth (037 R11), doorbells, embedded test server | **G0** | Specced |
-| [041-garnet-removal](../features/041-garnet-removal/requirements.md) | Cache add-on removed; Garnet deleted; full suite, assurance rig ×2, C4.6 measured, constraints register amended | **G2 G3 G4** | Specced |
+| [038-storage-engine](../features/038-storage-engine/requirements.md) | Paper decisions (OD1/OD2, WAL sync, read-view), `IHighwayStore`, contract suite, InMemory + RocksDB stores, physical layout, crash proofs | **G1** | **Shipped** (2026-09-15) |
+| [039-command-port](../features/039-command-port/requirements.md) | 23 `HW.*` commands onto the seam, mirror collapse, in-process command suites | — | **Shipped** (2026-09-15) |
+| [040-resp-server](../features/040-resp-server/requirements.md) | Reader/writer, Kestrel + TLS (non-HTTP ALPN), handshake subset (OD3 verified here), auth (037 R11), doorbells, embedded test server | **G0** | **Shipped** (2026-09-15) |
+| [041-garnet-removal](../features/041-garnet-removal/requirements.md) | Cache add-on removed; Garnet deleted; full suite, assurance rig ×2, C4.6 measured, constraints register amended | **G2 G3 G4** | **Shipped** (2026-09-15) |
 | [042-replication](../features/042-replication/requirements.md) | Stage 2 (after 041): WAL-shipping replication — one primary + priority replicas, slots-with-cap, epoch fencing, two-timeout deadman, optional witness, **no elections**; CI failover harness. Closes O10 | — | Specced 2026-09-15 |
+
+> **2026-09-15 — the 037 train has landed (038→041).** The RocksDB engine, the command port, the
+> RESP server and the Garnet removal are all shipped: Garnet's package and submodule are gone, the
+> broker is RESP + RocksDB, gates G1–G4 held (full suite green, assurance rig ×2 passed, C4.6 met on
+> RocksDB — see `constraints.md`). 042 (replication) remains specced, not started.

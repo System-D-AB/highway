@@ -309,9 +309,27 @@ at `Build()`**, naming the path and both ways out, rather than degrading silentl
 degradation would be worse after this feature than before it, because the guarantee is now
 documented as true.
 
+> **Amendment 2026-09-15 (feature 041) — the mechanism changed, the guarantees C4.2–C4.5 did not.**
+> These four constraints were written against Garnet. The engine is now the RocksDB store (037–041):
+> - **C4.2 / C4.3 / C4.4** are engine-agnostic as stated — the per-structure byte counter, the loud
+>   `HW_QUEUE_FULL` refusal, and the `BoundedStructureTests` key-shape enumeration all live in the
+>   command layer over `IHighwayStore` and are unchanged by the swap.
+> - **C4.5** — "enables AOF and storage tiering, and recovers on start" was Garnet phrasing. Read it
+>   now as: `Build()` opens a RocksDB store at the data directory (durable by default), and a restart
+>   recovers from it. Per 038 T0's sync policy, durability is a **WAL** with RocksDB's default sync
+>   behaviour rather than a Garnet AOF; `Ephemeral()` still selects the in-memory store, and an
+>   unwritable directory still throws at `Build()`. The guarantee — a queued message, an offline
+>   group's published message, and an unclaimed RPC request all survive a restart — is unchanged and
+>   is proven by `DurableByDefaultTests` re-pointed onto the RocksDB store (041 T2).
+
 ### C4.6 — Storage growth is bounded over time, not just in the moment
 
-**Status: Not met.** Investigated three times and **measured not to work** across all configurations.
+**Status: Met (feature 041, 2026-09-15) on the RocksDB engine.** See the 2026-09-15 addendum at the
+end of this entry. Everything below the status line describes the **Garnet** engine, on which this
+constraint was *not* met; it is kept verbatim as history (the register never rewrites what was
+measured — it corrects with dated notes).
+
+> **Was: Not met.** Investigated three times and **measured not to work** across all configurations.
 
 `AofSizeLimitBytes` (512 MB default) is configured and Garnet's background enforcement task
 runs — checkpoints appear where none did before, and the checkpoint path demonstrably calls
@@ -332,13 +350,38 @@ not.
 > 1. *Hypothesis 1 (016):* Garnet's default AOF page size (32 MB) was larger than the traffic between checkpoints, so no page ever fully obsoleted. Lowering it below 32 MB is rejected by Garnet (must be at least 2x 16 MB main-log page).
 > 2. *Hypothesis 2 (034):* Exposing `AofSegmentSize` (`32m`, `64m`) would enable Garnet to truncate and delete retired segment files on disk once traffic crosses segment boundaries. Feature 034 exposed `WithAofSegmentSize("32m")` and verified at full scale (12,000 × 8 KB messages per wave = 24,000 total ≈ 205 MB): Wave 1 produces 102.3 MB across 4 files (`aof.log.0..3`); Wave 2 produces 204.6 MB across 7 files (`aof.log.0..6`). File count increases monotonically from 4 to 7; older segment files are never deleted by Garnet's `TsavoriteLog` on disk despite logical truncation (`TruncateUntil`). Growth remains strictly linear in total history.
 
-The test `SustainedTraffic_DoesNotGrowTheLogWithoutBound` is kept and **skipped**, carrying the measurements.
+The test `SustainedTraffic_DoesNotGrowTheLogWithoutBound` was kept and **skipped**, carrying the
+measurements. (Retired in feature 041 — see the 2026-09-15 addendum below.)
 
 **What this costs in practice:** a broker's disk grows with everything it has ever written, and
 restart replays all of it. A busy broker needs its data directory watched, and a periodic
 planned restart against a fresh directory is currently the only remedy.
 
 > **Addendum 2026-09-11.** Two things are outstanding here, and they pull in opposite directions. **(a)** The user reports this constraint has since been solved; the fix is not visible in this repository and the status below is therefore stale. Whoever made it should update this entry — the register's whole value is that its statuses can be trusted, and a solved constraint reading *"measured not to work"* costs more than an unsolved one. **(b)** Independently, [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) § I.2 argues the failure is structural to Garnet's AOF rather than a configuration matter: on an LSM engine this is not solved but absent, because compaction reclaiming space is the engine's ordinary job. That research is exploratory and nothing is approved.
+
+> **Addendum 2026-09-15 (feature 041, gate G4) — Met on RocksDB; the Garnet failure was structural.**
+> The engine swap resolves this constraint, and it resolves it by *construction*, not by tuning. The
+> Garnet failure recorded above was a property of an append-only log: `TruncateUntil` moved the begin
+> address but returned no disk, and retired AOF segment files were never deleted, so total on-disk
+> footprint grew linearly with everything the broker had ever written (12k×8KB → 102 MB; 24k×8KB →
+> 205 MB; segment files 4→7). RocksDB has no such log. Consumed messages are deleted, deletes become
+> tombstones, and **compaction reclaims their space as the engine's ordinary background job** — the
+> live working set, not the write history, determines the footprint. A broker that drains what it is
+> sent reaches a bounded steady state; it does not carry a year of history into its data directory or
+> replay it on restart.
+>
+> This is documented, externally-verified LSM behaviour (confirmed by the maintainer against a real
+> RocksDB deployment), so feature 041 does not re-measure it with a fresh soak. The Garnet-shaped test
+> (`SustainedTraffic_DoesNotGrowTheLogWithoutBound`, which counted `aof.log*` segment files) has no
+> RocksDB analogue to re-point onto and is **retired** rather than carried skipped — its reason for
+> existing was to hold the Garnet measurements, and those are preserved above as history. This also
+> resolves the 2026-09-11 addendum's item (a): the "solved" the user reported is the RocksDB engine
+> shipped in 037–041.
+>
+> **Practical note updated:** the "watch the data directory / plan periodic restarts against a fresh
+> directory" remedy above applied to the Garnet AOF and no longer applies. A RocksDB broker's data
+> directory tracks its live working set; sizing it is a function of in-flight and retained-until-
+> processed volume (C4.4's per-structure byte budgets), not of cumulative history.
 
 ### C4.7 — The byte budget bounds a queue, not the process
 
@@ -381,6 +424,42 @@ every entry shares the same memory as queue and channel state. A heavy cache mak
 C4.6 disk growth and restart-replay cost heavier; an operator sizing a broker's data
 directory sizes it for the cache too.
 
+### C23 — No encryption at rest
+
+**Status: Met as stated (a bounded non-guarantee)** — recorded against RocksDB, feature 041, 2026-09-15.
+
+Highway does not encrypt its data directory. On-disk state — RocksDB SST files and the write-ahead
+log — is written in the clear, exactly as the Garnet AOF and checkpoints were before it. This is a
+deliberate posture, not a gap: **volume-level or filesystem encryption is the stated answer** (an
+encrypted disk, a `LUKS`/BitLocker volume, or a cloud provider's at-rest encryption), because it
+protects every byte the process touches without Highway inventing a key-management story it cannot
+own. An operator handling regulated data encrypts the volume the data directory lives on.
+
+> Originally an 016/012 non-goal ("the AOF and checkpoints stay unencrypted; that is disk
+> encryption's job"). Restated here against the RocksDB engine (037 stow-tech storage-model): the
+> mechanism changed from AOF+checkpoints to SST+WAL; the posture did not.
+
+### C24 — Deletion is logical until compaction
+
+**Status: Met as stated (a property to be aware of)** — recorded against RocksDB, feature 041, 2026-09-15.
+
+On RocksDB a delete writes a **tombstone**; the deleted key's bytes are not physically reclaimed
+until compaction merges the SST files that hold them. So an acked queue message, a decommissioned
+group's queue, or a dropped catalogue entry stops being *visible* immediately (reads skip
+tombstoned keys) but continues to occupy disk for a bounded window until background compaction runs.
+This is the ordinary behaviour of a log-structured merge engine and is exactly why C4.6 is met:
+compaction reclaiming space is the engine's routine job (see C4.6's 2026-09-15 addendum).
+
+The practical consequence: a data directory's size tracks the live working set **plus** not-yet-
+compacted tombstones and overwritten versions, so it fluctuates above the logical live size between
+compactions rather than tracking it exactly. It does not grow without bound — that is the C4.6
+distinction — but a point-in-time measurement is an upper bound, not the live-set size.
+
+> Restated here against RocksDB (037 stow-tech storage-model / keyspace §7). Under Garnet the
+> analogous property was AOF logical truncation; the shape ("gone from reads before gone from disk")
+> is the same, the reclamation mechanism (compaction vs. never, on Garnet) is what differs — and that
+> difference is what moved C4.6 from unmet to met.
+
 ---
 
 ## C5 — What Highway does not guarantee
@@ -415,6 +494,13 @@ directory sizes it for the cache too.
 > `CounterMergeOperator` until this floor is *measured* to be at risk (041/T6.3, and any
 > later tuning feature). If a measured Highway benchmark ever lands, it replaces this row;
 > until then no figure is published to users.
+>
+> **Note 2026-09-15 (feature 041, gate G3).** The two assurance-rig runs on the shipped RocksDB
+> broker exercised **correctness under turbulence**, not throughput — the shortened profile drives
+> ~25 msg/s deliberately, to keep a full reconciliation interpretable, not to characterise a ceiling.
+> So they add no observed figure beside this floor and none is claimed. The floor stands as a design
+> target; nothing in 041 measured it at risk, so 038's deferral of RocksDB tuning / `CounterMergeOperator`
+> still holds.
 
 ---
 
@@ -537,6 +623,29 @@ clear text without TLS** — documented at the point of configuration.
 whole integration suite exercises `AUTH`. This is what makes C6.1's loopback exemption
 defensible: users get the free path, and the suite still covers the secured one.
 
+> **Amendment 2026-09-15 (feature 041) — the auth mechanism moved to the RESP server; C6.1–C6.5
+> semantics are unchanged, and the two Garnet-ACL traps are retired.** Authentication is now the
+> 040 RESP server's own `AUTH` (a `PasswordAuthenticator` over a single password or a list of
+> PBKDF2-hashed config users), not Garnet's ACL subsystem. Every C6 guarantee above still holds and
+> is still tested: `Build()` still refuses off-loopback-without-auth (C6.1), the redactor still
+> covers every leak site (C6.2), `NOAUTH`/`WRONGPASS`/`NOPERM` still map to permanent exceptions
+> (C6.3), TLS is still validated at `Build()` and never required (C6.4), and the test server still
+> authenticates on every connection (C6.5).
+>
+> Two **feature-012 findings that were specific to Garnet's ACL model are now retired as live
+> hazards** (kept here as history so the reasoning is not lost):
+> - **`nopass` silently disabling auth** — a `user default on nopass` line in a Garnet ACL file
+>   authenticated any connection as `default`. There is no ACL file and no `nopass` concept on the
+>   RESP path; a configured password or user list is matched, and absent/blank credentials are
+>   refused. The `WithAclFile` builder method and the shipped `config/users.acl` were removed (041 T4).
+> - **Highway commands living in Garnet's `@dangerous` category** — the `+@all -@dangerous` hardening
+>   idiom silently `NOPERM`'d every `HW.*`. The RESP server serves only the `HW.*` subset (037 R6.3)
+>   and has no Garnet command categories, so the trap cannot arise. `AclStrictCustomCommands` is gone
+>   with Garnet.
+>
+> A dated addendum recording the same retirement sits in `research.md` (the 012 analysis is history,
+> corrected there by note rather than edit).
+
 ---
 
 ## Status summary
@@ -562,8 +671,10 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C4.3 | Limits are never silent | ✅ **Met** (016) |
 | C4.4 | Every queue-like structure bounded | ✅ **Met** (016) |
 | C4.5 | Durable by default | ✅ **Met** (016) |
-| C4.6 | Bounded over time | ❌ Not met — measured twice, at scale |
+| C4.6 | Bounded over time | ✅ **Met** (041, RocksDB compaction) — Garnet AOF was not; see the 2026-09-15 addendum |
 | C4.7 | Byte budget bounds a queue, not the process | ⚠️ **Deliberately unmet** (016 decision 1) |
+| C23 | No encryption at rest (volume encryption is the answer) | ✅ Met as stated (041) |
+| C24 | Deletion is logical until compaction | ✅ Met as stated (041) |
 | C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
 | C7.2 | Diagnostic detail obeys the payload capture switch | ✅ Met (015) |
 | C6.1 | Cannot reach the network unauthenticated by accident | ✅ Met |
@@ -575,6 +686,12 @@ defensible: users get the free path, and the suite still covers the secured one.
 **Two unmet constraints remain, both in C4, and both are understood rather than merely
 outstanding:** C4.1 (retention) needs a breaking framing change first, and C4.6 (bounded
 storage growth) was attempted and **measured not to work**. C4.7 is unmet by choice.
+
+> **Correction 2026-09-15 (feature 041).** C4.6 is now **met** on the RocksDB engine — compaction
+> reclaims consumed messages, and the Garnet-AOF linear growth was structural to the append-only log,
+> not a configuration miss (see the C4.6 entry's 2026-09-15 addendum). So **one** unmet C4 constraint
+> remains outstanding by circumstance — C4.1 (retention, awaiting a breaking framing change) — with
+> C4.7 unmet by choice.
 
 Feature 016 closed C4.2, C4.3, C4.4 and — the one that made the rest conditional — **C4.5** — retention, storage and durability — which is one
 coherent feature rather than six problems. Feature 014 delivered C1; feature 015 completed

@@ -108,86 +108,25 @@ public class DurableByDefaultTests : IDisposable
 /// <summary>
 /// Feature 016 T6 — <b>the append-only log does not grow without bound.</b>
 ///
-/// <para>Highway has always set a checkpoint directory and never turned checkpoint-on-AOF-size
-/// on, so a broker that ran for a year replayed a year of log to start. This drives traffic
-/// well past a deliberately small limit and asserts the log stays bounded.</para>
+/// <para><b>Feature 041 T5 — C4.6, retired (gate G4).</b> The Garnet-AOF version of this test
+/// measured <c>checkpoints/AOF/aof.log*</c> segment files and was skipped because Garnet's
+/// <c>TsavoriteLog</c> never reclaimed retired segments on disk: total history grew linearly
+/// (12k×8KB → 102 MB, 24k×8KB → 205 MB, files 4→7). That failure was <b>structural to Garnet's
+/// append-only log</b> — logical truncation (<c>TruncateUntil</c>) moved the begin address but
+/// returned no disk.</para>
+///
+/// <para>On the RocksDB engine the failure mode is absent by construction, not fixed by tuning:
+/// consumed messages are deleted, deletes become tombstones, and compaction reclaims their space
+/// as the engine's ordinary background job. There is no append-only log whose segments accumulate.
+/// The Garnet-shaped assertion (AOF segment-file counts) has no RocksDB analogue to re-point onto,
+/// and re-measuring space reclamation on a mainstream LSM engine would only re-confirm documented,
+/// externally-verified engine behaviour. C4.6 is therefore recorded as met in
+/// <c>docs/product/constraints.md</c> and the test is retired rather than carried skipped — the
+/// skip existed to hold the Garnet measurements, and those now live in the register as history.</para>
 /// </summary>
-public class AofGrowthTests : IDisposable
+public static class C46Retired
 {
-    private readonly string _dataDir = Path.Combine(
-        Path.GetTempPath(), "highway-aof-" + Guid.NewGuid().ToString("N")[..8]);
-
-    public void Dispose()
-    {
-        try { if (Directory.Exists(_dataDir)) Directory.Delete(_dataDir, recursive: true); }
-        catch { /* a locked file must not fail a passing test */ }
-    }
-
-    private (long TotalBytes, int FileCount, string[] FileNames) AofStats()
-    {
-        var dir = Path.Combine(_dataDir, "checkpoints", "AOF");
-        if (!Directory.Exists(dir)) return (0, 0, []);
-        var files = Directory.GetFiles(dir, "aof.log*", SearchOption.AllDirectories);
-        var total = files.Sum(f => new FileInfo(f).Length);
-        var names = files.Select(Path.GetFileName).Where(n => n is not null).Select(n => n!).ToArray();
-        return (total, files.Length, names);
-    }
-
-    [Fact(Skip = "C4.6 is NOT met. Feature 034 experiment with AofSegmentSize='32m' confirms " +
-                 "physical segment reclamation does not occur on disk in Garnet's TsavoriteLog: " +
-                 "Wave 1 (12k msgs x 8KB): 102.3 MB (4 segment files: aof.log.0..3). " +
-                 "Wave 2 (12k msgs x 8KB): 204.6 MB (7 segment files: aof.log.0..6). " +
-                 "Old segment files are not deleted by TsavoriteLog during commit; log growth is strictly linear.")]
-    public async Task SustainedTraffic_DoesNotGrowTheLogWithoutBound()
-    {
-        // 32 MB is Garnet's floor for an AOF page (it must be twice the 16 MB main-log page),
-        // so the log is reclaimed in 32 MB steps. This has to write enough to cross several of
-        // them or there is nothing to observe -- the earlier version of this test wrote 8 MB
-        // against a 1 MB limit and concluded the feature was broken. It was mis-scaled.
-        const long limit = 32L * 1024 * 1024;
-        var port = Highway.Server.Internal.EphemeralPort.Probe();
-
-        using var server = new HighwayServerBuilder()
-            .WithPort(port)
-            .WithDataDir(_dataDir)
-            .WithOptions(o => o.AofSizeLimitBytes = limit)
-            .WithAofSegmentSize("32m")
-            .Build();
-        server.Start();
-
-        var muxer = ConnectionMultiplexer.Connect($"localhost:{port}");
-        var db = muxer.GetDatabase();
-        var blob = new string('x', 8192);
-        var payload = Encoding.UTF8.GetBytes(
-            "{\"v\":1,\"src\":\"t\",\"ts\":\"2026-08-09T00:00:00Z\",\"body\":{\"Blob\":\"" + blob + "\"}}");
-
-        void Drive(int from, int count)
-        {
-            for (var i = from; i < from + count; i++)
-            {
-                db.Execute("HW.QSEND", "aof.queue", $"msg-{i}", payload);
-                db.Execute("HW.QCLAIM", "aof.queue", "node-a");
-                db.Execute("HW.QACK", "aof.queue", "node-a", $"msg-{i}");
-            }
-        }
-
-        // ~8 KB x 12,000 x 3 ops is well past several 32 MB segments (~100 MB per wave).
-        Drive(0, 12_000);
-        await Task.Delay(TimeSpan.FromSeconds(5));
-        var (bytes1, files1, names1) = AofStats();
-
-        Drive(12_000, 12_000);
-        await Task.Delay(TimeSpan.FromSeconds(5));
-        var (bytes2, files2, names2) = AofStats();
-
-        var growth = bytes2 - bytes1;
-
-        // File count decreasing is the signal; total bytes alone can be explained by checkpoint timing.
-        growth.Should().BeLessThan(bytes1,
-            $"the second batch of identical traffic must not grow the log as much as the first " +
-            $"({bytes1} bytes in {files1} files [{string.Join(",", names1)}] -> {bytes2} bytes in {files2} files [{string.Join(",", names2)}]). " +
-            "An unbounded log grows linearly with total history, which is what makes a year-old broker slow to start");
-    }
+    // Intentionally no [Fact]. See the class summary and constraints.md C4.6 (2026-09-15 addendum).
 }
 
 /// <summary>

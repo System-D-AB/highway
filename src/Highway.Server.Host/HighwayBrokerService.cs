@@ -8,7 +8,7 @@ namespace Highway.Server.Host;
 /// The broker as a hosted service (feature 031). Start builds and starts the server
 /// through the public builder; stop disposes it — the same graceful teardown
 /// <c>RunAsync</c> performs on cancellation: components first, then the recorder,
-/// then Garnet commits and closes the AOF.
+/// then the store is flushed and closed.
 /// </summary>
 internal sealed class HighwayBrokerService(HostConfiguration configuration, ILoggerFactory loggerFactory)
     : IHostedService

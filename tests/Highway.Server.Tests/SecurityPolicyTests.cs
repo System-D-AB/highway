@@ -123,22 +123,6 @@ public class SecurityPolicyTests
     }
 
     [Fact]
-    public void PasswordAndSettingsTogether_AreRejected()
-    {
-        var act = () => new HighwayServerBuilder()
-            .WithOptions(o =>
-            {
-                o.Authentication.Password = "s3cret";
-                o.Authentication.Settings =
-                    new Garnet.server.Auth.Settings.PasswordAuthenticationSettings("other");
-            })
-            .Build();
-
-        act.Should().Throw<InvalidOperationException>()
-            .WithMessage("*exactly one*", "the password would be silently ignored otherwise");
-    }
-
-    [Fact]
     public void WithoutAuthentication_PlusAPassword_IsRejected()
     {
         var act = () => new HighwayServerBuilder()

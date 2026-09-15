@@ -1,8 +1,6 @@
 using System.Text.RegularExpressions;
 using FluentAssertions;
 using Highway.Server;
-using Highway.Server.Internal;
-using Highway.Server.Observability;
 using StackExchange.Redis;
 using Xunit;
 
@@ -81,15 +79,7 @@ public class ProtocolConformanceTests
     }
 
     private static IReadOnlyList<(string Name, int Arity)> RegisteredCommands()
-    {
-        var opts = new HighwayServerOptions();
-        var garnetOpts = HighwayServerBuilder.BuildGarnetOptions(opts);
-        using var garnet = new HighwayGarnetServer(garnetOpts);
-        var doorbell = new DoorbellBridge(garnet);
-        using var recorder = new FlightRecorder(opts.Observability);
-
-        return [.. HighwayServer.CommandTable(opts, doorbell, recorder).Select(c => (c.Name, c.Arity))];
-    }
+        => Highway.Server.Resp.CommandDispatcher.RegisteredCommandSurface();
 
     // ──────────────────────────────────────────────────────────────────
     // The index itself

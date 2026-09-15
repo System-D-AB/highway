@@ -9,8 +9,7 @@ namespace Highway.Server.Host;
 /// <see cref="HighwayServerBuilder"/> calls (feature 031, design § Mapping onto the
 /// builder). This is the only place the configuration model meets the server API —
 /// the builder's existing validation (012's bind-address rule, certificate loading,
-/// the storage-format guard) runs unchanged, and the host never reaches past the
-/// builder into Garnet options.
+/// the storage-format guard) runs unchanged.
 /// </summary>
 internal static class HighwayServerApplicator
 {

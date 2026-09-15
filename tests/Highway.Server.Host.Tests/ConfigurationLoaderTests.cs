@@ -169,17 +169,6 @@ public class ConfigurationLoaderTests : IDisposable
     }
 
     [Fact]
-    public void PasswordAndAclFile_Together_AreRefused()
-    {
-        var path = WriteConfig("""{ "authentication": { "password": "p", "aclFile": "users.acl" } }""");
-
-        var act = () => ConfigurationLoader.Load(path, NoEnvironment);
-
-        act.Should().Throw<ConfigurationException>()
-           .WithMessage("*authentication.password*aclFile*");
-    }
-
-    [Fact]
     public void CertFileAndSubjectName_Together_AreRefused()
     {
         var path = WriteConfig("""{ "tls": { "certFile": "c.pfx", "certSubjectName": "CN=highway" } }""");

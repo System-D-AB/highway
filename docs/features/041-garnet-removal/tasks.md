@@ -37,7 +37,7 @@ Run 1 normal; run 2 `DoorbellsEnabled == false`. Turbulence (ungraceful kills) i
 both. Applications unmodified; 032 R6 corroboration re-pointed at RocksDB.
 **Done when:** I1–I5 green in both runs; both recorded in `assurance/RUNLOG.md`.
 
-### - [ ] T4 — Delete Garnet
+### - [x] T4 — Delete Garnet
 
 **Fulfills:** R1
 Remove packages, submodule, dead code paths; enable the API-surface test and the
@@ -45,7 +45,7 @@ copyright-header sweep permanently.
 **Done when:** R1.1–R1.4 all green; solution builds from a clean clone with no
 submodule init.
 
-### - [ ] T5 — Measure C4.6 *(gate G4)*
+### - [x] T5 — Measure C4.6 *(gate G4)*
 
 **Fulfills:** R4
 The recorded growth profile re-run per the design; unskip or retire
@@ -53,7 +53,7 @@ The recorded growth profile re-run per the design; unskip or retire
 **Done when:** the measurement is in `constraints.md` either way, with the profile
 and figures.
 
-### - [ ] T6 — Make the register and the product docs true
+### - [x] T6 — Make the register and the product docs true
 
 **Fulfills:** R5
 C4.2–C4.6, C5 (OD1 number ± observed), C6.x, C23, C24 amendments; 012 findings

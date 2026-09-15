@@ -19,24 +19,26 @@ public class HighwayServerBuilderTests
     // -------------------------------------------------------------------------
 
     [Fact]
-    public void BuildGarnetOptions_DefaultsToLoopback()
+    public void Build_DefaultsToLoopback()
     {
-        var garnet = HighwayServerBuilder.BuildGarnetOptions(new HighwayServerOptions());
+        // Secure by default: with nothing configured the broker binds loopback on 6500.
+        using var server = new HighwayServerBuilder().Ephemeral().Build();
 
-        garnet.EndPoints.Should().ContainSingle();
-        var ep = (IPEndPoint)garnet.EndPoints[0];
-        ep.Address.Should().Be(IPAddress.Loopback, "secure by default");
-        ep.Port.Should().Be(6500);
+        server.Endpoint.Should().Be($"{IPAddress.Loopback}:6500");
     }
 
     [Fact]
-    public void BuildGarnetOptions_BindAddressMapsThrough()
+    public void Build_BindAddressMapsThrough()
     {
-        var opts = new HighwayServerOptions { BindAddress = IPAddress.Any };
+        using var server = new HighwayServerBuilder()
+            .WithBindAddress(IPAddress.Any)
+            .WithPort(6595)
+            // Off loopback the bind-address rule (012) requires authentication; give it one so
+            // Build() reaches the endpoint assertion rather than SecurityPolicy.Enforce.
+            .WithPassword("s3cret")
+            .Ephemeral().Build();
 
-        var garnet = HighwayServerBuilder.BuildGarnetOptions(opts);
-
-        ((IPEndPoint)garnet.EndPoints[0]).Address.Should().Be(IPAddress.Any);
+        server.Endpoint.Should().Be($"{IPAddress.Any}:6595");
     }
 
     [Fact]

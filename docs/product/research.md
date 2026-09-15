@@ -870,3 +870,48 @@ their own status lines.
   Could Garnet carry a YesSQL-style document store for .NET (a sibling project, Marten ↔
   Wolverine analogy with Highway playing Wolverine)? Verdict: feasible, ~4–6 months to v1,
   5–10 GB workable if documents live in the disk-tiered main store and indexes stay in RAM.
+
+---
+
+# Part 6 — Addendum: Garnet removed, RocksDB is the engine (2026-09-15, feature 041)
+
+This addendum corrects the parts of the analysis above that reasoned about Garnet, in the house
+way: the original text is left standing as the record of what was believed, and this note says what
+changed. Nothing above is edited.
+
+Features 037–041 replaced the Garnet engine with a purpose-built stack: the 038 RocksDB store behind
+`IHighwayStore`, the 039 command port, and the 040 Kestrel RESP server. Feature 041 deleted Garnet
+entirely — the `Microsoft.Garnet` package, the `libs/garnet` submodule, and every Garnet-hosted code
+path. The wire protocol (RESP, `HW.*`) and the client are unchanged; only the broker's internals
+swapped. For what the shipped system guarantees, [`constraints.md`](constraints.md) remains the
+authority.
+
+## The Part 5 authentication traps are retired as live hazards
+
+Part 5 recorded three findings from feature 012's spikes against **Garnet's** authentication surface.
+Two of them were traps that existed only because Garnet's ACL subsystem was in the path; with Garnet
+gone they cannot occur, and they are retired as live hazards (kept above as history so the reasoning
+survives):
+
+- **The `@dangerous` category trap** — `+@all -@dangerous` silently `NOPERM`'d every `HW.*` command.
+  The RESP server has no Garnet command categories and serves only the `HW.*` subset (037 R6.3); the
+  idiom has nothing to act on.
+- **The `nopass` total-bypass trap** — a `user default on nopass` ACL line authenticated any
+  connection as the `+@all` default user. There is no ACL file and no `nopass` concept on the RESP
+  path. Authentication is the RESP server's own `AUTH` against a single password or a list of
+  PBKDF2-hashed config users; absent or blank credentials are refused. `WithAclFile`, the shipped
+  `config/users.acl`, and `AclStrictCustomCommands` were removed in 041 T4.
+
+The third finding (per-name ACL rules are possible but were descoped for the one-shared-credential
+model) is moot for the same reason — there is no ACL file to write rules in. The mirror retirement in
+`constraints.md` is the C6 section's 2026-09-15 amendment.
+
+## The C4.6 storage-growth question is resolved by the engine, not by tuning
+
+Part 3 and the C4.6 investigations treated bounded storage growth as an open problem measured "not
+to work" on Garnet, because Garnet's append-only log truncated logically (`TruncateUntil`) but never
+returned disk. On the RocksDB engine this is not solved so much as **absent**: consumed messages are
+deleted, deletes become tombstones, and compaction reclaims their space as the engine's ordinary job
+(C24). The full reasoning and the retirement of the Garnet-shaped test are in `constraints.md` C4.6's
+2026-09-15 addendum. The exploratory `research/2026-09-11-rocksdb-http-and-replication.md` § I.2 that
+first argued this structurally is thereby borne out.

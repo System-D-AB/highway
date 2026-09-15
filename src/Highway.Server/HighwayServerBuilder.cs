@@ -1,8 +1,5 @@
 using System.Globalization;
 using System.Net;
-using Garnet.server;
-using Garnet.server.Auth.Settings;
-using Garnet.server.TLS;
 using Highway.Server.Internal;
 using Microsoft.Extensions.Logging;
 
@@ -10,7 +7,7 @@ namespace Highway.Server;
 
 /// <summary>
 /// Fluent builder for configuring and constructing a <see cref="IHighwayServer"/>
-/// (a Highway Garnet server with all HW.* commands registered).
+/// (the RESP + RocksDB Highway broker with all HW.* commands registered).
 /// </summary>
 public sealed class HighwayServerBuilder
 {
@@ -177,11 +174,10 @@ public sealed class HighwayServerBuilder
     /// the broker and gives it to the team, who set it on their clients. There is no
     /// configuration file, no user directory, and nothing to generate.</para>
     ///
-    /// <para><b>The username is Garnet's <c>default</c>.</b> Without an ACL configuration
-    /// file Garnet supports exactly one user, so this method promises a password rather
-    /// than a username directory. Clients may send the password alone or pair it with the
-    /// username <c>default</c>; both work, and anything else is refused. Use
-    /// <see cref="WithAuthentication(IAuthenticationSettings)"/> if you need named users.</para>
+    /// <para>This promises a password rather than a username directory. Clients may send the
+    /// password alone or pair it with the username <c>default</c>; both work, and anything else
+    /// is refused. For named users, populate <see cref="Security.AuthenticationOptions.Users"/>
+    /// through <see cref="WithOptions"/>.</para>
     ///
     /// <para><b>Not required on loopback.</b> A server left on the default bind address
     /// runs happily without this — see <see cref="WithBindAddress(IPAddress)"/> for the
@@ -198,37 +194,6 @@ public sealed class HighwayServerBuilder
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(password);
         _opts.Authentication.Password = password;
-        return this;
-    }
-
-    /// <summary>
-    /// Escape hatch: uses <paramref name="settings"/> verbatim instead of anything
-    /// Highway would construct. ACL configuration files, named users, per-command rules
-    /// and Entra ID are all reachable this way.
-    ///
-    /// <para>Read <see cref="Security.AuthenticationOptions.Settings"/> before using this
-    /// — it documents two measured traps (<c>nopass</c> silently disabling
-    /// authentication entirely, and Highway's commands living in Garnet's
-    /// <c>@dangerous</c> category) that are easy to walk into and hard to notice.</para>
-    /// </summary>
-    public HighwayServerBuilder WithAuthentication(IAuthenticationSettings settings)
-    {
-        ArgumentNullException.ThrowIfNull(settings);
-        _opts.Authentication.Settings = settings;
-        return this;
-    }
-
-    /// <summary>
-    /// Configures the server to authenticate using an ACL configuration file.
-    /// </summary>
-    public HighwayServerBuilder WithAclFile(string aclFilePath)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(aclFilePath);
-        var fullPath = Path.GetFullPath(aclFilePath);
-        if (!File.Exists(fullPath))
-            throw new FileNotFoundException($"ACL configuration file '{fullPath}' does not exist.", fullPath);
-
-        _opts.Authentication.Settings = new Garnet.server.Auth.Settings.AclAuthenticationPasswordSettings(aclConfigurationFile: fullPath);
         return this;
     }
 
@@ -270,28 +235,13 @@ public sealed class HighwayServerBuilder
 
     /// <summary>
     /// Configures TLS in full — certificate store subject names, mTLS, revocation checking
-    /// and certificate refresh.
-    ///
-    /// <para>Read <see cref="Security.TlsOptions.Settings"/> before relying on this in
-    /// production: it quotes Garnet's own warning that the TLS class Highway wraps is
-    /// sample code not intended for production without review, and offers the escape
-    /// hatch.</para>
+    /// and certificate refresh. The certificate is loaded and served by the RESP server's
+    /// Kestrel endpoint (see <see cref="Security.TlsOptions.LoadServerCertificate"/>).
     /// </summary>
     public HighwayServerBuilder WithTls(Action<Security.TlsOptions> configure)
     {
         ArgumentNullException.ThrowIfNull(configure);
         configure(_opts.Tls);
-        return this;
-    }
-
-    /// <summary>
-    /// Escape hatch: uses <paramref name="settings"/> verbatim instead of the wrapper over
-    /// Garnet's sample TLS implementation.
-    /// </summary>
-    public HighwayServerBuilder WithTls(IGarnetTlsOptions settings)
-    {
-        ArgumentNullException.ThrowIfNull(settings);
-        _opts.Tls.Settings = settings;
         return this;
     }
 
@@ -349,9 +299,9 @@ public sealed class HighwayServerBuilder
             "Building Highway server: bind={BindAddress}, port={Port}, dataDir={DataDir}, lease={Lease}",
             _opts.BindAddress, _opts.Port, _opts.DataDir ?? "(memory-only)", _opts.Lease);
 
-        // Feature 041 T1 — the flip: the broker runs the 040 RESP server over the 038 RocksDB
-        // store, not Garnet. The Garnet construction path (BuildGarnetOptions / HighwayGarnetServer
-        // / HighwayServer) stays compiled but off the running path until 041 T4 deletes it.
+        // The broker runs the 040 RESP server over the 038 RocksDB store (feature 041 — Garnet
+        // deleted). The certificate is loaded here so a missing file or wrong password is a
+        // startup error naming the file, not an opaque handshake failure later.
         var certificate = _opts.Tls.LoadServerCertificate();
         return new RespHighwayServer(_opts, _loggerFactory, certificate, _componentFactories);
     }
@@ -385,10 +335,6 @@ public sealed class HighwayServerBuilder
                 "mistaken for a current one and delivered as a corrupt payload.");
     }
 
-    /// <summary>
-    /// Maps <see cref="HighwayServerOptions"/> to <see cref="GarnetServerOptions"/>
-    /// per the design table.
-    /// </summary>
     /// <summary>
     /// Chooses the data directory when the caller did not (016 R1, decision 4).
     ///
@@ -468,6 +414,13 @@ public sealed class HighwayServerBuilder
     ///
     /// <para>Feature 016 made this everyone's problem by turning durability on by default, so
     /// the next command-set change would silently empty every existing broker.</para>
+    ///
+    /// <para><b>Feature 041 note.</b> The engine is now RocksDB, not Garnet, so the positional
+    /// stored-procedure-id hazard described above no longer exists on new data. This guard is kept
+    /// because it still earns its place: a directory carrying Garnet-era <c>checkpoints/</c> or
+    /// <c>log/</c> subdirectories, or a <c>highway.format</c> stamp below the current version, is a
+    /// pre-041 broker's directory that this build must refuse rather than hand to RocksDB recovery.
+    /// The stamp remains the forward-compatible mechanism for any future format change.</para>
     /// </summary>
     private static void VerifyStorageFormat(string dir)
     {
@@ -510,66 +463,4 @@ public sealed class HighwayServerBuilder
         => Path.Combine(
             AppContext.BaseDirectory,
             port == HighwayServerOptions.DefaultPort ? "highway-data" : $"highway-data-{port}");
-
-    internal static GarnetServerOptions BuildGarnetOptions(HighwayServerOptions opts)
-    {
-        var garnet = new GarnetServerOptions
-        {
-            // Endpoint — configured bind address (default loopback) on the configured port
-            EndPoints = [new IPEndPoint(opts.BindAddress, opts.Port)],
-
-            // PubSub must stay enabled for doorbells
-            // DisablePubSub is not a field on GarnetServerOptions; it stays at its default (false)
-
-            // Suppress cluster in v1
-            EnableCluster = false,
-
-            // Authentication (feature 012). Null when this server runs open, which is
-            // Garnet's own default and means every connection is accepted.
-            AuthSettings = opts.Authentication.CreateSettings(),
-
-            // Transport security (feature 012). Null when TLS is not configured, which is
-            // the default and is Garnet's own default too.
-            TlsOptions = opts.Tls.CreateTlsOptions(null),
-
-            // In Highway, custom commands (HW.*) are registered programmatically during startup
-            // rather than via external C# binary modules, so strict custom command ACL validation
-            // must be disabled to allow explicit HW.* custom command rules in users.acl.
-            AclStrictCustomCommands = false,
-        };
-
-        if (opts.DataDir is not null)
-        {
-            // Durable mode: AOF + storage tier + recovery.
-            // Since 016 this is the DEFAULT path — see ResolveDataDirectory.
-            var dir = Path.GetFullPath(opts.DataDir);
-
-            garnet.EnableStorageTier = true;
-            garnet.LogDir            = Path.Combine(dir, "log");
-            garnet.CheckpointDir     = Path.Combine(dir, "checkpoints");
-            garnet.EnableAOF         = true;
-            garnet.CommitFrequencyMs = 0;   // commit per op
-            garnet.Recover           = true;
-
-            // Bound the log (016 R6). Without this Garnet never checkpoints on size, so the
-            // AOF grows without limit and a long-lived broker replays its whole history on
-            // start. Truncation is the broker's own housekeeping — it refuses nothing.
-            if (opts.AofSizeLimitBytes > 0)
-                garnet.AofSizeLimit = opts.AofSizeLimitBytes.ToString(CultureInfo.InvariantCulture);
-
-            if (!string.IsNullOrWhiteSpace(opts.AofSegmentSize))
-                garnet.AofSegmentSize = opts.AofSegmentSize;
-
-            if (opts.WaitForCommit)
-                garnet.WaitForCommit = true;
-        }
-        else
-        {
-            // Memory-only mode: no AOF, no storage tier
-            garnet.EnableStorageTier = false;
-            garnet.EnableAOF         = false;
-        }
-
-        return garnet;
-    }
 }

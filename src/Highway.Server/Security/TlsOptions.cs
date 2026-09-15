@@ -1,6 +1,4 @@
 using System.Security.Cryptography.X509Certificates;
-using Garnet.server.TLS;
-using Microsoft.Extensions.Logging;
 
 namespace Highway.Server.Security;
 
@@ -27,7 +25,7 @@ public sealed class TlsOptions
 
     /// <summary>
     /// Subject name of a certificate in the machine store. Mutually exclusive with
-    /// <see cref="CertFileName"/> — Garnet accepts exactly one.
+    /// <see cref="CertFileName"/> — exactly one may be set.
     /// </summary>
     public string? CertSubjectName { get; set; }
 
@@ -49,23 +47,8 @@ public sealed class TlsOptions
     /// <summary>Whether this certificate is an ephemeral self-signed test certificate.</summary>
     public bool IsEphemeral { get; set; }
 
-    /// <summary>
-    /// Escape hatch: a fully-formed Garnet TLS configuration, used verbatim.
-    ///
-    /// <para>Garnet's own <see cref="GarnetTlsOptions"/> carries this warning in its source,
-    /// and Highway would be endorsing it by silence if it did not repeat it:</para>
-    ///
-    /// <para><i>"NOTE: Do not use in production without verifying the implementation
-    /// yourself. This class can be replaced with your own implementation when instantiating
-    /// GarnetServerOptions."</i></para>
-    ///
-    /// <para>Everything above is a convenience wrapper over that sample class. If your
-    /// deployment needs verified TLS behaviour, supply your own implementation here.</para>
-    /// </summary>
-    public IGarnetTlsOptions? Settings { get; set; }
-
     internal bool IsConfigured =>
-        Settings is not null || CertFileName is not null || CertSubjectName is not null;
+        CertFileName is not null || CertSubjectName is not null;
 
     /// <summary>
     /// Validates at build time, naming the offending value. Loading the certificate here
@@ -74,12 +57,11 @@ public sealed class TlsOptions
     /// </summary>
     public void Validate()
     {
-        if (Settings is not null) return;
         if (!IsConfigured) return;
 
         if (CertFileName is not null && CertSubjectName is not null)
             throw new InvalidOperationException(
-                "TlsOptions specifies both CertFileName and CertSubjectName. Garnet accepts exactly one.");
+                "TlsOptions specifies both CertFileName and CertSubjectName. Exactly one may be set.");
 
         if (CertFileName is null) return;
 
@@ -101,9 +83,8 @@ public sealed class TlsOptions
 
     /// <summary>
     /// Loads the server certificate for the RESP transport (feature 041), or null when TLS is not
-    /// configured. Garnet-free: a PFX file via <see cref="X509CertificateLoader"/>, or a machine-store
-    /// lookup by subject name. This is the cert <see cref="Resp.RespServer"/>'s Kestrel endpoint uses;
-    /// the Garnet <see cref="CreateTlsOptions"/> path is retired with Garnet.
+    /// configured: a PFX file via <see cref="X509CertificateLoader"/>, or a machine-store lookup by
+    /// subject name. This is the cert <see cref="Resp.RespServer"/>'s Kestrel endpoint uses.
     /// </summary>
     internal X509Certificate2? LoadServerCertificate()
     {
@@ -122,26 +103,5 @@ public sealed class TlsOptions
         }
 
         return null;
-    }
-
-    internal IGarnetTlsOptions? CreateTlsOptions(ILogger? logger)
-    {
-        if (Settings is not null) return Settings;
-        if (!IsConfigured) return null;
-
-        // enableCluster: false and clientTargetHost: null — Highway does not use cluster
-        // mode, and the client-side options that constructor would otherwise build are for
-        // cluster gossip, not for Highway clients.
-        return new GarnetTlsOptions(
-            certFileName: CertFileName,
-            certPassword: CertPassword,
-            clientCertificateRequired: ClientCertificateRequired,
-            certificateRevocationCheckMode: CertificateRevocationCheckMode,
-            issuerCertificatePath: IssuerCertificatePath ?? string.Empty,
-            certSubjectName: CertSubjectName,
-            certificateRefreshFrequency: CertificateRefreshFrequencySeconds,
-            enableCluster: false,
-            clientTargetHost: null,
-            logger: logger);
     }
 }

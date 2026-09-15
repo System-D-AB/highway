@@ -9,8 +9,7 @@ namespace Highway.Server.Host.Configuration;
 /// Every leaf key of the configuration has one variable: <c>HIGHWAY_</c> plus the
 /// dotted path with dots as underscores, upper-cased — e.g.
 /// <c>server.maxDeliveryAttempts</c> → <c>HIGHWAY_SERVER_MAXDELIVERYATTEMPTS</c>.
-/// Two short aliases exist for the values operators actually type:
-/// <c>HIGHWAY_PASSWORD</c> and <c>HIGHWAY_ACL_FILE</c>.
+/// A short alias exists for the value operators actually type: <c>HIGHWAY_PASSWORD</c>.
 ///
 /// <para>An unknown <c>HIGHWAY_*</c> variable is ignored, not an error: the process
 /// environment is shared space (the samples use their own <c>HIGHWAY_*</c> names), and
@@ -26,7 +25,6 @@ internal static class EnvironmentOverrides
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["HIGHWAY_PASSWORD"] = "authentication.password",
-            ["HIGHWAY_ACL_FILE"] = "authentication.aclFile",
         };
 
     /// <summary>Leaf path → the property it sets, discovered once by reflection.</summary>

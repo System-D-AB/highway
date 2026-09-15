@@ -23,10 +23,10 @@ a managed service, no SDK-shaped abstractions leaking into your domain. You writ
 POCOs — a class per message — and Highway builds the system around them: service discovery,
 load balancing, durable delivery, retries, timeouts and serialization.
 
-The broker is based on Microsoft Research's [Garnet](https://github.com/microsoft/garnet) so every call is a
-round trip through an in-memory store rather than a hop into somebody else's cloud. It needs
-the **.NET 10 SDK** and nothing else — no Docker, no external infrastructure, not even for
-the integration tests.
+The broker is a high-performance, low-footprint .NET 10 server (and an embedded in-process
+server for tests), so every call is a round trip through a local store rather than a hop into
+somebody else's cloud. It needs the **.NET 10 SDK** and nothing else — no Docker, no external
+infrastructure, not even for the integration tests.
 
 > **Pre-1.0.** The core is complete and in use, and the packages are on nuget.org as
 > `1.0.0-preview.1`. The broker distribution and two storage guarantees are still
@@ -196,8 +196,6 @@ cd highway
 dotnet build Highway.slnx
 ```
 
-*(Optional: pass `-p:UseGarnetSource=true` if you want to build against the `libs/garnet` submodule source for local debugging. In that mode, ensure submodules are initialized with `git submodule update --init --recursive`.)*
-
 Run the three sample processes, one per terminal:
 
 ```bash
@@ -264,7 +262,7 @@ dotnet build Highway.slnx --no-incremental   # expected: zero warnings
 dotnet test Highway.slnx                     # ~7 minutes
 ```
 
-Integration tests run against a real embedded Garnet — no Docker, no external infrastructure.
+Integration tests run against a real embedded broker in-process — no Docker, no external infrastructure.
 
 ---
 
@@ -272,6 +270,9 @@ Integration tests run against a real embedded Garnet — no Docker, no external 
 
 [MIT](LICENSE).
 
-Highway builds against [Microsoft Garnet](https://github.com/microsoft/garnet) (MIT), included
-unmodified as a git submodule pinned to a specific commit, and uses
-[StackExchange.Redis](https://github.com/StackExchange/StackExchange.Redis) (MIT).
+Highway's broker uses [RocksDB](https://github.com/facebook/rocksdb) for storage (via the
+`RocksDB` .NET binding) and [StackExchange.Redis](https://github.com/StackExchange/StackExchange.Redis)
+(MIT) as the RESP client. One RESP output-formatter source file is vendored from
+[Microsoft Garnet](https://github.com/microsoft/garnet) (MIT) with its copyright header intact —
+see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Garnet itself is no longer a dependency
+(removed in feature 041).

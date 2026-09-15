@@ -135,9 +135,9 @@ public class SchemaCompletenessTests
         ["Password"] = "authentication.password",
     };
 
-    // Takes a live Garnet IAuthenticationSettings — not file-expressible. The file's
-    // authentication.aclFile reaches the common named-users case instead.
-    private static readonly string[] AuthenticationFileExceptions = ["Settings"];
+    // Named users (the Users list) are minted with hashed passwords in code, not expressed as a
+    // scalar highway.json leaf, so they are not part of the schema-completeness surface.
+    private static readonly string[] AuthenticationFileExceptions = [];
 
     [Fact]
     public void EveryAuthenticationOption_IsReachableFromTheSchema_OrRecordedAsAnException()
@@ -152,9 +152,6 @@ public class SchemaCompletenessTests
 
             EnvironmentOverrides.LeafPaths.Should().Contain(AuthenticationLeaves[property.Name]);
         }
-
-        EnvironmentOverrides.LeafPaths.Should().Contain("authentication.aclFile",
-            "named users stay reachable from the file via Garnet's ACL format");
     }
 
     private static readonly Dictionary<string, string> TlsLeaves = new()
@@ -168,9 +165,8 @@ public class SchemaCompletenessTests
         ["CertificateRefreshFrequencySeconds"] = "tls.refreshFrequencySeconds",
     };
 
-    // Takes a live IGarnetTlsOptions — not file-expressible; the escape hatch stays
-    // with the builder, documented. IsEphemeral is an in-memory test flag.
-    private static readonly string[] TlsFileExceptions = ["Settings", "IsEphemeral"];
+    // IsEphemeral is an in-memory test flag, not a file-expressible option.
+    private static readonly string[] TlsFileExceptions = ["IsEphemeral"];
 
     [Fact]
     public void EveryTlsOption_IsReachableFromTheSchema_OrRecordedAsAnException()
