@@ -39,7 +39,7 @@ Highway is delivered through two distinct channels:
 Install the client package:
 
 ```bash
-dotnet add package Highway.Client --prerelease
+dotnet add package Highway.Client
 ```
 
 Register Highway in any .NET application:
@@ -325,11 +325,12 @@ instances of a subscriber and each gets **its own copy** — unless they share a
 `SubscriptionGroup`, in which case they share that copy too. The verb decides
 the semantics; the subscription group decides who counts as *one* subscriber.
 
-> **Removed in feature 041 (2026-08-29):** an earlier version of Highway shipped a
-> distributed cache (`IDistributedCache` / `AddHighwayCache`) backed by the Garnet broker's
-> native `GET`/`SET`. It was removed with the RocksDB engine swap — RocksDB is a durable
-> log-structured store, not a cache substrate. Use a dedicated cache (e.g. `HybridCache` over
-> a Redis/Valkey `IDistributedCache`) instead.
+> **Distributed cache (broker-local).** Highway's original Garnet-backed cache was removed with
+> the Garnet engine in feature 041; feature 044 reintroduces one on a different footing. Opt in
+> with `AddHighwayCache()` and Highway registers an `IDistributedCache` — and a `HybridCache`
+> L2 — over a **broker-local, never-replicated** store, so caching needs no separate Redis. It is
+> cold after a failover and TTL-bounded: a cache, not a second source of truth. See
+> [constraints.md](constraints.md) C10.
 
 ---
 
@@ -374,7 +375,8 @@ domain key at the start of the handler.
 
 ## Running the Broker
 
-Highway.Server is the single broker process. Run it standalone:
+Highway.Server is the broker process. Run a single instance standalone (add standbys for
+[high availability](../../README.md#high-availability-via-replication)):
 
 ```csharp
 var server = new HighwayServerBuilder()
@@ -438,10 +440,10 @@ Highway supports TLS encryption on the wire between clients and the broker.
 | **Server Identity** | **Yes** | Client verifies server certificate subject/SAN and trust chain. |
 | **Client-Certificate Gate** | **Yes** (optional) | Server requires incoming connections to present a certificate from an accepted issuer. |
 | **Client/User Identity** | **No** | A client certificate authenticates the **connection**, never a **user**. |
-| **Per-Command Authorization** | **No** | Authorization is governed by `AUTH` and ACL profiles, not certificates. |
+| **Per-Command Authorization** | **No** | Access is all-or-nothing via `AUTH`; there is no per-command authorization or RBAC. |
 
 > [!IMPORTANT]
-> A client certificate authenticates the **connection**, never a user or principal. Garnet has no certificate-based authentication or user mapping mechanism. An authenticated TLS connection with no `AUTH` command executes as the `default` user.
+> A client certificate authenticates the **connection**, never a user or principal. Highway has no certificate-based authentication or user-mapping mechanism. An authenticated TLS connection with no `AUTH` command executes as the `default` user.
 
 ### Broker TLS Configuration
 
@@ -493,7 +495,7 @@ builder.Services.AddHighway(o =>
 
 ### Silent Degradations & Startup Warnings (D5)
 
-Garnet exhibits two weak TLS validation shapes that Highway detects and warns about on startup:
+Two TLS configurations leave client-certificate validation weak, and Highway detects and warns about each on startup:
 
 1. **`ClientCertificateRequired = false`**
    - *Effect:* The server's remote certificate validation callback returns `true` for every client certificate presented, and also when no client certificate is presented at all.
@@ -503,9 +505,10 @@ Garnet exhibits two weak TLS validation shapes that Highway detects and warns ab
    - *Warning emitted:* `TLS option ClientCertificateRequired is true but IssuerCertificatePath is not specified: certificate chain errors will be accepted and the issuer will not be validated.`
 
 > [!WARNING]
-> Garnet's authors document their issuer-validation routine with the caveat:
-> *"prototype code … validate for your requirements before using in production"*.
-> For production environments exposed beyond a trusted network, verify corporate CA requirements and deployment topography.
+> Highway's client-certificate validation is deliberately permissive by default (it accepts any
+> presented certificate unless you configure an issuer) — validate for your own requirements
+> before using in production. For environments exposed beyond a trusted network, verify corporate
+> CA requirements and deployment topography.
 
 ### Client/Server Setting Agreement & Mismatch Symptoms
 
