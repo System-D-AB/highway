@@ -15,7 +15,7 @@ namespace Highway.Server.Resp;
 /// not serve. Same DTOs, so <c>HighwayTestServer</c>'s hooks and the tests that call them are
 /// unchanged.
 /// </summary>
-internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions options) : IBrokerState
+internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions options, ObservedAddressRegistry? observed = null) : IBrokerState
 {
     public IReadOnlyList<(string Name, long Depth, long Bytes)> Queues()
     {
@@ -131,7 +131,9 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
         {
             var record = StoreInspection.RegistrationRecord(store, snap, id);
             if (record is null) continue;
-            nodes.Add(Observability.Catalogue.ReadNode(id, record, options.NodeExpiry));
+            var dto = Observability.Catalogue.ReadNode(id, record, options.NodeExpiry);
+            // 048: attach the observed peer address (from CLIENT SETNAME), or leave null → "not connected".
+            nodes.Add(observed is null ? dto : dto with { SeenFrom = observed.AddressOf(dto.Name) });
         }
         return nodes;
     }

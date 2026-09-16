@@ -93,7 +93,7 @@ public sealed class RespHighwayServer : IHighwayServer
 
         // Components (the dashboard) read broker state in-process from the store — never over a
         // self-connection, which the RESP server does not serve for raw commands.
-        var brokerState = new StoreBrokerState(_store, _opts);
+        var brokerState = new StoreBrokerState(_store, _opts, _server.ObservedAddresses);
         var context = new HighwayComponentContext(_opts, _server.Recorder, _loggerFactory, Endpoint, brokerState);
         _components = _componentFactories.Select(f => f(context)).ToArray();
         foreach (var component in _components)

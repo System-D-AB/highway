@@ -27,4 +27,7 @@ internal interface IRespServerHost
 
     /// <summary>Drops a connection from the registry on teardown.</summary>
     void RemoveSubscriber(string connectionId);
+
+    /// <summary>The node-name → observed-peer-address map (048), fed by <c>CLIENT SETNAME</c>.</summary>
+    ObservedAddressRegistry ObservedAddresses { get; }
 }

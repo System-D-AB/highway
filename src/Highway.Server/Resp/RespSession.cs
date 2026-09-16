@@ -22,17 +22,23 @@ internal sealed class RespSession
     private readonly IConnectionAuthenticator _auth;
     private readonly ISubscriptionSink _subscriptions;
     private readonly EndPoint? _remote;
+    private readonly string _connectionId;
+    private readonly ObservedAddressRegistry? _observed;
 
     public RespSession(
         CommandDispatcher dispatcher,
         IConnectionAuthenticator auth,
         ISubscriptionSink subscriptions,
-        EndPoint? remote)
+        EndPoint? remote,
+        string connectionId = "",
+        ObservedAddressRegistry? observed = null)
     {
         _dispatcher = dispatcher;
         _auth = auth;
         _subscriptions = subscriptions;
         _remote = remote;
+        _connectionId = connectionId;
+        _observed = observed;
         State = _auth.IsPreAuthorized(remote) ? ConnectionState.Authenticated : ConnectionState.Unauthenticated;
     }
 
@@ -87,6 +93,7 @@ internal sealed class RespSession
     {
         if (_kind == SessionKind.Client)
             _dispatcher.NoteClientSessionClosed();
+        _observed?.Remove(_connectionId);   // 048: the observed address is gone with the connection
         _kind = SessionKind.Peer; // idempotent teardown
     }
 
@@ -122,7 +129,7 @@ internal sealed class RespSession
             "HELLO" => HandleHello(frame),
             "ECHO" => HandleEcho(frame),
             "SELECT" => SessionResult.One(Simple("OK")),          // single logical DB; accept any index
-            "CLIENT" => SessionResult.One(Simple("OK")),          // SETNAME/SETINFO/etc — accept
+            "CLIENT" => HandleClient(frame),                     // SETNAME records the observed address (048); else accept
             "COMMAND" => SessionResult.One(EmptyArray()),         // no command catalogue; empty is valid
             "CONFIG" => HandleConfig(frame),
             "INFO" => HandleInfo(frame),
@@ -168,6 +175,22 @@ internal sealed class RespSession
         => frame.Count >= 2
             ? SessionResult.One(BulkOf(frame[1]))
             : SessionResult.One(Simple("PONG"));
+
+    /// <summary>
+    /// <c>CLIENT</c> subcommands are accepted; <c>CLIENT SETNAME &lt;node&gt;</c> additionally records
+    /// where the broker sees this connection coming from, for the dashboard "Seen from" join (048).
+    /// </summary>
+    private SessionResult HandleClient(IReadOnlyList<byte[]> frame)
+    {
+        if (_observed is not null && frame.Count >= 3
+            && Encoding.ASCII.GetString(frame[1]).Equals("SETNAME", StringComparison.OrdinalIgnoreCase))
+        {
+            var node = Encoding.UTF8.GetString(frame[2]);
+            if (_remote is not null && !string.IsNullOrWhiteSpace(node))
+                _observed.Record(_connectionId, node, _remote.ToString() ?? "");
+        }
+        return SessionResult.One(Simple("OK"));
+    }
 
     private SessionResult HandleEcho(IReadOnlyList<byte[]> frame)
         => frame.Count >= 2

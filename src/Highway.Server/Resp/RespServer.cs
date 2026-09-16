@@ -29,6 +29,7 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
 {
     private readonly WebApplication _app;
     private readonly SubscriptionRegistry _registry;
+    private readonly ObservedAddressRegistry _observed = new();
     private readonly Storage.Cache.IHighwayCacheStore? _cache;
     private readonly Storage.Cache.CacheSweeper? _cacheSweeper;
 
@@ -182,6 +183,9 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
 
     /// <summary>The doorbell the command runtime rings (also the subscription registry).</summary>
     public IDoorbell Doorbell => _registry;
+
+    /// <summary>The node-name → observed-peer-address map (048), for the dashboard "Seen from" join.</summary>
+    public ObservedAddressRegistry ObservedAddresses => _observed;
 
     public async ValueTask DisposeAsync()
     {

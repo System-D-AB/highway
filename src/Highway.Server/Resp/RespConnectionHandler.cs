@@ -37,7 +37,8 @@ internal sealed class RespConnectionHandler : ConnectionHandler
         // One session + one subscription registration per connection. The registry lets a
         // server-internal doorbell publish push a frame straight to this connection's output.
         var subscriber = _host.CreateSubscriber(connection.ConnectionId, output);
-        var session = new RespSession(_host.Dispatcher, _host.Authenticator, subscriber, connection.RemoteEndPoint);
+        var session = new RespSession(_host.Dispatcher, _host.Authenticator, subscriber, connection.RemoteEndPoint,
+            connection.ConnectionId, _host.ObservedAddresses);
 
         var closeToken = connection.ConnectionClosed;
 

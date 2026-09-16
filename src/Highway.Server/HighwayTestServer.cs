@@ -223,7 +223,7 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
     /// <summary>Reads the registered nodes and what each declared (022 / 040 T8).</summary>
     internal Task<IReadOnlyList<Observability.NodeDto>> ReadNodesAsync()
     {
-        var reader = new StoreBrokerState(_store, _opts);
+        var reader = new StoreBrokerState(_store, _opts, _server.ObservedAddresses);
         return Task.FromResult(reader.Nodes());
     }
 }
