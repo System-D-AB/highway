@@ -24,11 +24,11 @@ POCOs — a class per message — and Highway builds the system around them: ser
 load balancing, durable delivery, retries, timeouts and serialization.
 
 The broker is a high-performance, low-footprint .NET 10 server (and an embedded in-process
-server for tests), so every call is a round trip through a local store rather than a hop into
+server for development and tests), so every call is a round trip through a local store rather than a hop into
 somebody else's cloud. It needs the **.NET 10 SDK** and nothing else — no Docker, no external
 infrastructure, not even for the integration tests.
 
-> **2.0.** The broker now runs on a purpose-built stack — a RocksDB storage engine behind a
+> **2.0.** The broker now runs on a purpose-built stack — a solid embedded storage engine behind a
 > Highway-native RESP server (Garnet is gone) — with **replication and client-herd failover**,
 > and an opt-in broker-local cache. The packages ship on nuget.org as `2.0.0`. See
 > [Status](#status) and [Known limits](#known-limits).
@@ -231,7 +231,7 @@ written, and the specs record the decisions that were rejected as well as the on
 
 **2.0 — released.** Queues, pub/sub, RPC, dead letters, delayed delivery, recurring jobs,
 dashboard, authentication, TLS, and NuGet packaging (`2.0.0`) all ship today, now on a
-RocksDB + RESP broker (Garnet removed in feature 041). **2.0 adds replication with client-herd
+purpose-built storage-engine + RESP broker (Garnet removed in feature 041). **2.0 adds replication with client-herd
 failover** (features 042 + 042-1 — WAL-shipping standbys, epoch fencing, no elections; the master
 is the node the client herd is on) and an **opt-in broker-local cache** (feature 044 —
 `IDistributedCache`/`HybridCache` L2, never replicated). **More than 1,200 tests pass.**
@@ -257,8 +257,8 @@ Highway declines to promise these, and says so rather than letting you find out:
 - **No transactional enlistment**, message priority, or per-message TTL.
 - **No characterised throughput.** No benchmark exists, so no figure is claimed anywhere.
 - **Retention over time is still unbounded** ([C4.1](docs/product/constraints.md), awaiting a
-  breaking framing change). Storage growth itself is now bounded — RocksDB compaction reclaims
-  consumed messages ([C4.6](docs/product/constraints.md), met on the RocksDB engine).
+  breaking framing change). Storage growth itself is now bounded — the storage engine's compaction
+  reclaims consumed messages ([C4.6](docs/product/constraints.md), met on the current engine).
 
 Every one is a numbered row in [constraints.md](docs/product/constraints.md) with an
 implementation status, so intent and reality can be compared line by line.
