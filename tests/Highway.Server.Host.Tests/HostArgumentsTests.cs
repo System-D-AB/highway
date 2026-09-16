@@ -82,4 +82,13 @@ public class HostArgumentsTests
         parsed.ShowVersion.Should().BeFalse();
         parsed.Validate.Should().BeFalse();
     }
+
+    [Fact]
+    public void Promote_IsAHostVerbWithOptionalReason()
+    {
+        var parsed = HostArguments.Parse(["--promote", "ops"]);
+        parsed.Promote.Should().BeTrue();
+        parsed.PromoteReason.Should().Be("ops");
+        parsed.Verb.Should().BeNull();
+    }
 }

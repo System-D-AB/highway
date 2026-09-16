@@ -54,6 +54,12 @@ internal static class HighwayErrors
     /// </summary>
     public const string StorageFormat = "HW_STORAGE_FORMAT";
 
+    /// <summary>042 G4: a pull cursor fell behind the retained WAL — the replica must re-sync via HW.REPL.SNAPSHOT.</summary>
+    public const string ReplGap = "HW_REPL_GAP";
+
+    /// <summary>042-1 R13.3: a joining node announced a priority a live roster member already holds — refused, naming the holder.</summary>
+    public const string PriorityTaken = "HW_PRIORITY_TAKEN";
+
     public const string Internal = "HW_INTERNAL";
 
     /// <summary>Formats <c>ERR {code} {detail}</c>.</summary>

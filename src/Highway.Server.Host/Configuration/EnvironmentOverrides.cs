@@ -110,6 +110,9 @@ internal static class EnvironmentOverrides
             if (targetType == typeof(long))
                 return SizeFormat.Parse(raw, variableName);
 
+            if (targetType == typeof(ulong))
+                return ulong.Parse(raw, CultureInfo.InvariantCulture);
+
             if (targetType == typeof(bool))
                 return bool.Parse(raw);
 

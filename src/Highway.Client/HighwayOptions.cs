@@ -86,6 +86,15 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     public TimeSpan CallTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// The herd health timeout <c>x</c> (042-1 / parent R3.3): with no successful
+    /// exchange against the master for this long, the client treats a TCP-alive but
+    /// frozen master as lost and walks the roster for a successor. The contract orders
+    /// it against the server's willingness threshold: <c>x ≤ W (3s) &lt; T_fence (5s)</c>.
+    /// Default 3s.
+    /// </summary>
+    public TimeSpan MasterHealthTimeout { get; set; } = TimeSpan.FromSeconds(3);
+
+    /// <summary>
     /// Maximum number of service executions running concurrently per service
     /// on this node. Default: 8.
     /// </summary>

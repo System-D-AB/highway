@@ -37,6 +37,20 @@ internal static class EffectiveConfigurationPrinter
         writer.WriteLine($"    receiveDefaultCount              : {c.Server.ReceiveDefaultCount}");
         writer.WriteLine($"    receiveMaxCount                  : {c.Server.ReceiveMaxCount}");
         writer.WriteLine($"    waitForCommit                    : {c.Server.WaitForCommit}");
+        writer.WriteLine($"    replication.startAsReplica       : {c.Server.Replication.StartAsReplica}");
+        writer.WriteLine($"    replication.replicaId            : {c.Server.Replication.ReplicaId}");
+        writer.WriteLine($"    replication.priority             : {c.Server.Replication.Priority}");
+        writer.WriteLine($"    replication.advertiseEndpoint    : {c.Server.Replication.AdvertiseEndpoint ?? "(own endpoint)"}");
+        writer.WriteLine($"    replication.primaryServer        : {Redact(c.Server.Replication.PrimaryServer)}");
+        writer.WriteLine($"    replication.slotLagCapSequences  : {c.Server.Replication.SlotLagCapSequences}");
+        writer.WriteLine($"    replication.autoFailover         : {c.Server.Replication.AutoFailover}");
+        writer.WriteLine($"    replication.fenceTimeout         : {c.Server.Replication.FenceTimeout}");
+        writer.WriteLine($"    replication.promoteTimeout       : {c.Server.Replication.PromoteTimeout}");
+        writer.WriteLine($"    replication.margin               : {c.Server.Replication.Margin}");
+        writer.WriteLine($"    replication.willingnessThreshold : {c.Server.Replication.WillingnessThreshold}");
+        writer.WriteLine($"    replication.goodbyeDrainTimeout  : {c.Server.Replication.GoodbyeDrainTimeout}");
+        writer.WriteLine($"    replication.walTtlSeconds        : {c.Server.Replication.WalTtlSeconds}");
+        writer.WriteLine($"    replication.maxTotalWalSizeBytes : {c.Server.Replication.MaxTotalWalSizeBytes}");
         writer.WriteLine($"    observability.recorderEnabled    : {c.Server.Observability.RecorderEnabled}");
         writer.WriteLine($"    observability.defaultCapacity    : {c.Server.Observability.DefaultCapacity}");
         writer.WriteLine($"    observability.defaultRetention   : {c.Server.Observability.DefaultRetention}");
@@ -72,4 +86,12 @@ internal static class EffectiveConfigurationPrinter
 
     private static string Secret(string? value)
         => string.IsNullOrEmpty(value) ? NotSet : Masked;
+
+    /// <summary>A connection string with any <c>password=…</c> component masked; the host stays legible.</summary>
+    private static string Redact(string? connectionString)
+        => string.IsNullOrEmpty(connectionString)
+            ? NotSet
+            : System.Text.RegularExpressions.Regex.Replace(
+                connectionString, @"(password\s*=\s*)[^,]*", $"$1{Masked}",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 }

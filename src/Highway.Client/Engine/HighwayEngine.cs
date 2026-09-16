@@ -122,8 +122,14 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
 
             // 1. Connect — fail fast, descriptive error, no silent retry loop.
             var mux = await _connectionSource.GetMultiplexerAsync(ct).ConfigureAwait(false);
-            _connection = HighwayConnection.FromMultiplexer(mux);
+            var connection = HighwayConnection.FromSource(_connectionSource, mux);
+            _connection = connection;
             _pendingCalls = new PendingCallRegistry(_connection);
+
+            // 042-1b B-T5: after the herd converges on a new master, pending RPCs are
+            // re-driven with their original ids — the caller is the truth for "unanswered".
+            var pendingForReplay = _pendingCalls;
+            connection.Converged += () => _ = pendingForReplay.ReplayPendingAsync();
 
             var executor = new ServiceExecutor(_catalog, _scopeFactory);
             var watcher = new DoorbellWatcher(_connection, _pendingCalls, _options.DoorbellsEnabled, _loggerFactory);

@@ -261,6 +261,16 @@ internal static class DashboardEndpoints
             return Results.Json(new { events = projected, state = "ok" });
         });
 
+        app.MapGet("/api/replication", async (IBrokerState state) =>
+        {
+            var result = await state.ReplicationAsync();
+            if (result.Value is null)
+                return Results.Json(new { unavailable = result.Unavailable, fields = Array.Empty<object>() });
+
+            var fields = result.Value.Select(kv => new { name = kv.Key, value = kv.Value }).ToArray();
+            return Results.Json(new { unavailable = (string?)null, fields });
+        });
+
         app.MapGet("/api/stream/{name}", async (string name, FlightRecorder recorder, DashboardOptions options, StreamRegistry registry, HttpContext ctx) =>
         {
             if (!registry.TryAcquire())

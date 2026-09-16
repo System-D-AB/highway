@@ -126,7 +126,8 @@ internal sealed class HighwayClient : IHighwayClient
         }
 
         var requestId = requestIdForSpan;
-        var responseTask = pending.Register(requestId, responseType, _options.CallTimeout, ct);
+        var responseTask = pending.Register(requestId, responseType, _options.CallTimeout, ct,
+            serviceName, envelope);   // replay data: re-driven same-id after a failover (042-1b)
 
         try
         {

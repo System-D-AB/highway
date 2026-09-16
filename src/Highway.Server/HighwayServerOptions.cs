@@ -278,4 +278,7 @@ public sealed class HighwayServerOptions
     /// <see cref="DataDir"/> is set and AOF is enabled. Default: <c>false</c>.
     /// </summary>
     public bool WaitForCommit { get; set; } = false;
+
+    /// <summary>Replication (042). Defaults keep a single writable node with no auto-failover.</summary>
+    public HighwayReplicationOptions Replication { get; set; } = new();
 }

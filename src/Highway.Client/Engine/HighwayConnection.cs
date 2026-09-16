@@ -416,19 +416,21 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-    private readonly ConnectionMultiplexer _redis;
+    private ConnectionMultiplexer _redis;
 
 
 
 
 
-    private readonly IDatabase _db;
+    private IDatabase _db;
 
 
 
 
 
-    private readonly ISubscriber _subscriber;
+    private ISubscriber _subscriber;
+    private readonly HighwayConnectionSource? _source;
+    private readonly List<(string Channel, Action<string> OnMessage)> _doorbells = [];
 
     /// <summary>
     /// Exposes the underlying multiplexer so that <c>HighwayCache</c> can share
@@ -449,10 +451,127 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     internal static HighwayConnection FromMultiplexer(IConnectionMultiplexer redis)
     {
         ArgumentNullException.ThrowIfNull(redis);
-        return new HighwayConnection((ConnectionMultiplexer)redis);
+        return new HighwayConnection((ConnectionMultiplexer)redis, source: null);
     }
 
-    private HighwayConnection(ConnectionMultiplexer redis)
+    internal static HighwayConnection FromSource(HighwayConnectionSource source, IConnectionMultiplexer redis)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(redis);
+        return new HighwayConnection((ConnectionMultiplexer)redis, source);
+    }
+
+    // ---- the herd triggers (042-1b B-T3) -------------------------------------
+
+    private readonly TimeSpan _masterHealthTimeout;
+    private readonly Timer? _healthTicker;
+    private long _lastSuccessTicks;
+    private int _walking;
+
+    /// <summary>
+    /// Raised after this connection has converged on a (possibly new) master — the
+    /// engine re-drives pending RPCs on it (042-1b B-T5 / parent R4).
+    /// </summary>
+    internal event Action? Converged;
+
+    private void NoteSuccess() => Volatile.Write(ref _lastSuccessTicks, DateTime.UtcNow.Ticks);
+
+    private void SubscribeTopology(ISubscriber subscriber)
+        => subscriber.Subscribe(RedisChannel.Literal("hw:door:topology"), (channel, message) =>
+        {
+            var text = (string?)message;
+            if (text is null) return;
+
+            if (text.StartsWith("GOODBYE", StringComparison.Ordinal))
+            {
+                // The incumbent said go: walk NOW, excluding it — R12's fast path. The
+                // successor may need a moment to turn willing (its own GOODBYE arrives
+                // on a different connection), so this walk retries across the drain.
+                _ = WalkAsync(excludeCurrent: true, attempts: 40, delayMs: 250);
+            }
+            else
+            {
+                // TOPOLOGY / ROSTER-UPDATE are advisory: refresh the roster; stay put.
+                _ = _source!.RefreshRosterAsync();
+            }
+        });
+
+    private int _healthProbing;
+
+    private void OnHealthTick()
+    {
+        var silence = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - Volatile.Read(ref _lastSuccessTicks));
+        if (silence < _masterHealthTimeout)
+            return;
+        if (Interlocked.CompareExchange(ref _healthProbing, 1, 0) != 0)
+            return;
+        _ = ProbeHealthAsync();
+    }
+
+    /// <summary>
+    /// Idle is not frozen: a quiet client PINGs first, and only a failed/late probe
+    /// walks. A healthy-but-unused master keeps its herd.
+    /// </summary>
+    private async Task ProbeHealthAsync()
+    {
+        try
+        {
+            var ping = _db.PingAsync();
+            var winner = await Task.WhenAny(ping, Task.Delay(1_000)).ConfigureAwait(false);
+            if (winner == ping && ping.IsCompletedSuccessfully)
+            {
+                NoteSuccess();
+                return;
+            }
+            await WalkAsync(excludeCurrent: true).ConfigureAwait(false);
+        }
+        catch
+        {
+            await WalkAsync(excludeCurrent: true).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _healthProbing, 0);
+        }
+    }
+
+    /// <summary>
+    /// One serialized walk (the source's gate serializes across operations; this flag
+    /// stops the ticker stacking walks). On success: adopt, resubscribe, raise
+    /// <see cref="Converged"/> (via <see cref="AdoptCurrentMultiplexer"/>).
+    /// <paramref name="attempts"/> &gt; 1 keeps trying across a convergence window
+    /// (the GOODBYE shape, where the successor turns willing moments later).
+    /// </summary>
+    private async Task WalkAsync(bool excludeCurrent, int attempts = 1, int delayMs = 0)
+    {
+        if (_source is null || Interlocked.CompareExchange(ref _walking, 1, 0) != 0)
+            return;
+        try
+        {
+            for (var i = 0; i < attempts; i++)
+            {
+                if (await _source.TryFailoverAsync(default, excludeCurrent).ConfigureAwait(false))
+                {
+                    AdoptCurrentMultiplexer();
+                    NoteSuccess();
+                    return;
+                }
+                if (delayMs > 0)
+                    await Task.Delay(delayMs).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // Best-effort from these triggers; the per-operation bounded retry remains
+            // the guarantee.
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _walking, 0);
+        }
+    }
+
+    private HighwayConnection(ConnectionMultiplexer redis, HighwayConnectionSource? source = null)
 
 
 
@@ -477,6 +596,22 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
         _subscriber = redis.GetSubscriber();
+        _source = source;
+        _lastSuccessTicks = DateTime.UtcNow.Ticks;
+
+        if (source is not null)
+        {
+            _masterHealthTimeout = source.Settings is HighwayOptions ho && ho.MasterHealthTimeout > TimeSpan.Zero
+                ? ho.MasterHealthTimeout
+                : TimeSpan.FromSeconds(3);
+
+            SubscribeTopology(_subscriber);
+
+            // The health ticker (042-1b B-T3c / parent R3.3): a frozen, TCP-alive master
+            // produces neither a drop nor a narration — this covers the ceiling `x`.
+            _healthTicker = new Timer(_ => OnHealthTick(), null,
+                TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        }
 
 
 
@@ -2070,6 +2205,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
+        _doorbells.Add((channel, onMessage));
         await _subscriber.SubscribeAsync(RedisChannel.Literal(channel), (_, value) =>
 
 
@@ -2684,7 +2820,9 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-                return await operation().ConfigureAwait(false);
+                var result = await operation().ConfigureAwait(false);
+                NoteSuccess();   // the herd health clock (042-1b): a completed exchange
+                return result;
 
 
 
@@ -2707,6 +2845,16 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
+
+                if (TrySwitchOnNotPrimary(ex.Message))
+                {
+                    if (attempt < RetryDelays.Length)
+                    {
+                        await Task.Delay(RetryDelays[attempt], ct).ConfigureAwait(false);
+                        attempt++;
+                        continue;
+                    }
+                }
 
                 if (IsTransient(ex.Message) && attempt < RetryDelays.Length)
 
@@ -2768,7 +2916,18 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
-                // Brief interruption while SE.Redis reconnects â€” bounded retry.
+                // The active host is gone. With a multi-endpoint connection string, probe
+                // the others for the writable node before burning a plain retry (042 R6.1)
+                // — the path a killed primary takes, where no -NOTPRIMARY can be spoken.
+                // A single-endpoint client falls through to the bounded retry.
+                if (attempt < RetryDelays.Length
+                    && await TryFailoverOnConnectionLossAsync(ct).ConfigureAwait(false))
+                {
+                    attempt++;
+                    continue;
+                }
+
+                // Brief interruption while SE.Redis reconnects — bounded retry.
 
 
 
@@ -2853,6 +3012,76 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
         => string.Equals(message, TransientAbortMessage, StringComparison.Ordinal);
+
+    /// <summary>042 T6: <c>NOTPRIMARY &lt;endpoint&gt; &lt;epoch&gt;</c> — not an ERR HW_ prefix.</summary>
+    public static bool TryParseNotPrimary(string message, out string endpoint, out ulong epoch)
+    {
+        endpoint = "";
+        epoch = 0;
+        var text = message.StartsWith("ERR ", StringComparison.Ordinal) ? message[4..] : message;
+        var parts = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3 || !parts[0].Equals("NOTPRIMARY", StringComparison.Ordinal))
+            return false;
+        endpoint = parts[1];
+        return ulong.TryParse(parts[2], out epoch);
+    }
+
+    private bool TrySwitchOnNotPrimary(string message)
+    {
+        if (_source is null || !TryParseNotPrimary(message, out var endpoint, out var epoch))
+            return false;
+        _source.NoteObservedEpoch(epoch);
+
+        // A stood-down node that never learned its successor redirects to ITSELF —
+        // following that is a loop. Walk the roster instead (excluding it).
+        if (string.Equals(HighwayConnectionSource.HostOf(_source.ActiveServer), endpoint, StringComparison.OrdinalIgnoreCase))
+        {
+            _ = WalkAsync(excludeCurrent: true, attempts: 8, delayMs: 250);
+            return true;   // the retry loop backs off while the walk lands
+        }
+
+        _source.SwitchTo(endpoint);
+        AdoptCurrentMultiplexer();
+        return true;
+    }
+
+    /// <summary>
+    /// 042 R6.1, the dead-primary half: the active host stopped answering entirely (no
+    /// <c>-NOTPRIMARY</c> to follow), so ask the source to probe the other configured
+    /// endpoints for the writable node. Only meaningful with a multi-endpoint connection
+    /// string; a single-endpoint client keeps the plain bounded retry.
+    /// </summary>
+    private async Task<bool> TryFailoverOnConnectionLossAsync(CancellationToken ct)
+    {
+        if (_source is null || !_source.HasAlternateEndpoints)
+            return false;
+        if (!await _source.TryFailoverAsync(ct).ConfigureAwait(false))
+            return false;
+        AdoptCurrentMultiplexer();
+        return true;
+    }
+
+    /// <summary>
+    /// Re-points this connection at the source's current multiplexer, re-subscribes
+    /// every doorbell and the topology channel (042 R6.3 / 042-1b), and raises
+    /// <see cref="Converged"/> so the engine re-drives pending work on the new master.
+    /// </summary>
+    private void AdoptCurrentMultiplexer()
+    {
+        var mux = (ConnectionMultiplexer)_source!.Multiplexer;
+        _redis = mux;
+        _db = mux.GetDatabase();
+        _subscriber = mux.GetSubscriber();
+        foreach (var (channel, onMessage) in _doorbells)
+        {
+            _subscriber.Subscribe(RedisChannel.Literal(channel), (_, value) =>
+            {
+                try { onMessage((string)value!); } catch { /* doorbells are best-effort */ }
+            });
+        }
+        SubscribeTopology(_subscriber);
+        try { Converged?.Invoke(); } catch { /* a re-drive failure surfaces on its own path */ }
+    }
 
 
 
@@ -3076,6 +3305,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
 
 
+        _healthTicker?.Dispose();
         await _redis.DisposeAsync().ConfigureAwait(false);
 
 

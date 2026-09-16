@@ -32,8 +32,13 @@ internal sealed class PendingCallRegistry
 
     /// <summary>
     /// Registers a pending call and returns the awaitable response task.
+    /// <paramref name="serviceName"/>/<paramref name="envelope"/> are the replay data
+    /// (042-1b B-T5): after a failover the same call is re-driven, same requestId, to the
+    /// new master — the caller holds the truth for "unanswered" (parent R4).
     /// </summary>
-    public Task<Output> Register(string requestId, Type responseType, TimeSpan timeout, CancellationToken callerToken)
+    public Task<Output> Register(
+        string requestId, Type responseType, TimeSpan timeout, CancellationToken callerToken,
+        string? serviceName = null, byte[]? envelope = null)
     {
         var call = new PendingCall
         {
@@ -41,6 +46,8 @@ internal sealed class PendingCallRegistry
             ResponseType = responseType,
             RegisteredAtUtc = DateTime.UtcNow,
             Timeout = timeout,
+            ServiceName = serviceName,
+            Envelope = envelope,
         };
 
         // Linked source: timeout timer OR caller cancellation — whichever fires first.
@@ -140,6 +147,39 @@ internal sealed class PendingCallRegistry
     }
 
     /// <summary>
+    /// 042-1b B-T5 / parent R4: after the connection converges on a new master, re-drive
+    /// every pending call with its ORIGINAL request id. A call whose effect the new
+    /// master already holds (acked + replicated before the failover) becomes a counted
+    /// at-least-once duplicate; one it never saw executes fresh. First the slots are
+    /// probed — the reply may already be waiting on the new master.
+    /// </summary>
+    public async Task ReplayPendingAsync(CancellationToken ct = default)
+    {
+        foreach (var (requestId, call) in _pending)
+        {
+            if (ct.IsCancellationRequested) return;
+
+            // The reply may have been written and replicated before the transition.
+            await TryCompleteFromSlotAsync(requestId, ct).ConfigureAwait(false);
+            if (!_pending.ContainsKey(requestId))
+                continue;
+
+            if (call.ServiceName is null || call.Envelope is null)
+                continue;   // registered without replay data (a legacy path) — its timeout bounds it
+
+            try
+            {
+                await _connection.CallAsync(call.ServiceName, requestId, call.Envelope, ct).ConfigureAwait(false);
+            }
+            catch (HighwayTransportException)
+            {
+                // Still converging; the next Converged raise (or the call's own timeout)
+                // bounds it. Replay is idempotent to repeat — the id is stable.
+            }
+        }
+    }
+
+    /// <summary>
     /// Backstop sweep: GETs the slots of all calls older than <paramref name="minAge"/>
     /// so a dropped doorbell costs latency, never a hung call.
     /// </summary>
@@ -206,6 +246,8 @@ internal sealed class PendingCallRegistry
         public required Type ResponseType { get; init; }
         public required DateTime RegisteredAtUtc { get; init; }
         public required TimeSpan Timeout { get; init; }
+        public string? ServiceName { get; init; }
+        public byte[]? Envelope { get; init; }
         public CancellationTokenSource LinkedCts { get; set; } = null!;
         public CancellationTokenRegistration CancellationRegistration { get; set; }
 

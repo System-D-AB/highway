@@ -54,6 +54,12 @@ public static class Program
             return ExitCodes.PlatformUnsupported;
         }
 
+        if (parsed.Promote)
+            return DispatchReplVerb(parsed, environment, "HW.REPL.PROMOTE", parsed.PromoteReason, "promoted epoch={0}");
+
+        if (parsed.Goodbye)
+            return DispatchReplVerb(parsed, environment, "HW.REPL.GOODBYE", parsed.GoodbyeReason, "goodbye begun ({0}); the node drains, then stands down");
+
         if (parsed.Validate)
         {
             try
@@ -162,7 +168,40 @@ public static class Program
         writer.WriteLine($"  runtime        : {RuntimeInformation.RuntimeIdentifier}");
     }
 
+    /// <summary>042 T5 / 042-1c C-T5 — an operator replication verb (promote, goodbye) against the running broker.</summary>
+    private static int DispatchReplVerb(
+        HostArguments parsed, System.Collections.IDictionary? environment,
+        string command, string? reason, string successFormat)
+    {
+        try
+        {
+            var loaded = ConfigurationLoader.Load(
+                parsed.ConfigPath ?? DiscoverConfigFile(),
+                environment,
+                cliPort: parsed.Port,
+                cliBindAddress: parsed.BindAddress,
+                cliDataDir: parsed.DataDir);
+
+            var c = loaded.Configuration;
+            var endpoint = $"{c.Server.BindAddress}:{c.Server.Port}";
+            if (!string.IsNullOrEmpty(c.Authentication.Password))
+                endpoint += $",password={c.Authentication.Password}";
+
+            using var mux = StackExchange.Redis.ConnectionMultiplexer.Connect(endpoint);
+            var result = mux.GetDatabase().Execute(command, reason ?? "host-verb");
+            Console.WriteLine(string.Format(successFormat, result));
+            return ExitCodes.Success;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.Unexpected;
+        }
+    }
+
     private static string Usage() => """
+          --promote [reason]         issue HW.REPL.PROMOTE against the configured broker, then exit
+          --goodbye [reason]         issue HW.REPL.GOODBYE (graceful drain + stand-down), then exit
           --version                 print version, storage format and RID, then exit
           --validate                load and validate configuration, print it masked, exit
           --config <path>           configuration file (default: discovery in CWD, config/, beside exe)

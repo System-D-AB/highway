@@ -73,7 +73,7 @@ public class CommandDispatcherTests
     }
 
     [Fact]
-    public void ServedCommands_AreExactlyTheEighteen()
+    public void ServedCommands_IncludeTheReplicationFamily()
     {
         var dispatcher = NewDispatcher(out _);
         dispatcher.ServedCommands.Should().BeEquivalentTo(new[]
@@ -81,6 +81,9 @@ public class CommandDispatcherTests
             "HW.CALL", "HW.REPLY", "HW.DEQUEUE", "HW.ACK", "HW.SUBSCRIBE", "HW.UNSUBSCRIBE",
             "HW.PUBLISH", "HW.HEARTBEAT", "HW.DISCOVER", "HW.STATS", "HW.REPLAY", "HW.DLQ",
             "HW.QSEND", "HW.QCLAIM", "HW.QACK", "HW.FAIL", "HW.TOUCH", "HW.JOB",
+            "HW.REPL.HELLO", "HW.REPL.PULL", "HW.REPL.ACK",
+            "HW.REPL.SNAPSHOT", "HW.REPL.PROMOTE", "HW.REPL.FENCE", "HW.REPL.STATUS", "HW.REPL.WITNESS",
+            "HW.REPL.JOIN", "HW.REPL.GOODBYE",
         });
     }
 

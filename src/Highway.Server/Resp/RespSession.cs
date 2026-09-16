@@ -46,10 +46,55 @@ internal sealed class RespSession
         public static SessionResult Many(IReadOnlyList<byte[]> replies) => new(replies, false);
     }
 
+    // ---- session classification (042-1c C-T1) --------------------------------
+    // A connection is Unknown until its traffic says what it is: HW.REPL.* (other than
+    // the CLIENT handshake) marks a PEER — a replica puller or a joining node; any
+    // Highway verb or raw-key operation marks a CLIENT and joins the herd count. The
+    // SE.Redis connect preamble (PING/CONFIG/…) classifies nothing.
+    private enum SessionKind { Unknown, Client, Peer }
+    private SessionKind _kind;
+
+    private void ClassifyIfUnknown(string name, IReadOnlyList<byte[]> frame)
+    {
+        if (_kind != SessionKind.Unknown || State == ConnectionState.Unauthenticated)
+            return;
+
+        if (name.StartsWith("HW.REPL.", StringComparison.Ordinal))
+        {
+            var isClientHandshake = name == "HW.REPL.HELLO"
+                && frame.Count > 1
+                && Encoding.ASCII.GetString(frame[1]).Equals("CLIENT", StringComparison.OrdinalIgnoreCase);
+            if (!isClientHandshake)
+            {
+                _kind = SessionKind.Peer;
+                return;
+            }
+            _kind = SessionKind.Client;
+            _dispatcher.NoteClientSessionOpened();
+            return;
+        }
+
+        if (name.StartsWith("HW.", StringComparison.Ordinal)
+            || name is "GET" or "SET" or "SETEX" or "PSETEX" or "DEL" or "UNLINK" or "TTL" or "PTTL" or "SUBSCRIBE")
+        {
+            _kind = SessionKind.Client;
+            _dispatcher.NoteClientSessionOpened();
+        }
+    }
+
+    /// <summary>Connection teardown: a counted client session leaves the herd.</summary>
+    public void OnConnectionClosed()
+    {
+        if (_kind == SessionKind.Client)
+            _dispatcher.NoteClientSessionClosed();
+        _kind = SessionKind.Peer; // idempotent teardown
+    }
+
     /// <summary>Handles one parsed command frame and returns the reply frames.</summary>
     public SessionResult Handle(IReadOnlyList<byte[]> frame)
     {
         var name = Encoding.ASCII.GetString(frame[0]).ToUpperInvariant();
+        ClassifyIfUnknown(name, frame);
 
         // Pre-auth gate (Redis semantics, kept deliberately): an unauthenticated connection may
         // only AUTH or QUIT. Everything else — PING included, because PING is SE.Redis's connect
@@ -208,6 +253,7 @@ internal sealed class RespSession
                 $"'{key}' is not writable over the wire"));
 
         if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
+        if (!EnsureWritable(out var refused)) return SessionResult.One(refused!);
 
         var value = frame[2];
         long? pxMilliseconds = null;
@@ -278,6 +324,7 @@ internal sealed class RespSession
                 $"'{key}' is not writable over the wire"));
 
         if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
+        if (!EnsureWritable(out var refused)) return SessionResult.One(refused!);
 
         if (!long.TryParse(Encoding.ASCII.GetString(frame[2]), out var ttl) || ttl <= 0)
             return SessionResult.One(Err("invalid expire time"));
@@ -300,6 +347,7 @@ internal sealed class RespSession
         if (key.StartsWith(CommandDispatcher.ReplyKeyPrefix, StringComparison.Ordinal))
         {
             if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
+            if (!EnsureWritable(out var refused)) return SessionResult.One(refused!);
             _dispatcher.DeleteReplySlot(key);
             return SessionResult.One(Integer(1));
         }
@@ -308,6 +356,7 @@ internal sealed class RespSession
         if (key.StartsWith(CommandDispatcher.IdempotencyKeyPrefix, StringComparison.Ordinal))
         {
             if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
+            if (!EnsureWritable(out var refused)) return SessionResult.One(refused!);
             _dispatcher.DeleteIdempotencyKey(key);
             return SessionResult.One(Integer(1));
         }
@@ -383,6 +432,23 @@ internal sealed class RespSession
     }
 
     // ---- helpers -------------------------------------------------------------
+
+    /// <summary>
+    /// 042 G7: a non-primary refuses raw-key <b>writes</b> exactly as it refuses HW.*
+    /// verbs — a client pointed at a replica must not stage local idempotency markers or
+    /// destroy reply slots the primary owns. Reads (GET/TTL) stay served.
+    /// </summary>
+    private bool EnsureWritable(out byte[]? refused)
+    {
+        if (_dispatcher.IsWritable)
+        {
+            refused = null;
+            return true;
+        }
+
+        refused = Raw(_dispatcher.NotPrimaryLine());
+        return false;
+    }
 
     /// <summary>Ensures the connection is authenticated; otherwise yields the -NOAUTH reply (037 R11.3).</summary>
     private bool EnsureAuthorized(out byte[]? denied)

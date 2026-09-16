@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 4.5** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
+**Protocol version 4.8** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
 
 ## About
 
@@ -28,6 +28,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 - [Observability Commands](#observability-commands)
 - [Queue Commands](#queue-commands)
 - [Dead Letter Commands](#dead-letter-commands)
+- [Replication Commands](#replication-commands)
 - [Stock Garnet Dependencies](#stock-garnet-dependencies)
 - [Key Schema](#key-schema)
 - [Entry Framing](#entry-framing)
@@ -39,7 +40,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.5**
+**Current version: 4.8**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -47,6 +48,9 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.8 | 042-1a | **The herd contract.** `HW.REPL.HELLO` grows two additive forms: an optional 4th argument on the replica form (the caller's endpoint — a promoting node announces itself so a demoted primary's `-NOTPRIMARY` redirects correctly) and the **client handshake** `HW.REPL.HELLO CLIENT <clientId> <lastSeenEpoch>` answering `["master"\|"willing", epoch, rosterVersion]` or `["standby", masterEndpoint, masterEpoch]`. Adds `HW.REPL.JOIN` (roster admission; `ERR HW_PRIORITY_TAKEN` on a held priority), `HW.REPL.GOODBYE` (graceful drain + stand-down, parent R12), and the `roster.*` fields on `HW.REPL.STATUS`. Adds `ERR HW_REPL_GAP` on `HW.REPL.PULL` (a cursor behind the retained WAL is refused, never served a gapped stream — the replica re-syncs via SNAPSHOT). Adds the `hw:door:topology` narration channel (TOPOLOGY / GOODBYE / ROSTER-UPDATE, advisory). **Withdraws** the never-released `HW.REPL.WITNESS <nodeId> <role>` sketch — WITNESS is the bare `+OK` probe; failover is client-herd-driven (feature 042-1), not witness-gated. Additive. |
+| 4.7 | 042 | **Replication (T3–T7).** Adds `HW.REPL.SNAPSHOT` (chunked checkpoint bootstrap), `HW.REPL.PROMOTE`, `HW.REPL.FENCE`, `HW.REPL.STATUS`, `HW.REPL.WITNESS`. A non-primary refuses client writes with `-NOTPRIMARY <endpoint> <epoch>` (not an `ERR HW_` prefix). `HW.STATS` server form appends `repl.*` fields. Additive. |
+| 4.6 | 042 | **Replication stream (T1).** Adds `HW.REPL.HELLO`, `HW.REPL.PULL`, `HW.REPL.ACK` — pull-based, paged, resumable WAL shipping from a primary. Replicas register a slot, pull pages of `(seq, batchBytes)`, and ack a watermark. Epoch is stamped on every reply. Additive. |
 | 4.5 | 028 | **Recurring jobs.** Adds `HW.JOB SET\|DEL\|LIST` (appended to the command table) and two keys: `hw:job:{queue}:schedules` (sorted set: score = nextFireTicks, member = a versioned schedule record carrying job name, expression, lastFire, nextFire and the template payload) and `hw:job:index` (main-store mirror of queues with schedules). **Firing lives in `HW.QCLAIM`**: the promotion sweep enqueues exactly one occurrence for each due schedule and re-arms it — one member replaced at a new score — atomically inside the claim transaction. Occurrence ids are `job:{name}:{ticks}`. Missed occurrences catch up as ONE fire with the next computed from now; a full queue refuses the fire without consuming it (`JobFireRefused`). Expressions: `daily:HH:mm`, `every:{seconds}`, `cron:{5-field}`, all UTC. Adds four recorder events (`JobFired`, `JobScheduleChanged`, `JobScheduleRemoved`, `JobFireRefused`). Additive. |
 | 4.4 | 025 | **Subscription groups.** `HW.SUBSCRIBE` gains an optional third argument (arity 3 → -3): the subscribing **node**, so the server can track which nodes back a group. Absent means the pre-025 identity — the group is the node — so an old client's two-argument subscribe is unchanged in meaning. Adds two mirror keys: `hw:grp:members:{channel}@{group}` (nodes backing a group) and `hw:reg:node:{nodeId}:subs` (`{channel}@{group}` entries a node subscribes through). **Two behaviour changes:** automatic retirement now measures a group by its **youngest member's** heartbeat (a group with no membership record falls back to the 017 rule — group name as node name), and `HW.HEARTBEAT BYE PURGE` destroys a group's queue only when the departing node was its **last member** — otherwise it removes the membership and the group lives on for the siblings. Client-side, replicas sharing a `SubscriptionGroup` claim with the **group** as the claimant, competing through the ordinary queue machinery; the default (group = node name) is byte-identical to 018's wire traffic. Additive. |
 | 4.3 | 019 | **Long-running tasks.** Adds `HW.TOUCH SVC/Q`, which moves a claimed entry's timestamp forward so a handler that outlives `Lease` is not duplicated while it is still running. No new field, framing or key — the sweep already decides expiry from that timestamp. Adds the `ProcessingCapExceeded` recorder event. **One behaviour change:** the client renews automatically by default, so a **hung** handler is now recovered after `MaxProcessingTime` (15 min) rather than after `Lease` (5 min). Deliberate: a slow-but-working handler executed five times and dead-lettered corrupts data, while a hung one taking ten minutes longer to recover is a delay. `MaxProcessingTime = TimeSpan.Zero` restores the old behaviour exactly. |
@@ -87,6 +91,16 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 | `HW.FAIL` | 7 | 2 | Record why a handler failed, without acknowledging the message |
 | `HW.JOB` | -2 | 3 | Register, remove, or list recurring-job schedules; firing rides `HW.QCLAIM` |
 | `HW.TOUCH` | 5 | 2 | Renew a claimed message's lease, without acknowledging it |
+| `HW.REPL.HELLO` | -4 | 2 | Replica form: register/resume a slot (optional announcing endpoint). CLIENT form: the herd handshake — master / willing / standby-with-redirect |
+| `HW.REPL.PULL` | 3 | 1 | Pull a paged WAL batch from a sequence, stamped with the primary's epoch |
+| `HW.REPL.ACK` | 3 | 1 | Advance a replica slot's acked watermark |
+| `HW.REPL.SNAPSHOT` | -2 | 3 | Stream a checkpoint (`BEGIN` / `GET` / `END`), resumable by file and offset |
+| `HW.REPL.PROMOTE` | -1 | 1 | Increment epoch and become writable (admin or deadman) |
+| `HW.REPL.FENCE` | -1 | 1 | Stop accepting client writes without changing epoch |
+| `HW.REPL.STATUS` | 1 | 1 | Role, epoch, slots, lag, last promotion, reconciliation path, and the live roster |
+| `HW.REPL.WITNESS` | 1 | 1 | Bare liveness probe (+OK) |
+| `HW.REPL.JOIN` | 4 | 1 | Announce a node into the roster at a priority; a held priority is refused naming the holder |
+| `HW.REPL.GOODBYE` | -1 | 1 | Begin the graceful drain: narrate GOODBYE, refuse new work, let in-flight complete, stand down |
 
 ---
 
@@ -157,6 +171,7 @@ This is the most important section for a client implementer: the whole retry pol
 
 > A reply beginning `ERR HW_` is **permanent** — never retry.
 > The exact message `ERR Transaction failed.` is **transient** — safe to retry.
+> A reply beginning `NOTPRIMARY` is **failover** — reconnect to the advertised endpoint (feature 042). It is not `ERR HW_`-prefixed, so a client that only implements the two-class rule treats it as permanent; Highway.Client retries it against the other endpoint.
 > Anything else is **permanent**.
 
 That is the entire rule, and it is total.
@@ -179,8 +194,11 @@ Highway's own errors carry the `ERR HW_` prefix so the bare Garnet message stays
 | `NOPERM <detail>` | Authenticated, but not permitted to run the command | **Permanent** |
 | `ERR HW_STORAGE_FORMAT <detail>` | A queue holds entries written by a pre-013 Highway. The message names the key | Permanent — drain the queue or delete the data directory |
 | `ERR HW_QUEUE_FULL <detail>` | A queue is at its byte limit. The message names the queue (or, for a publish, the **group**) and the limit | Permanent — the caller must shed load, buffer, or alert. Retrying into a full queue holds a connection and hammers a broker already over budget |
+| `ERR HW_REPL_GAP <detail>` | A replica's pull cursor fell behind the retained WAL (042-1a). The detail names the requested and first-available sequences | Permanent for that cursor — the replica must re-sync via `HW.REPL.SNAPSHOT`; never retried as-is |
+| `ERR HW_PRIORITY_TAKEN <detail>` | A joining node announced a roster priority a live member already holds (042-1) | Permanent — an operator config error; the detail names the holder |
 | `ERR HW_INTERNAL <detail>` | An unexpected exception escaped a command handler | Permanent — a server bug |
 | `ERR Transaction failed.` | Garnet aborted the transaction; no work was performed | **Transient — retry** |
+| `NOTPRIMARY <endpoint> <epoch>` | This node is not writable (replica, fenced, or demoted). `<endpoint>` is where the client should go; `<epoch>` is this node's epoch | **Failover — retry on `<endpoint>`** (042). Not an `ERR HW_` prefix |
 | `ERR wrong number of arguments...` | Garnet's arity check, before the command runs | Permanent |
 
 **The authentication errors carry neither marker.** They are not `ERR HW_`-prefixed and are not the bare transient abort, so a client following the two-class rule literally has nowhere to put them. They are permanent: retrying a wrong password wastes the backoff budget and trips attempt counters on systems that keep them. They are worth their own exception type because the remedy differs from every other permanent failure — it is a configuration problem, not a code or network one.
@@ -942,6 +960,153 @@ A payload would have to *end* with the eight trailer bytes to be misread as carr
 
 ---
 
+## Replication Commands
+
+The primary ships its WAL to warm-standby replicas over RESP. Pull is replica-driven and stateless per request — the replica owns its cursor; the primary owns slots. Replicas serve no `HW.*` client traffic. See [feature 042](features/042-replication/design.md) and, for the failover control model (client-herd mastership, the handshake, the roster), [feature 042-1](features/042-1-replication-improvements/design.md).
+
+**Client bootstrap.** A client's connection string may name several endpoints in the ordinary SE.Redis comma form — `host1:6500,host2:6500,password=…`. The string is **bootstrap only**: enough to reach some node; the live roster (`HW.REPL.STATUS` `roster.*`) is the running truth for successor order, so the cluster can grow beyond any client's original string. A single-endpoint string is unchanged behaviour.
+
+These commands require a durable RocksDB broker. An ephemeral (in-memory) instance refuses with `ERR HW_INVALID_ARG`.
+
+A node that is not writable (role `Replica`, `Fenced`, or `Demoted`) refuses mutating `HW.*` client commands with:
+
+```
+-NOTPRIMARY <advertise-endpoint> <epoch>
+```
+
+`HW.STATS`, `HW.DISCOVER`, `HW.REPLAY`, `HW.REPL.HELLO`, and the `HW.REPL.STATUS` / `PROMOTE` / `FENCE` / `WITNESS` / `GOODBYE` admin forms still run. A fenced primary additionally still serves `PULL` / `ACK` / `SNAPSHOT` so a replica can catch up.
+
+**During a GOODBYE drain** (042-1) the quiescing master serves the **completion** verbs — `HW.REPLY`, `HW.ACK`, `HW.QACK`, `HW.FAIL`, `HW.TOUCH` — plus reads, the raw reply-slot/idempotency surface, and WAL shipping, while refusing new work (`HW.CALL`, `HW.QSEND`, `HW.PUBLISH`, claims, subscriptions, job admin) with `-NOTPRIMARY`, so in-flight drains and the herd converges.
+
+The server-wide `HW.STATS` form appends `repl.role`, `repl.epoch`, `repl.endpoint`, `repl.priority`, `repl.fenced`, `repl.slots`, `repl.minAcked`, `repl.latestSeq`, `repl.lastPromotion`, `repl.lastPromotionReason`, `repl.reconciliation`, `repl.drops`, and per-slot `repl.slot.N.{id,acked,state,lag}` fields.
+
+### HW.REPL.HELLO
+
+```
+HW.REPL.HELLO <replicaId> <lastAppliedSeq> <epoch> [endpoint]   →   [primaryEpoch, minSeq]
+HW.REPL.HELLO CLIENT <clientId> <lastSeenEpoch>                 →   [role, a, b]   (three bulk strings)
+```
+
+**Replica form.** Register or resume a retention slot. `lastAppliedSeq` is the replica's derived watermark (`GetLatestSequenceNumber` after the last applied page). `epoch` is the highest epoch the replica has seen. The optional `endpoint` names where the caller is reachable — a **promoting node announces itself** with it (epoch+1 plus its endpoint), which is how a demoted ex-primary learns where to point its `-NOTPRIMARY`. The reply's `minSeq` is the retention floor: the minimum acked watermark across live slots (0 when this is the only / first slot). This form is served in **every** role: it is the epoch/endpoint gossip channel.
+
+**Client form (the herd handshake, 042-1).** The literal `CLIENT` disambiguates (it is also why `CLIENT` can never be a replica id). The reply is three bulk strings, keyed by the first:
+
+| `role` | `a` | `b` | Meaning |
+|---|---|---|---|
+| `master` | epoch | rosterVersion | This node is serving the herd — connect. |
+| `willing` | epoch | rosterVersion | A standby whose own master-link is dead past `W` (or that saw GOODBYE) — it will accept the herd. Answering never promotes; promotion happens on the first accepted client verb. |
+| `standby` | masterEndpoint | masterEpoch | Unwilling — its master-link is healthy. Go where it points. One confused client cannot move mastership. A **draining** master (GOODBYE in progress) also answers `standby` — it is leaving, and must not pull the walking herd back onto itself; its self-redirect is a signal to walk on. |
+
+A `lastSeenEpoch` above the node's own is adopted (the any-channel epoch rule).
+
+Arity -4. Two forms.
+
+### HW.REPL.PULL
+
+```
+HW.REPL.PULL <fromSeq> <maxBytes>   →   [epoch, [[seq, data], ...], nextSeq | *-1]
+```
+
+A page of WAL batches starting at `fromSeq` (inclusive, matching RocksDB `GetUpdatesSince`). Each inner pair is the batch's sequence number and its `WriteBatch` bytes. `nextSeq` is the first sequence **not** included in this page; `*-1` (null array) means the iterator is drained — the replica is caught up until the next write.
+
+`maxBytes` bounds the page. A single batch larger than `maxBytes` is still returned so the cursor can advance.
+
+The epoch is the primary's. A replica that has seen a higher epoch refuses the page (T2).
+
+**A cursor the retained WAL no longer reaches is refused** with `ERR HW_REPL_GAP requested=<n> firstAvailable=<m>; re-sync via HW.REPL.SNAPSHOT` — in both shapes (first available batch past the cursor, or an empty live-WAL while the node's sequence is ahead). A gapped stream is never served as contiguous; the replica re-bootstraps.
+
+Arity 3.
+
+### HW.REPL.ACK
+
+```
+HW.REPL.ACK <replicaId> <appliedSeq>   →   +OK
+```
+
+Advance the slot's acked watermark. WAL files are eligible for deletion only past the minimum acked watermark of registered replicas, and never past the configured cap (`SetWalTtlSeconds` / `SetMaxTotalWalSize`). A replica id with no slot (no prior `HELLO`) is `ERR HW_INVALID_ARG`. A slot whose lag exceeds `SlotLagCapSequences` is dropped with a named event; that replica re-bootstraps via `HW.REPL.SNAPSHOT`.
+
+Arity 3.
+
+### HW.REPL.SNAPSHOT
+
+```
+HW.REPL.SNAPSHOT BEGIN                                              →  [epoch, checkpointSeq, sessionId, [[fileName, size], ...]]
+HW.REPL.SNAPSHOT GET <sessionId> <fileName> <offset> <maxBytes>     →  [fileName, offset, data, nextOffset | *-1]
+HW.REPL.SNAPSHOT END <sessionId>                                    →  +OK
+```
+
+Streams a RocksDB checkpoint captured with `ReplicationSource.GetInitialState` (DisableFileDeletions only for the capture window). The replica writes files then opens and tails from `checkpointSeq`. `GET` is resumable: retry the same `fileName` at `nextOffset`. A single chunk larger than `maxBytes` is not produced — the server caps a chunk at 64 KiB internally when the caller asks for more.
+
+Arity -2. Three forms.
+
+### HW.REPL.PROMOTE
+
+```
+HW.REPL.PROMOTE [reason]   →   :epoch
+```
+
+Become writable and increment the epoch. A node with replica priority `0` refuses with `ERR HW_INVALID_ARG`. Already-primary is a no-op that returns the current epoch. The standalone host also exposes this as `highways --promote [reason]` (036-style verb) against a running broker.
+
+Arity -1.
+
+### HW.REPL.FENCE
+
+```
+HW.REPL.FENCE [reason]   →   +OK
+```
+
+Primary becomes read-only without incrementing the epoch. Peer contact within `FenceTimeout` unfences. A no-op if the node is not primary. The fence is a **backstop** (042-1): failover itself is client-herd-driven, and no timer ever promotes.
+
+Arity -1.
+
+### HW.REPL.STATUS
+
+```
+HW.REPL.STATUS   →   flat field/value array (same `repl.*` keys as `HW.STATS`, plus the roster)
+```
+
+042-1 appends the live roster: `roster.version`, then per member `roster.N.id`, `roster.N.priority`, `roster.N.endpoint`. This is the client's read of the running truth for successor order — the connection string is bootstrap only.
+
+Arity 1.
+
+### HW.REPL.JOIN
+
+```
+HW.REPL.JOIN <nodeId> <priority> <endpoint>   →   :rosterVersion
+```
+
+A starting node announces itself into the set (042-1 / parent R13). **Master-only** — elsewhere it draws the ordinary `-NOTPRIMARY`, which is itself the joiner's redirect to the master. The master admits the node into the roster (stored as replicated state, so every standby already holds it) and returns the new roster version. A priority already held by a **different** live member is refused:
+
+```
+ERR HW_PRIORITY_TAKEN priority=<p> holder=<nodeId>; fix this node's config
+```
+
+First announcer wins — succession order must never depend on restart order. A re-announce by the same `nodeId` updates its endpoint/priority (subject to the same collision rule).
+
+Arity 4.
+
+### HW.REPL.GOODBYE
+
+```
+HW.REPL.GOODBYE [reason]   →   +OK
+```
+
+Begin a graceful departure (042-1 / parent R12): the node narrates `GOODBYE <epoch>` on `hw:door:topology` (pure timing — the successor is already common knowledge from the roster), stops accepting new master-only work, lets in-flight complete (see the drain rules above), and stands down at the drain deadline (`GoodbyeDrainTimeout`, default 5s) or as soon as its herd has left — whichever comes first. Anything undrained falls back to the clients' ordinary replay path; a maintenance departure is never blocked by one stuck message. Idempotent; a no-op on a non-primary. The standalone host exposes it as `highways --goodbye [reason]`.
+
+Arity -1.
+
+### HW.REPL.WITNESS
+
+```
+HW.REPL.WITNESS   →   +OK
+```
+
+A bare liveness probe. *(A 4.7-era sketch gave this command a peer-question form; it was withdrawn, unreleased, by 042-1a — failover is client-herd-driven and no witness gates promotion.)*
+
+Arity 1.
+
+---
+
 ## Stock Garnet Dependencies
 
 A client built only from the `HW.*` commands cannot function. These stock commands are required.
@@ -1139,8 +1304,19 @@ Doorbells are Garnet RESP pub/sub messages that wake waiting clients so they nee
 | `hw:door:rep` | `HW.REPLY` | `requestId` |
 | `hw:door:q:{channel}@{group}` | `HW.PUBLISH`, once per group | `messageId` |
 | `hw:door:q:{queue}` | `HW.QSEND` | `messageId` |
+| `hw:door:topology` | topology changes (042-1) | one of the three narration messages below |
 
 Doorbells are rung **after** the transaction commits, and are **not** rung during AOF replay — a recovering server does not wake workers for requests that were already handled before the restart. A rejected command rings nothing.
+
+**The narration channel (042-1).** `hw:door:topology` carries the master's advisory topology pushes — single-line, space-delimited:
+
+```
+TOPOLOGY <rosterVersion>                                   # re-read the roster, re-run your successor rule
+GOODBYE <epoch>                                            # I am leaving now; converge (no successor named — the roster is common knowledge)
+ROSTER-UPDATE <rosterVersion> <nodeId> <priority> <endpoint> JOINED|LEFT
+```
+
+Every narration message is **advisory**: a client re-runs its own rule and may stay put; a wrong or lost push is harmless because `-NOTPRIMARY` refusal and the TCP-drop walk remain the guarantee. Narration is never a vote.
 
 `hw:door:rep` is a single node-global channel rather than one per request, keeping subscriptions O(1) per node instead of O(pending calls). The cost is that every client sees every reply notification and must filter — see [Stock Garnet Dependencies](#stock-garnet-dependencies).
 
@@ -1243,5 +1419,12 @@ Options that change observable protocol behaviour. All are server-side.
 | `PubSubBackoffEnabled` | `false` | A pub/sub message returned after a lease expiry waits a growing delay before becoming claimable again. **Off by default because backoff and head-of-queue ordering are mutually exclusive**: holding a failed message serves the messages behind it first, and redelivery-preserves-order is a documented guarantee. Enable it where pacing matters more than order. |
 | `RpcBackoffEnabled` | `false` | The RPC equivalent. Off because a caller waits against `CallTimeout` (30 s) while `Lease` defaults to 5 minutes — the caller has already given up before a retry is possible, so a delay changes nothing but when the dead-letter happens. Worth enabling only where `Lease` is tuned well below the call timeout. |
 | `MaxBackoff` | 1 minute | Upper bound on the retry delay. The cap matters more than the curve: an uncapped exponential reaches hours by the twelfth attempt, when the message is functionally dead but still occupying a live queue. |
+| `Replication.StartAsReplica` | `false` | Node starts not-writable and pulls from `PrimaryServer`. |
+| `Replication.Priority` | 100 | Lowest non-zero replica promotes first; `0` never promotes. |
+| `Replication.SlotLagCapSequences` | 100000 | Drop a slot whose acked watermark lags the primary by more than this. |
+| `Replication.AutoFailover` | `false` | Two-timeout deadman. Refuses to start unless `PromoteTimeout > FenceTimeout + Margin`. |
+| `Replication.FenceTimeout` | 5s | Primary fences itself after this long without replica or witness contact (OD1). |
+| `Replication.PromoteTimeout` | 8s | Replica may self-promote after this long of primary silence (OD1). |
+| `Replication.Margin` | 1s | Clock-rate / scheduling slack (OD1). |
 
 Durability options (`DataDir`, `WaitForCommit`) affect whether state survives a restart but do not change any command's contract. With no data directory the server is memory-only and all state is lost on shutdown — including registrations, which is what the `+REGISTER` handshake recovers from.

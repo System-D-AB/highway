@@ -34,6 +34,7 @@
 > | Embedded Control Panel / web dashboard | **Partially built** — flight recorder view delivered in feature 011. Server settings and catalog views are deferred |
 > | Flight recorder, `HW.REPLAY`, activity emission | **Shipped** — G8. The recorder is **volatile** (in-process, lost on restart); Highway emits `Activity` and takes no OpenTelemetry dependency, so the application wires its own pipeline |
 > | Running as separate processes end to end | **Proven** — feature 010, and re-run for every feature since. See [`samples/RUNLOG.md`](../../samples/RUNLOG.md) |
+| **Replication with client-herd failover** — WAL-shipping standbys, epoch fencing, no elections; the master is the node the client herd is on | **Shipped** — features 042 + 042-1. The herd converges on a deterministic roster-priority successor and replays its own in-flight work with the same request ids, so a single server failure loses no acked work and mints no second master. RPO is the async-ack lag window (C9). See [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) Replication Commands |
 > | **Retention, size caps, durability by default** | **Not built** — five unmet constraints, specced as feature 016. `Build()` is still memory-only, which makes every delivery guarantee conditional |
 > | `dotnet new highway-server` template | **Not built** |
 > | Performance | **Uncharacterised.** No benchmark exists and no throughput target is claimed |
@@ -63,6 +64,8 @@ Choosing between them is one sentence: **one handler → Send, many handlers →
 The deployment consequence is the point of having both of the last two: run three instances of a **queue** handler and they *share* the work; run three instances of a **subscriber** and they each get *their own copy*.
 
 Highway runs its own broker on one connection and one server, without a second piece of infrastructure. (An earlier draft, when the broker was a full Garnet instance, delivered a distributed cache through the same connection — feature 026. That cache was **removed in feature 041** with the Garnet engine it depended on; RocksDB is a durable log-structured store, not a cache substrate. See `roadmap.md`.)
+
+> **Update 2026-09-15 (feature 042) — a second node is now a product, not a hope.** The default remains one writable broker. Operators who want a warm standby configure `HighwayReplicationOptions` (start-as-replica, a primary connection string, optional auto-failover). Failover is **priority plus fencing**, not an election: `T_promote > T_fence + margin` (defaults 8s / 5s / 1s), an optional witness that only answers "I see you", and `-NOTPRIMARY <endpoint> <epoch>` so clients follow the new primary. Replicas serve no client traffic. The v1 RPO is the measured replication lag window — an ack can be lost if the primary dies before the replica has it; that is stated in `constraints.md` C9 rather than papered over. There is no quorum and no plan to add one (O10 closed). Protocol: [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) Replication Commands.
 
 > **Highway is a library, not a runtime.** An earlier draft of this document called
 > it "a distributed application runtime for .NET" — which is, word for word, what

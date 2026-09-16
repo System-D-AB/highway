@@ -4,6 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using Highway.Server.Commands.Runtime;
 using Highway.Server.Observability;
 using Highway.Server.Storage;
+using Highway.Server.Storage.Rocks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Hosting;
@@ -58,7 +59,29 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
         _registry = new SubscriptionRegistry();
 
         var locks = new StripedLock();
-        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options);
+        var replication = store is RocksDbStore rocks ? rocks.Replication : null;
+        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication);
+
+        if (replication is not null)
+        {
+            // 042-1c C-T3: the feeder narrates topology changes (GOODBYE, promotions)
+            // through the same doorbell surface the herd already subscribes to.
+            replication.Narrator = message =>
+                _registry.Ring("hw:door:topology", System.Text.Encoding.UTF8.GetBytes(message));
+
+            // 042-1c C-T2: a master registers ITSELF in the roster at startup, so the
+            // roster names the whole set — the herd's successor order includes the node
+            // it is currently on. Runs before the endpoint opens; single-threaded.
+            if (replication.IsWritable)
+            {
+                RosterStore.TryUpsert(store,
+                    new RosterMember(
+                        replication.Options.ReplicaId,
+                        replication.Options.Priority,
+                        replication.SelfEndpoint),
+                    out _, out _);
+            }
+        }
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.Services.AddSingleton<IRespServerHost>(this);

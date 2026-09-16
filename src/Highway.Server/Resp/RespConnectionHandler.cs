@@ -75,6 +75,7 @@ internal sealed class RespConnectionHandler : ConnectionHandler
         }
         finally
         {
+            session.OnConnectionClosed();   // a counted client leaves the herd (042-1c C-T1)
             _host.RemoveSubscriber(connection.ConnectionId);
             await output.CompleteAsync();
         }

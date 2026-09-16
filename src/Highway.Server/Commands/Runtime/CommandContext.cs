@@ -1,5 +1,6 @@
 using Highway.Server.Observability;
 using Highway.Server.Storage;
+using Highway.Server.Storage.Rocks;
 
 namespace Highway.Server.Commands.Runtime;
 
@@ -9,9 +10,10 @@ namespace Highway.Server.Commands.Runtime;
 /// value read <b>once</b> before execution (037 R5.1: no clock inside a batch). A command
 /// reads <see cref="NowTicks"/>; it never calls <c>DateTime.UtcNow</c>.
 ///
-/// <para>Commands never see Kestrel, RocksDB, or a pipe — only this context and a
+/// <para>Commands never see Kestrel or a pipe — only this context and a
 /// <see cref="CommandInput"/> / <see cref="RespWriter"/>. That is the transport seam
-/// (037 R10): the same command runs under the RESP server (040) or a test harness (039).</para>
+/// (037 R10). 042 replication is the one sanctioned engine-level consumer: REPL
+/// commands read <see cref="Replication"/> rather than a RocksDB type directly.</para>
 /// </summary>
 internal sealed class CommandContext
 {
@@ -38,13 +40,20 @@ internal sealed class CommandContext
     /// </summary>
     public long NowTicks { get; }
 
+    /// <summary>
+    /// 042 T1: the WAL feeder, present only on a RocksDB-backed broker. Null on an
+    /// ephemeral in-memory store — REPL commands refuse with HW_INVALID_ARG.
+    /// </summary>
+    public ReplicationFeeder? Replication { get; }
+
     public CommandContext(
         IHighwayStore store,
         StripedLock locks,
         IDoorbell doorbell,
         FlightRecorder recorder,
         HighwayServerOptions options,
-        long nowTicks)
+        long nowTicks,
+        ReplicationFeeder? replication = null)
     {
         Store = store;
         Locks = locks;
@@ -52,5 +61,6 @@ internal sealed class CommandContext
         Recorder = recorder;
         Options = options;
         NowTicks = nowTicks;
+        Replication = replication;
     }
 }

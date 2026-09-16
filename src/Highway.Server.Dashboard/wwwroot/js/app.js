@@ -11,6 +11,7 @@ import * as entity from './entity.js';
 import * as diagnostics from './diagnostics.js';
 import * as message from './message.js';
 import * as events from './events.js';
+import * as replication from './replication.js';
 
 const VIEWS = {
     '/nodes': nodes,
@@ -20,6 +21,7 @@ const VIEWS = {
     '/diagnostics': diagnostics,
     '/message': message,
     '/events': events,
+    '/replication': replication,
 };
 
 const options = { pollIntervalMs: 3000 };

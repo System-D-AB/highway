@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Highway.Server\Highway.Server.csproj" />
+    <PackageReference Include="RocksDB" />
   </ItemGroup>
 
 </Project>

@@ -229,3 +229,61 @@ constraints register:
   the toolkit's, tested upstream (it powers the binding's `ReplicationTest` sample).
 - **Policy unchanged:** every distinctive Highway decision (RESP surface, slots+cap, epoch,
   deadman, witness, reconciliation, client failover) stands exactly as designed above.
+
+---
+
+## Addendum — 2026-09-15: T2v chose mechanism (a)
+
+*Recorded after the probe and crash-inject tests against pinned `RocksDB 11.1.2.3412`. The
+2026-08-29 toolkit table stands; this addendum only locks the apply-atomicity choice T2v
+was asked to make.*
+
+**Choice: (a) — derived watermark.** After a durable ingest, the applied watermark *is*
+`GetLatestSequenceNumber()`. A re-pulled page whose last sequence is ≤ that number is
+skipped whole. There is no `Put(sys|repl|watermark)`, so there is no apply-vs-watermark
+gap to crash between.
+
+**Proof (in `Highway.Server.Tests.Storage`):**
+
+- Without a skip, restaging an increment as read-modify-write against the replica's current
+  value double-applies (counter → 2).
+- `ReplicationApply.TryIngest` (sync write + skip-by-sequence) does not double-apply on
+  re-pull.
+- Hard-kill of the ingesting child *after* the sync write and *before* any extra watermark
+  `Put`: on reopen, `GetLatestSequenceNumber()` equals the ingested sequence and skip still
+  holds. Mechanism (b) is not needed.
+
+---
+
+## Addendum — 2026-09-15: OD1 pinned, OD4 decided
+
+**OD1 (timeouts).** Harness and fake-clock tests did not show a need to move the sketch
+defaults. Pinned:
+
+| Knob | Value |
+|---|---|
+| `FenceTimeout` (`T_fence`) | 5 seconds |
+| `PromoteTimeout` (`T_promote`) | 8 seconds |
+| `Margin` | 1 second |
+
+`AutoFailover` stays **off** by default. Config validation still refuses `T_promote <= T_fence + margin`.
+
+**OD4 (witness).** One RESP command: `HW.REPL.WITNESS` → `+OK`. The witness holds no data.
+A primary with `WitnessServer` set pings that command; success notes contact and defers
+fencing when replicas are silent. Not a file/blob lease.
+
+**Couplings the probe found, which T1/T2 must honour:**
+
+1. **`IngestBatch` is unsynced.** Toolkit `ReplicationConsumer.IngestBatch` calls
+   `db.Write(batch)` with default `WriteOptions`. Highway's replica must match 038
+   sync-per-commit, so `ReplicationApply` writes the same batch bytes with `SetSync(true)`
+   rather than calling `IngestBatch` as-is.
+2. **`IngestBatch(ulong sequenceNo, …)` ignores `sequenceNo`.** Sequence lives in the batch
+   bytes. The argument is used only for the skip check.
+3. **`GetUpdatesSince` is live-WAL only.** After an ungraceful primary kill, a reopen's
+   iterator is empty — recovered data is in SST, not in the tail. Pull resumes from the
+   replica's watermark against a *live* primary; initial/re-sync is still snapshot (T3).
+4. **`ReplicationSession.Files` opens a stream per file** and `Dispose()` deletes the
+   checkpoint directory. On Windows, that delete can fail while the primary still holds
+   hard-linked WAL/SST. T3 must copy/stream bytes and close streams before deleting the
+   capture dir; `DisableFileDeletions()` stays a narrow window around `GetInitialState`.

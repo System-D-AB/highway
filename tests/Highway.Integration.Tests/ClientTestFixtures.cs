@@ -28,6 +28,10 @@ internal sealed class EngineNode : IAsyncDisposable
     public IHighwayEngine Engine { get; }
     public string NodeName { get; }
 
+    /// <summary>The client's connection source — the herd tests read its ActiveServer/roster (042-1d).</summary>
+    public Highway.Client.Engine.HighwayConnectionSource Source
+        => _provider.GetRequiredService<Highway.Client.Engine.HighwayConnectionSource>();
+
     private EngineNode(ServiceProvider provider, string nodeName)
     {
         _provider = provider;

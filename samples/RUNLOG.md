@@ -14,6 +14,24 @@ documentation defect and loses it.
 
 ---
 
+## 2026-09-15 — feature 042 (replication T3–T9)
+
+**Libraries:** protocol **4.7** (`HW.REPL.SNAPSHOT`/`PROMOTE`/`FENCE`/`STATUS`/`WITNESS`, `-NOTPRIMARY`).
+**Ran:** full `Highway.Server.Tests` (508 passed), `Highway.Client.Tests` connection tests, `ReplicationPairTests` (4/4) — two embedded RESP nodes, not the three-process sample topology.
+
+The sample apps do not configure `HighwayReplicationOptions`; they remain a single writable broker. 4.7 is additive: existing `HW.QSEND`/`HW.CALL`/`HW.PUBLISH` shapes are unchanged, so the storefront verbs (`order`/`invoice`/`low`) are the same traffic they were on 4.6. A replica-pair sample is not in this tree yet.
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| Protocol conformance vs `docs/HIGHWAY-PROTOCOL.md` v4.7 | ✅ Command Index matches the dispatcher (dotted `HW.REPL.*`) |
+| Two-node pull + promote + resurrection demote | ✅ `ReplicationPairTests.TwoNode_PullApplies_Promote_ResurrectionDemotes_ZeroLoss` |
+| Client `-NOTPRIMARY` failover | ✅ `ReplicationPairTests.Client_OnNotPrimary_SwitchesToAdvertisedEndpoint` |
+| Isolated primary fences; witness ping defers | ✅ |
+
+---
+
 ## 2026-08-18 — feature 035 (NuGet Packages)
 
 **Libraries:** all four NuGet packages (`Highway.Abstractions`, `Highway.Client`, `Highway.Server`, `Highway.Server.Dashboard`) produced via `dotnet pack`.

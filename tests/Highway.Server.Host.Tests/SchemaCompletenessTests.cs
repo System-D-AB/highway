@@ -49,6 +49,7 @@ public class SchemaCompletenessTests
         ["Observability"] = "server.observability",
         ["Authentication"] = "authentication",
         ["Tls"] = "tls",
+        ["Replication"] = "server.replication",
     };
 
     [Fact]
@@ -127,6 +128,43 @@ public class SchemaCompletenessTests
                 $"a new ObservabilityOptions option needs a highway.json entry (031 R2.1): '{property.Name}' has none");
 
             EnvironmentOverrides.LeafPaths.Should().Contain(ObservabilityLeaves[property.Name]);
+        }
+    }
+
+    private static readonly Dictionary<string, string> ReplicationLeaves = new()
+    {
+        ["StartAsReplica"] = "server.replication.startAsReplica",
+        ["ReplicaId"] = "server.replication.replicaId",
+        ["Priority"] = "server.replication.priority",
+        ["AdvertiseEndpoint"] = "server.replication.advertiseEndpoint",
+        ["PrimaryServer"] = "server.replication.primaryServer",
+        ["SlotLagCapSequences"] = "server.replication.slotLagCapSequences",
+        ["AutoFailover"] = "server.replication.autoFailover",
+        ["FenceTimeout"] = "server.replication.fenceTimeout",
+        ["PromoteTimeout"] = "server.replication.promoteTimeout",
+        ["Margin"] = "server.replication.margin",
+        ["WillingnessThreshold"] = "server.replication.willingnessThreshold",
+        ["GoodbyeDrainTimeout"] = "server.replication.goodbyeDrainTimeout",
+        ["WalTtlSeconds"] = "server.replication.walTtlSeconds",
+        ["MaxTotalWalSizeBytes"] = "server.replication.maxTotalWalSizeBytes",
+    };
+
+    // The deadman clock is a live object injected by tests (TimeProvider), not a file value.
+    private static readonly string[] ReplicationFileExceptions = ["Clock"];
+
+    [Fact]
+    public void EveryReplicationOption_IsReachableFromTheSchema_OrRecordedAsAnException()
+    {
+        foreach (var property in WritableProperties(typeof(HighwayReplicationOptions)))
+        {
+            if (ReplicationFileExceptions.Contains(property.Name))
+                continue;
+
+            ReplicationLeaves.Should().ContainKey(property.Name,
+                $"a new HighwayReplicationOptions option needs a highway.json entry (031 R2.1): '{property.Name}' has none");
+
+            EnvironmentOverrides.LeafPaths.Should().Contain(ReplicationLeaves[property.Name],
+                $"'{property.Name}' maps to '{ReplicationLeaves[property.Name]}' but the loader does not know that path");
         }
     }
 

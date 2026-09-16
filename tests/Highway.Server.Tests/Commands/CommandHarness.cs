@@ -39,7 +39,10 @@ internal sealed class CommandHarness : IDisposable
     /// </summary>
     public byte[] Run(HighwayCommand command, long nowTicks, params string[] args)
     {
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks);
+        var replication = _store is Highway.Server.Storage.Rocks.RocksDbStore rocks
+            ? rocks.Replication
+            : null;
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication);
         var input = CommandInput.FromStrings(args);
         var writer = new RespWriter();
         command.Execute(ctx, input, writer);

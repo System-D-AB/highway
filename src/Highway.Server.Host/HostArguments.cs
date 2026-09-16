@@ -30,6 +30,12 @@ internal sealed class HostArguments
     public string? ServiceName { get; private set; }
     public string? ServiceDisplayName { get; private set; }
 
+    public bool Promote { get; private set; }
+    public string? PromoteReason { get; private set; }
+
+    public bool Goodbye { get; private set; }
+    public string? GoodbyeReason { get; private set; }
+
     public static HostArguments Parse(string[] args)
     {
         var result = new HostArguments();
@@ -39,7 +45,21 @@ internal sealed class HostArguments
 
         var index = 0;
 
-        if (Verbs.Contains(args[0]))
+        if (args[0] == "--promote")
+        {
+            result.Promote = true;
+            index = 1;
+            if (index < args.Length && !args[index].StartsWith('-'))
+                result.PromoteReason = args[index++];
+        }
+        else if (args[0] == "--goodbye")
+        {
+            result.Goodbye = true;
+            index = 1;
+            if (index < args.Length && !args[index].StartsWith('-'))
+                result.GoodbyeReason = args[index++];
+        }
+        else if (Verbs.Contains(args[0]))
         {
             result.Verb = args[0];
             index = 1;

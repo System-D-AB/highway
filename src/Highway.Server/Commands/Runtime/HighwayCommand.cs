@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Highway.Server.Internal;
 
@@ -158,6 +159,19 @@ internal abstract class HighwayCommand
             return false;
         }
         value = raw.ToArray();
+        return true;
+    }
+
+    /// <summary>Reads the next argument as an unsigned integer (042 replication sequences).</summary>
+    protected bool TryReadUInt64(CommandInput input, ref int idx, string name, out ulong value)
+    {
+        var raw = input.Next(ref idx);
+        value = 0;
+        if (raw.IsEmpty)
+            return Fail(HighwayErrors.InvalidArg, $"{name} is blank");
+        var text = Encoding.UTF8.GetString(raw);
+        if (!ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value))
+            return Fail(HighwayErrors.InvalidArg, $"{name} is not an unsigned integer");
         return true;
     }
 

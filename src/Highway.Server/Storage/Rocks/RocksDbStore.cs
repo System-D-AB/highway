@@ -39,38 +39,92 @@ public sealed class RocksDbStore : IHighwayStore
     private readonly string _path;
     private readonly bool _ownsDirectory;
 
-    private RocksDbStore(RocksDb db, string path, bool ownsDirectory)
+    /// <summary>
+    /// WAL retention defaults (042 T1/T4, configurable via
+    /// <see cref="HighwayReplicationOptions"/>). 24h TTL and 1 GiB cap: a dead replica
+    /// cannot fill the disk. A live replica whose watermark falls behind the retained
+    /// WAL is refused with <c>HW_REPL_GAP</c> and re-bootstraps via snapshot (G4) —
+    /// never served a gapped stream.
+    /// </summary>
+    internal const long DefaultWalTtlSeconds = 86_400;
+    internal const long DefaultMaxTotalWalSizeBytes = 1024L * 1024 * 1024;
+
+    /// <summary>The WAL feeder. Null only if construction failed before Open completed.</summary>
+    internal ReplicationFeeder Replication { get; }
+
+    /// <summary>The store's directory — where replication keeps its node-local files (epoch, resync marker).</summary>
+    internal string DataDir => _path;
+
+    private RocksDbStore(RocksDb db, string path, bool ownsDirectory, HighwayReplicationOptions? replication)
     {
         _db = db;
         _path = path;
         _ownsDirectory = ownsDirectory;
         _data = db.GetColumnFamily(HighwayColumnFamilies.OrderedNames[HighwayColumnFamilies.Data]);
-        // 038 R0.3: sync-per-commit is the default durability.
         _writeOptions = new WriteOptions().SetSync(true);
+        Replication = new ReplicationFeeder(db, path, replication ?? new HighwayReplicationOptions());
+        // A promotion announces its new epoch to every roster peer (042-1d); the closure
+        // reads through this fully-built store, invoked only at promote time.
+        Replication.RosterPeers = () => RosterStore.Read(this).Members.Select(m => m.Endpoint).ToArray();
     }
 
     /// <summary>
     /// Opens (or creates) a store at <paramref name="path"/>. The column families are
     /// created if absent and their order is asserted (physical-layout.md §6).
     /// </summary>
-    public static RocksDbStore Open(string path, bool ownsDirectory = false)
+    public static RocksDbStore Open(string path, bool ownsDirectory = false, HighwayReplicationOptions? replication = null)
     {
+        replication?.Validate();
+        Directory.CreateDirectory(path);
+
+        // G4: a replica that hit a WAL gap wrote the resync marker and was restarted.
+        // Wipe the stale database (keeping node-local replication files — the epoch must
+        // survive a re-sync, or a stale old primary could feed the fresh replica) and
+        // fall through to the ordinary blank-directory bootstrap: one code path (R2.2).
+        if (replication is { StartAsReplica: true } &&
+            !string.IsNullOrWhiteSpace(replication.PrimaryServer) &&
+            File.Exists(Path.Combine(path, ReplicaPuller.ResyncMarkerFileName)))
+        {
+            WipeForResync(path);
+        }
+
+        if (replication is { StartAsReplica: true } &&
+            !string.IsNullOrWhiteSpace(replication.PrimaryServer) &&
+            !File.Exists(Path.Combine(path, "CURRENT")))
+        {
+            ReplicaPuller.DownloadSnapshot(replication.PrimaryServer, path);
+        }
         var options = new DbOptions()
             .SetCreateIfMissing(true)
             .SetCreateMissingColumnFamilies(true)
-            // Keep WAL segments around long enough that a future WAL-shipping follower
-            // (stage-2 replication) does not inherit a truncated feed (stow storage-model §3).
-            .SetWalTtlSeconds(0); // 0 = keep until flushed; a positive TTL is a stage-2 tuning knob.
+            .SetWalTtlSeconds((ulong)(replication?.WalTtlSeconds ?? DefaultWalTtlSeconds))
+            .SetMaxTotalWalSize((ulong)(replication?.MaxTotalWalSizeBytes ?? DefaultMaxTotalWalSizeBytes));
 
         var families = new ColumnFamilies();
-        // Skip index 0 ("default") — RocksDB creates it implicitly. Add the rest in order.
         for (var i = 1; i < HighwayColumnFamilies.OrderedNames.Count; i++)
             families.Add(HighwayColumnFamilies.OrderedNames[i], new ColumnFamilyOptions());
 
         var db = RocksDb.Open(options, path, families);
 
         AssertColumnFamilyOrder(db);
-        return new RocksDbStore(db, path, ownsDirectory);
+        return new RocksDbStore(db, path, ownsDirectory, replication);
+    }
+
+    /// <summary>
+    /// Deletes the database files ahead of a snapshot re-bootstrap (G4), preserving the
+    /// node-local replication files: the persisted epoch and the bootstrap log. The
+    /// resync marker itself is removed — the wipe is the marker's fulfilment.
+    /// </summary>
+    private static void WipeForResync(string path)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(path))
+        {
+            var name = Path.GetFileName(entry);
+            if (name is "repl-epoch.txt" or "snapshot-bootstrap.log")
+                continue;
+            if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+            else File.Delete(entry);
+        }
     }
 
     private static void AssertColumnFamilyOrder(RocksDb db)
@@ -100,6 +154,7 @@ public sealed class RocksDbStore : IHighwayStore
     /// <inheritdoc />
     public void Dispose()
     {
+        Replication.Dispose();
         _db.Dispose();
         if (_ownsDirectory && Directory.Exists(_path))
         {

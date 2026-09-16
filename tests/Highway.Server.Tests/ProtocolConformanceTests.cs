@@ -70,7 +70,7 @@ public class ProtocolConformanceTests
         var rows = new List<(string, int)>();
         foreach (var line in section.Split('\n'))
         {
-            var match = Regex.Match(line.Trim(), @"^\|\s*`(HW\.[A-Z]+)`\s*\|\s*(-?\d+)\s*\|");
+            var match = Regex.Match(line.Trim(), @"^\|\s*`(HW\.[A-Z]+(?:\.[A-Z]+)*)`\s*\|\s*(-?\d+)\s*\|");
             if (match.Success)
                 rows.Add((match.Groups[1].Value, int.Parse(match.Groups[2].Value)));
         }

@@ -185,12 +185,17 @@ public sealed class EdgeLoadGeneratorService(
                 }
                 catch (Exception)
                 {
+                    // Record the timeout with a NON-cancellable token: a call still pending
+                    // when the process is stopped (e.g. mid-failover under drain) is cancelled
+                    // with `ct`, and writing this ledger line with that same cancelled token
+                    // would silently drop it — leaving I3 to see an "executed" with no
+                    // reply/timeout. The ledger record of the outcome must survive shutdown.
                     await ledger.WriteAsync(new LedgerEntry
                     {
                         Kind = "timed-out",
                         Type = "ValidateAccount",
                         Cid = cid
-                    }, ct);
+                    }, CancellationToken.None);
                     throw;
                 }
                 break;
@@ -219,12 +224,13 @@ public sealed class EdgeLoadGeneratorService(
                 }
                 catch (Exception)
                 {
+                    // Non-cancellable outcome record — see ValidateAccount above.
                     await ledger.WriteAsync(new LedgerEntry
                     {
                         Kind = "timed-out",
                         Type = "GetProfile",
                         Cid = cid
-                    }, ct);
+                    }, CancellationToken.None);
                     throw;
                 }
                 break;

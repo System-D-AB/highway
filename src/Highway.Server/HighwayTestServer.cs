@@ -1,6 +1,7 @@
 using System.Net;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
+using Highway.Server.Storage.Rocks;
 
 namespace Highway.Server;
 
@@ -35,6 +36,7 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
     private readonly HighwayServerOptions _opts;
     private RespServer _server;
     private IHighwayStore _store;
+    private ReplicaPuller? _puller;
 
     /// <summary>
     /// Connection string valid immediately after construction and stable across
@@ -92,8 +94,9 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
 
         configure?.Invoke(_opts);
         _opts.Port = Port;    // the delegate cannot change the probed port
+        _opts.Replication.AdvertiseEndpoint ??= $"127.0.0.1:{Port}";
 
-        (_server, _store) = StartServer(_opts, reuseStore: null);
+        (_server, _store, _puller) = StartServer(_opts, reuseStore: null);
 
         ConnectionString = _opts.Authentication.IsConfigured
             ? $"localhost:{Port},password={_opts.Authentication.Password}"
@@ -112,7 +115,7 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
         // server reopens the same path (recovery). A memory-only restart opens a fresh store, so
         // state is genuinely lost — the two behaviours the durability/memory tests rely on.
         DisposeServerAsync().GetAwaiter().GetResult();
-        (_server, _store) = StartServer(_opts, reuseStore: null);
+        (_server, _store, _puller) = StartServer(_opts, reuseStore: null);
     }
 
     /// <summary>
@@ -120,12 +123,12 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
     /// <see cref="HighwayServerOptions.DataDir"/> means an in-memory store (the default); a set one
     /// opens — and, on restart, reopens — a RocksDB directory whose data survives.
     /// </summary>
-    private static (RespServer Server, IHighwayStore Store) StartServer(
+    private static (RespServer Server, IHighwayStore Store, ReplicaPuller? Puller) StartServer(
         HighwayServerOptions opts, IHighwayStore? reuseStore)
     {
         var store = reuseStore
             ?? (opts.DataDir is { } dir
-                ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false)
+                ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, opts.Replication)
                 : new InMemoryStore());
 
         // The test server authenticates even on loopback (exemptLoopback: false) so every
@@ -150,7 +153,14 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
                 clientCertificateRequired: opts.Tls.ClientCertificateRequired)
             .GetAwaiter().GetResult();
 
-        return (server, store);
+        ReplicaPuller? puller = null;
+        if (store is Storage.Rocks.RocksDbStore rocks &&
+            !string.IsNullOrWhiteSpace(opts.Replication.PrimaryServer))
+        {
+            puller = new ReplicaPuller(rocks, opts.Replication);
+        }
+
+        return (server, store, puller);
     }
 
     /// <inheritdoc/>
@@ -161,12 +171,20 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
 
     private async Task DisposeServerAsync()
     {
+        if (_puller is not null)
+        {
+            await _puller.DisposeAsync();
+            _puller = null;
+        }
         await _server.DisposeAsync();
         // A RocksDB store must be disposed to release the directory; the in-memory store's Dispose
         // is a no-op. A durable store's directory is NOT deleted (ownsDirectory: false) so a later
         // Restart / reopen recovers it.
         _store.Dispose();
     }
+
+    /// <summary>042 replication runtime, when this instance is a durable RocksDB broker.</summary>
+    internal ReplicationFeeder? Replication => (_store as RocksDbStore)?.Replication;
 
     /// <summary>
     /// Reads live queue state directly from the in-process store (040 T8). Under Garnet this went

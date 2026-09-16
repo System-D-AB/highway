@@ -61,6 +61,78 @@ public class HighwayConnectionTests
     }
 
     [Fact]
+    public void TryParseNotPrimary_ReadsEndpointAndEpoch()
+    {
+        HighwayConnection.TryParseNotPrimary("NOTPRIMARY 127.0.0.1:6501 4", out var ep, out var epoch)
+            .Should().BeTrue();
+        ep.Should().Be("127.0.0.1:6501");
+        epoch.Should().Be(4UL);
+    }
+
+    [Fact]
+    public void ConnectionString_HostAndOptionParsing_SplitsCorrectly()
+    {
+        HighwayConnectionSource.HostsOf("localhost:6500,password=secret")
+            .Should().Equal("localhost:6500");
+        HighwayConnectionSource.OptionsOf("localhost:6500,password=secret")
+            .Should().Be(",password=secret");
+
+        // 042 R6.1: a multi-endpoint string names every host before the first option.
+        HighwayConnectionSource.HostsOf("hostA:6500,hostB:6500,password=secret,ssl=true")
+            .Should().Equal("hostA:6500", "hostB:6500");
+        HighwayConnectionSource.OptionsOf("hostA:6500,hostB:6500,password=secret,ssl=true")
+            .Should().Be(",password=secret,ssl=true");
+
+        HighwayConnectionSource.HostsOf("hostA:6500,hostB:6500").Should().Equal("hostA:6500", "hostB:6500");
+        HighwayConnectionSource.OptionsOf("hostA:6500,hostB:6500").Should().BeEmpty();
+    }
+
+    /// <summary>042-1b B-T2: the successor order — roster priority ascending, priority-0 skipped, current last, bootstrap fallback.</summary>
+    [Fact]
+    public void CandidateEndpoints_RosterOrder_SkipsZero_ExcludesCurrent_FallsBackToBootstrap()
+    {
+        var source = new HighwayConnectionSource(new HighwayOptions
+        {
+            Server = "boot1:6500,boot2:6500,password=secret",
+        });
+
+        // Before any roster: the bootstrap list, current (boot1) last.
+        source.CandidateEndpoints().Should().Equal("boot2:6500", "boot1:6500");
+
+        source.SetRosterForTests(
+        [
+            new HighwayConnectionSource.RosterEntry("never", 0, "never:6500"),
+            new HighwayConnectionSource.RosterEntry("third", 30, "c:6500"),
+            new HighwayConnectionSource.RosterEntry("first", 1, "a:6500"),
+            new HighwayConnectionSource.RosterEntry("second", 2, "b:6500"),
+        ], version: 3);
+
+        // The live roster supersedes the bootstrap string entirely (dynamic membership):
+        // priority ascending, the priority-0 node never a candidate.
+        source.CandidateEndpoints().Should().Equal("a:6500", "b:6500", "c:6500");
+
+        // GOODBYE shape: the incumbent is excluded even though it still answers.
+        source.SetRosterForTests(
+        [
+            new HighwayConnectionSource.RosterEntry("first", 1, "boot1:6500"),
+            new HighwayConnectionSource.RosterEntry("second", 2, "b:6500"),
+        ], version: 4);
+        source.CandidateEndpoints(excludeCurrent: true).Should().Equal(new[] { "b:6500" },
+            "the departing master is not a successor candidate");
+        source.CandidateEndpoints().Should().Equal(new[] { "b:6500", "boot1:6500" },
+            "without exclusion the current host is merely ordered last");
+    }
+
+    [Fact]
+    public void NoteObservedEpoch_IsMonotonic()
+    {
+        var source = new HighwayConnectionSource(new HighwayOptions { Server = "h:6500" });
+        source.NoteObservedEpoch(3);
+        source.NoteObservedEpoch(2);
+        source.LastSeenEpoch.Should().Be(3, "a client never forgets a higher epoch it has seen");
+    }
+
+    [Fact]
     public async Task ConnectAsync_UnreachableEndpoint_ThrowsServerUnreachableNamingTheEndpoint()
     {
         // Port 1 on loopback: nothing listens, and connect fails fast.

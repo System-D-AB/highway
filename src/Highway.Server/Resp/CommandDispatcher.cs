@@ -4,6 +4,7 @@ using Highway.Server.Internal;
 using Highway.Server.Observability;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
+using Highway.Server.Storage.Rocks;
 
 namespace Highway.Server.Resp;
 
@@ -15,8 +16,8 @@ namespace Highway.Server.Resp;
 /// the name→command registry and the arity contract that <c>ProtocolConformanceTests</c> and
 /// SE.Redis both rely on.
 ///
-/// <para><b>The served subset (037 R6.3, R3.2).</b> Exactly the 18 <c>HW.*</c> names below, with
-/// the same arities the Garnet <c>CommandTable</c> carried. An unknown command returns an error
+/// <para><b>The served subset (037 R6.3, R3.2, 042 T1).</b> The <c>HW.*</c> names below, with
+/// arities the protocol Command Index documents. An unknown command returns an error
 /// <b>naming the subset</b>, never a plausible <c>+OK</c>; a known command with the wrong number
 /// of arguments returns Garnet's own engine-shaped arity error (no <c>HW_</c> prefix — the
 /// 004.1 R2 AC5 classification contract). Arity follows the RESP convention: a positive value is the exact
@@ -37,21 +38,44 @@ internal sealed class CommandDispatcher
     private readonly IDoorbell _doorbell;
     private readonly FlightRecorder _recorder;
     private readonly HighwayServerOptions _options;
+    private readonly Highway.Server.Storage.Rocks.ReplicationFeeder? _replication;
 
     public CommandDispatcher(
         IHighwayStore store,
         StripedLock locks,
         IDoorbell doorbell,
         FlightRecorder recorder,
-        HighwayServerOptions options)
+        HighwayServerOptions options,
+        Highway.Server.Storage.Rocks.ReplicationFeeder? replication = null)
     {
         _store = store;
         _locks = locks;
         _doorbell = doorbell;
         _recorder = recorder;
         _options = options;
+        _replication = replication;
         _commands = BuildRegistry();
     }
+
+    /// <summary>
+    /// 042 G7: the session's raw-key write handlers (SET/SETEX/DEL on <c>hw:idem:*</c> /
+    /// <c>hw:rep:*</c>) consult this so a non-primary refuses raw writes exactly as it
+    /// refuses <c>HW.*</c> verbs. Null replication (in-memory broker) is always writable.
+    /// </summary>
+    public bool IsWritable => _replication?.IsWritable ?? true;
+
+    /// <summary>The <c>-NOTPRIMARY &lt;endpoint&gt; &lt;epoch&gt;</c> line for the raw surface (no trailing CRLF).</summary>
+    public string NotPrimaryLine()
+        => _replication is { } r ? $"-NOTPRIMARY {r.RedirectEndpoint()} {r.Epoch}" : "-NOTPRIMARY unknown 0";
+
+    /// <summary>
+    /// 042-1c C-T1: the session layer reports authenticated CLIENT sessions (peers — the
+    /// replica pullers — classify themselves out via their HW.REPL.* preamble). The count
+    /// is the herd: the thing that defines mastership and ends a GOODBYE drain early.
+    /// </summary>
+    public void NoteClientSessionOpened() => _replication?.ClientSessionOpened();
+
+    public void NoteClientSessionClosed() => _replication?.ClientSessionClosed();
 
     /// <summary>The served command names, for the "unknown command" error and the protocol doc.</summary>
     public IReadOnlyCollection<string> ServedCommands => (IReadOnlyCollection<string>)_commands.Keys;
@@ -192,20 +216,38 @@ internal sealed class CommandDispatcher
 
         if (!ArityMatches(entry.Arity, frame.Count))
         {
-            // The wire contract (004.1 R2 AC5, ErrorContractTests.WrongArity): arity errors are
-            // engine-shaped — Garnet enforced arity before Prepare and answered with Redis's own
-            // message, which deliberately does NOT carry the HW_ prefix (clients classify HW_* as
-            // Highway validation; a bare ERR is "anything else → permanent"). 037 R1 freezes reply
-            // shapes including errors, so the port keeps Garnet's exact form.
             writer.Error($"ERR wrong number of arguments for '{name.ToLowerInvariant()}' command");
             return;
         }
 
-        // Args are everything after the command name. The clock is read once, here.
+        if (_replication is { } repl)
+        {
+            repl.Tick();
+
+            // Herd-arrival promotion (042-1c C-T4): a WILLING standby becomes master on
+            // its first accepted client verb — the herd connecting IS the promotion
+            // trigger. Willingness (own master-link dead ∨ GOODBYE seen) is the no-split
+            // guard; probes, handshakes and admin reads never reach here.
+            if (!repl.IsWritable && !AllowedWhenNotWritable(name, repl.Role) && repl.IsWillingForHerd()
+                && repl.TryPromote("herd-arrival", out _))
+            {
+                NarrateTopology();
+            }
+
+            var refused = repl.IsDraining
+                ? !AllowedWhileDraining(name)                                  // GOODBYE quiesce (R12.2)
+                : !repl.IsWritable && !AllowedWhenNotWritable(name, repl.Role);
+            if (refused)
+            {
+                writer.NotPrimary(repl.RedirectEndpoint(), repl.Epoch);
+                return;
+            }
+        }
+
         var args = new byte[frame.Count - 1][];
         for (var i = 1; i < frame.Count; i++) args[i - 1] = frame[i];
 
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication);
         var command = entry.Factory();
         command.Execute(ctx, new CommandInput(args), writer);
     }
@@ -238,5 +280,52 @@ internal sealed class CommandDispatcher
         ["HW.FAIL"]        = new(7,  () => new HwFailCommand()),
         ["HW.TOUCH"]       = new(5,  () => new HwTouchCommand()),
         ["HW.JOB"]         = new(-2, () => new HwJobCommand()),
+        ["HW.REPL.HELLO"]  = new(-4, () => new HwReplHelloCommand()),
+        ["HW.REPL.PULL"]   = new(3,  () => new HwReplPullCommand()),
+        ["HW.REPL.ACK"]    = new(3,  () => new HwReplAckCommand()),
+        ["HW.REPL.SNAPSHOT"]= new(-2, () => new HwReplSnapshotCommand()),
+        ["HW.REPL.PROMOTE"] = new(-1, () => new HwReplPromoteCommand()),
+        ["HW.REPL.FENCE"]   = new(-1, () => new HwReplFenceCommand()),
+        ["HW.REPL.STATUS"]  = new(1,  () => new HwReplStatusCommand()),
+        ["HW.REPL.WITNESS"] = new(1,  () => new HwReplWitnessCommand()),
+        ["HW.REPL.JOIN"]    = new(4,  () => new HwReplJoinCommand()),
+        ["HW.REPL.GOODBYE"] = new(-1, () => new HwReplGoodbyeCommand()),
     };
+
+    private static bool AllowedWhenNotWritable(string name, ReplicaRole role)
+    {
+        // HW.REPL.HELLO is the epoch/endpoint gossip channel — a promoted node's
+        // announcement must reach a node in ANY role (a Demoted one records where the
+        // new primary lives, so its -NOTPRIMARY can redirect there).
+        if (name is "HW.STATS" or "HW.DISCOVER" or "HW.REPLAY" or "HW.REPL.HELLO"
+            or "HW.REPL.STATUS" or "HW.REPL.PROMOTE" or "HW.REPL.FENCE" or "HW.REPL.WITNESS"
+            or "HW.REPL.GOODBYE")
+            return true;
+
+        // A fenced primary still ships WAL so a replica can catch up.
+        if (role == ReplicaRole.Fenced && name is "HW.REPL.PULL" or "HW.REPL.ACK" or "HW.REPL.SNAPSHOT")
+            return true;
+
+        return false;
+    }
+
+    /// <summary>
+    /// The GOODBYE quiesce set (042-1c C-T5 / parent R12.2): completion verbs run so
+    /// in-flight work drains — pending replies return, claimed messages ack or record
+    /// their failure — while NEW work (calls, sends, publishes, claims, subscriptions,
+    /// job admin) is refused so the herd converges on the successor. WAL shipping stays
+    /// up so standbys catch the tail before the stand-down.
+    /// </summary>
+    private static bool AllowedWhileDraining(string name)
+        => name is "HW.REPLY" or "HW.ACK" or "HW.QACK" or "HW.FAIL" or "HW.TOUCH"
+            or "HW.REPL.PULL" or "HW.REPL.ACK" or "HW.REPL.SNAPSHOT"
+            || AllowedWhenNotWritable(name, ReplicaRole.Primary);
+
+    /// <summary>Rings the advisory TOPOLOGY narration with the current roster version (042-1a D4).</summary>
+    private void NarrateTopology()
+    {
+        var version = Storage.Rocks.RosterStore.Read(_store).Version;
+        _doorbell.Ring("hw:door:topology",
+            System.Text.Encoding.UTF8.GetBytes($"TOPOLOGY {version}"));
+    }
 }

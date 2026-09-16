@@ -285,6 +285,7 @@ public sealed class HighwayServerBuilder
         _opts.Observability.Validate();
         _opts.Authentication.Validate();
         _opts.Tls.Validate();
+        _opts.Replication.Validate();
         ValidateDeliveryOptions(_opts);
 
         ResolveDataDirectory(_opts);

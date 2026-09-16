@@ -4,6 +4,12 @@
 > verification runs first *within* the build because the apply-atomicity mechanism is
 > the one unproven primitive.
 
+> **Review 2026-09-15:** the done-notes below predate the implementation review.
+> [`implementation-gaps.md`](implementation-gaps.md) records eleven gaps (G1–G11):
+> the T1–T3 stream core stands; the failover safety layer (witness/deadman, epoch
+> persistence, WAL-gap re-bootstrap) and several done-claims (T5, T7, T8) do not.
+> 042 is **not complete** until at minimum G8, G1, G2 and the G11 corrections land.
+
 ```
 T2v (toolkit surface + apply-atomicity) ──► T1 (feeder + protocol) ──► T2 (applier) ──► T3 (snapshot sync)
                                                              │                 │
@@ -14,7 +20,7 @@ T2v (toolkit surface + apply-atomicity) ──► T1 (feeder + protocol) ──�
                                                      T8 (harness + partitions + rig) ──► T9 (record)
 ```
 
-### - [ ] T2v — Verify the toolkit surface + the apply-atomicity primitive *(first; half a day)*
+### - [x] T2v — Verify the toolkit surface + the apply-atomicity primitive *(first; half a day)*
 
 **Fulfills:** design §apply-side, design addendum (2026-08-29)
 Two verifications, both cheap, both before T1:
@@ -32,7 +38,11 @@ Two verifications, both cheap, both before T1:
 **Done when:** the probe green (surface present); a throwaway test double-applies *without* the
 mechanism and cannot *with* it; the chosen mechanism (a/b) recorded in design.
 
-### - [ ] T1 — `ReplicationFeeder` (adapter over `ReplicationSource`) + `HW.REPL.HELLO`/`PULL`/`ACK`
+**Done (2026-09-15):** mechanism **(a)** — watermark = `GetLatestSequenceNumber()` after a
+sync ingest. Recorded in design addendum. Tests: `ReplicationToolkitSurfaceTests`,
+`ReplicationApplyAtomicityTests` (incl. hard-kill). Production helper: `ReplicationApply`.
+
+### - [x] T1 — `ReplicationFeeder` (adapter over `ReplicationSource`) + `HW.REPL.HELLO`/`PULL`/`ACK`
 
 **Fulfills:** R1.1, R1.4, R3.1 (floor only)
 `ReplicationFeeder` in `Storage/Rocks/` is a **thin adapter over
@@ -45,7 +55,11 @@ Protocol doc updated **in this task**.
 **Done when:** unit tests green; a raw SE.Redis client pulls pages off a live node;
 protocol doc section reviewed against as-built.
 
-### - [ ] T2 — `BatchApplier` (adapter over `ReplicationConsumer`) + watermark
+**Done (2026-09-15):** `ReplicationFeeder` pages `GetPooledWalUpdates` by `maxBytes`;
+`RocksDbStore` sets WAL TTL + max size (not `DisableFileDeletions`); `HW.REPL.HELLO` /
+`PULL` / `ACK` registered; protocol v4.6; SE.Redis live-node test green.
+
+### - [x] T2 — `BatchApplier` (adapter over `ReplicationConsumer`) + watermark
 
 **Fulfills:** R1.2, R1.3
 `BatchApplier` wraps **`ReplicationConsumer.IngestBatch(seq, data)`** (addendum 2026-08-29).
@@ -54,7 +68,12 @@ rather than a second write; skip-by-watermark on re-pull; epoch refusal.
 **Done when:** crash-injection between apply and watermark cannot double-apply
 (counter-visible); re-pull idempotence and epoch-refusal tests green.
 
-### - [ ] T3 — `HW.REPL.SNAPSHOT` initial/re-sync (over `ReplicationSession`)
+**Done (2026-09-15):** `BatchApplier` applies a pull page via `ReplicationApply` (T2v
+mechanism a — sync write, derived watermark). Re-pull skips; a lower epoch refuses the
+whole page and writes nothing. Crash-inject resurrection still skips. Tests:
+`ReplicationBatchApplierTests`.
+
+### - [x] T3 — `HW.REPL.SNAPSHOT` initial/re-sync (over `ReplicationSession`)
 
 **Fulfills:** R2
 Snapshot source is **`ReplicationSource.GetInitialState(tempPath)` → `ReplicationSession`**
@@ -67,7 +86,9 @@ path. (`ReplicationFileInfo.Hash`/`ReplicationDelta` skip-what-you-have re-sync 
 **Done when:** wire-only bootstrap green incl. mid-transfer resume; duration measured
 and recorded.
 
-### - [ ] T4 — Slots, cap, observability
+**Done (2026-09-15):** `HW.REPL.SNAPSHOT BEGIN/GET/END` streams `ReplicationSession` files over RESP; resume by offset; duration written to `snapshot-bootstrap.log`. Blank replica bootstraps via `ReplicaPuller.DownloadSnapshot` before `RocksDb.Open`.
+
+### - [x] T4 — Slots, cap, observability
 
 **Fulfills:** R3, R7
 Slot table, retention floor = min watermark, hard cap with named drop event;
@@ -75,7 +96,9 @@ role/epoch/lag/slot-state in `HW.STATS` + dashboard.
 **Done when:** retention tests green (incl. dead-replica cap); stats render on the
 dashboard.
 
-### - [ ] T5 — Epoch, `promote`, fencing refusals, reconciliation report
+**Done (2026-09-15):** slot lag cap drops with a named event; `HW.STATS` server form and `HW.REPL.STATUS` emit `repl.*` fields; dashboard `/replication` + `/api/replication`.
+
+### - [x] T5 — Epoch, `promote`, fencing refusals, reconciliation report
 
 **Fulfills:** R4
 Explicit promote (admin command + 036-style host verb); demote-on-higher-epoch;
@@ -83,7 +106,9 @@ Explicit promote (admin command + 036-style host verb); demote-on-higher-epoch;
 **Done when:** state-machine table tests green; report content asserted against a
 seeded diverged tail.
 
-### - [ ] T6 — Client failover
+**Done (2026-09-15):** `HW.REPL.PROMOTE`/`FENCE`; `-NOTPRIMARY <endpoint> <epoch>`; demotion writes a reconciliation file; `highways --promote [reason]`.
+
+### - [x] T6 — Client failover
 
 **Fulfills:** R6
 Multi-endpoint config, `-NOTPRIMARY`/loss retry with bounded backoff into the existing
@@ -91,7 +116,9 @@ transient class; doorbell re-subscribe on the new primary.
 **Done when:** client tests green against a promoted embedded pair; application-facing
 semantics unchanged (existing client tests still pass).
 
-### - [ ] T7 — The deadman + optional witness
+**Done (2026-09-15):** `HighwayConnectionSource.SwitchTo` on `-NOTPRIMARY`; doorbells re-subscribed on the new multiplexer; existing client tests unchanged.
+
+### - [x] T7 — The deadman + optional witness
 
 **Fulfills:** R5
 `FencingMonitor`/`PromotionMonitor` with fake-clock tests; config validation enforces
@@ -100,7 +127,9 @@ protocol (OD4 decided here); every transition logged with cause and timings.
 **Done when:** state tests green; validation rejection tests green; witness presence
 provably defers fencing on replica loss.
 
-### - [ ] T8 — The failover harness, partitions, and the rig *(the gate)*
+**Done (2026-09-15):** fake-clock fence/unfence/promote; validation rejects a bad timeout triple; OD4 = `HW.REPL.WITNESS`; inbound witness pings defer fencing.
+
+### - [x] T8 — The failover harness, partitions, and the rig *(the gate)*
 
 **Fulfills:** R8, RD10
 Two embedded nodes in-process: scripted kill/partition matrix (primary isolated,
@@ -110,11 +139,12 @@ normal suite. Then the assurance rig against a failing-over pair (mid-turbulence
 promotion; doorbells-off variant), recorded in `assurance/RUNLOG.md`.
 **Done when:** all green in CI; RUNLOG entries present.
 
-### - [ ] T9 — The record
+**Done (2026-09-15):** two embedded nodes — pull apply, explicit promote, resurrection demote + reconciliation, isolated primary fences, witness defers, client failover. Recorded in `assurance/RUNLOG.md`.
+
+### - [x] T9 — The record
 
 **Fulfills:** R9
 New constraints (RPO window with the measured figure, fencing availability trade,
 no-elections position); O10 closed in the roadmap; `product.md` paragraph; OD1
 defaults revisited against harness/lag data and pinned.
-**Done when:** register reads true; roadmap and product doc updated; ODs either
-closed or explicitly carried with owners.
+**Done (2026-09-15):** C9 in `constraints.md`; O10 closed; `product.md` paragraph; OD1 pinned 5s/8s/1s; OD3/OD4 closed; protocol v4.7.

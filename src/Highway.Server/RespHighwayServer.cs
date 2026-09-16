@@ -3,6 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using Highway.Server.Observability;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
+using Highway.Server.Storage.Rocks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -34,6 +35,7 @@ public sealed class RespHighwayServer : IHighwayServer
 
     private IHighwayStore? _store;
     private RespServer? _server;
+    private ReplicaPuller? _puller;
     private IHighwayServerComponent[] _components = [];
     private bool _started;
 
@@ -61,9 +63,12 @@ public sealed class RespHighwayServer : IHighwayServer
     {
         if (_started) return;
 
+        _opts.Replication.AdvertiseEndpoint ??= $"{_opts.BindAddress}:{_opts.Port}";
+        _opts.Replication.Validate();
+
         // Store: RocksDB when a data directory is configured (durable), in-memory otherwise.
         _store = _opts.DataDir is { } dir
-            ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false)
+            ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, _opts.Replication)
             : new InMemoryStore();
 
         // Production keeps the loopback exemption (C6.x); the test server turns it off.
@@ -72,6 +77,12 @@ public sealed class RespHighwayServer : IHighwayServer
         _server = RespServer
             .StartAsync(_store, _opts, authenticator, _opts.BindAddress, _opts.Port, _serverCertificate)
             .GetAwaiter().GetResult();
+
+        if (_store is Storage.Rocks.RocksDbStore rocks &&
+            !string.IsNullOrWhiteSpace(_opts.Replication.PrimaryServer))
+        {
+            _puller = new ReplicaPuller(rocks, _opts.Replication);
+        }
 
         // Components (the dashboard) read broker state in-process from the store — never over a
         // self-connection, which the RESP server does not serve for raw commands.
@@ -121,6 +132,12 @@ public sealed class RespHighwayServer : IHighwayServer
             try { component.Dispose(); } catch { /* a component must not block teardown */ }
         }
         _components = [];
+
+        if (_puller is not null)
+        {
+            await _puller.DisposeAsync().ConfigureAwait(false);
+            _puller = null;
+        }
 
         if (_server is not null)
             await _server.DisposeAsync().ConfigureAwait(false);

@@ -467,7 +467,7 @@ distinction — but a point-in-time measurement is an upper bound, not the live-
 | Not guaranteed | Note |
 |---|---|
 | **Exactly-once delivery** | Not achievable without a transactional participant. `[Idempotent]` (013) makes a handler run at most once per *redelivery*; it cannot relate two separate sends. |
-| **High availability** | Single broker, `EnableCluster = false`. Durability yes, failover no. |
+| **High availability** | **Amended 2026-09-15 (feature 042).** Single-node remains the default (`AutoFailover` off). Two-node HA is now a product: one primary + priority replicas, epoch fencing, optional witness, **no elections**. A primary loss inside the async-ack replication lag window can lose an acked-but-not-yet-replicated message (C9.1). Dual-writable is refused by the two-timeout rule, proven in the in-process pair harness. |
 | **Replayable history** | C2.5. |
 | **Transactional enlistment** | No DTC, no ambient transaction. An MSMQ user who depends on this is not one Highway can serve. |
 | **Message priority or selective consumption** | FIFO, no filtering. |
@@ -736,3 +736,60 @@ get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the
 - [`brainstorming.md`](brainstorming.md) — design discussions that have not (yet) become features; the 2026-08-09 API-surface review and do-nothing triage live there
 - `docs/features/013-reliable-delivery/` — dead letters, delayed delivery, deduplication
 - `docs/features/014-queue/` — the queue
+- `docs/features/042-replication/` — two-node replication, fencing, no elections
+
+## C9 — Replication (feature 042)
+
+Two-node WAL shipping: one primary, N warm standbys, pull-based `HW.REPL.*`, no elections. Off by default (`HighwayReplicationOptions.AutoFailover = false`); a single node stays writable with no replica.
+
+### C9.1 — RPO is the measured replication lag window, never silent and never unbounded
+
+**Status: Met** — feature 042, async-ack (RD8).
+
+An ack is durable on the primary the instant the enqueue/`HW.ACK` commits (sync-per-commit, C4.5 / 038). It is durable on replicas within the lag window surfaced by `HW.STATS` (`repl.slot.N.lag`). A primary loss **inside that window** can lose an acked-but-not-yet-replicated message. That is the v1 RPO. "Ack after replica applied" (OD2) is not a v1 deliverable. Duplicates across failover are allowed and counted; loss is bounded by the window.
+
+The in-process pair harness (042 T8) asserts zero loss for messages that had been pulled and acked on the replica before promotion.
+
+### C9.2 — At most one writable node, by construction, without votes
+
+**Status: Met** — **amended 2026-09-16 (feature 042-1): mastership is client-defined, not deadman-timed.**
+
+*(The original 042 statement — a two-timeout deadman promoting a replica on `T_promote` of silence — was superseded before release. It is preserved here as the reasoning that led to the herd model, not as the shipped mechanism.)*
+
+The shipped rule (042-1): **the master is the node the client herd is connected to; a node with no clients is not a master and performs no master-only side effects.** There is one master because the clients move as one herd to one node, computed by a **pure successor function** — the highest-priority reachable *willing* node from the live roster — identical on every client, so the herd never splits. A standby answers *willing* only when its own link to the master is dead past `WillingnessThreshold` (or it saw GOODBYE), and a **priority stagger** on that threshold makes the highest-priority successor turn willing first, so several standbys losing the master at once still converge on one. Promotion happens on the herd's **first accepted client verb**, bumping a durable **epoch**; a resurrected lower-epoch node demotes on first contact and writes a reconciliation report, never merges. The 042 deadman survives as a **fence backstop only** (a herd-less, peer-less primary goes read-only) — no timer ever promotes. Proven by the in-process cohesion harness (`HerdCohesionTests`): hard kill, partition matrix, GOODBYE, rejoin, and a doubly-partitioned client all land in the designed state and never mint a second live master with clients.
+
+### C9.2a — The ack is the birth: where cluster responsibility begins
+
+**Status: Met** — feature 042-1 (R5), stated as a definition, not a caveat.
+
+**Before the ack**, a request lives only in the client; if the client dies before the ack it never entered the cluster — a non-birth, not a loss (no system solves client-death-before-ack; causality, not a Highway gap). **After the ack**, the request is the cluster's responsibility: durable on the master (sync-per-commit, C4.5) and replicated within the measured lag window (C9.1). Each client holds its own **unacknowledged** work and **replays it with the same request id** to the new master on convergence — so a single server failure loses no acked work, and the broker preserves nothing in-flight across a failover. Duplicates from replay are counted, never silently doubled (the existing at-least-once / `[Idempotent]` contract).
+
+### C9.3 — A replica serves no client writes
+
+**Status: Met** — feature 042, tightened by 042-1.
+
+Mutating `HW.*` on a non-master is `-NOTPRIMARY <endpoint> <epoch>` — and 042-1 extends the gate to the **raw-key write surface** (`SET`/`SETEX`/`DEL` on `hw:idem:*`/`hw:rep:*`), so a client pointed at a standby cannot stage local state either. Reads/stats/admin still run. During a **GOODBYE drain** the quiescing master serves only completion verbs (`HW.REPLY`/`ACK`/`QACK`/`FAIL`/`TOUCH`) plus WAL shipping, refusing new work so the herd converges.
+
+### C9.4 — A dead replica cannot fill the disk
+
+**Status: Met** — feature 042 T4.
+
+Retention is `SetWalTtlSeconds` (24h) + `SetMaxTotalWalSize` (1 GiB) plus a slot lag cap (`SlotLagCapSequences`, default 100_000). A slot past the cap is dropped with a named event; that replica re-bootstraps via `HW.REPL.SNAPSHOT`. `DisableFileDeletions` is only the snapshot capture window.
+
+### C9.5 — Highway does not elect a leader
+
+**Status: Met** — feature 042 / O10 closed; **reaffirmed and simplified by 042-1.**
+
+There is no quorum, no vote, no three-node majority, and (as of 042-1) no witness process either. Mastership is defined by client connection; the successor is deterministic config (priority + live roster); convergence is connection-driven; the epoch is a rule-based tie-break of last resort, not a tally. Adding any vote reopens 042 RD6 and 042-1 R1/R10 by name.
+
+### C9.6 — No auto-failback; deliberate failback is GOODBYE
+
+**Status: Met** — feature 042-1 (R13.4/R13.5).
+
+A returning or newly joined **higher-priority** node joins as a warm standby, syncs, and **waits** — it never preempts a healthy master (its healthy master-link keeps it *unwilling*, so no path can move the herd onto it). "Master = highest-priority live node" is deliberately **not** an invariant; the successor is computed at the *next* transition against the live roster. An operator who wants a specific node back issues **GOODBYE** on the current master — a chosen, timed, zero-loss handover. Every herd transition is thus forced-by-failure or chosen-by-operator, never surprise-triggered by a reboot.
+
+### C9.7 — Membership is master-owned; priority is a unique, timing-independent key
+
+**Status: Met** — feature 042-1 (R13.1–R13.3).
+
+A joining node announces its own-config priority (`HW.REPL.JOIN`); the master admits it into a **replicated roster** (so every standby, and any promoted successor, already holds it) and narrates the change. A priority **already held by a live member is refused** (`ERR HW_PRIORITY_TAKEN`, naming the holder) — first announcer wins, so the succession order can never depend on restart order. A client's connection string is **bootstrap only**; the live roster is the running truth, so the cluster can grow beyond any client's original string (dynamic membership).

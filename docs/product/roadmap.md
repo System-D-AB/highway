@@ -716,7 +716,7 @@ because it owns the server and a naive Redis wrapper cannot.
 |---|---|
 | Sagas / Process Managers | Long-running workflows with compensation |
 | Transactional Outbox | Atomic DB write + message publish |
-| Clustering | Multi-server Highway.Server deployment. **2026-09-11:** not reachable on Garnet's AOF — it depends on the storage-engine change, now specced as **037**. Design in [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) Part VI. **2026-09-15:** replication is now fully specced as [**042**](../features/042-replication/requirements.md) — priorities + fencing, no elections, 2 nodes with optional witness; the O10 node-count fork is **closed** by its RD6 |
+| Clustering | Multi-server Highway.Server deployment. **2026-09-15:** shipped as [**042**](../features/042-replication/requirements.md) — WAL shipping, epoch fencing, **no elections**. **2026-09-16:** the failover control model was redesigned as [**042-1**](../features/042-1-replication-improvements/requirements.md) — **client-herd mastership** (the master is where the clients are), a deterministic roster-priority successor, client-held in-flight replay, graceful GOODBYE, no auto-failback; the witness and timer-promotion are gone, the deadman is a fence-only backstop. O10 closed. Not a Redis Cluster / quorum product. |
 
 ### The 037 train (added 2026-09-15; re-cut same day)
 
@@ -734,9 +734,10 @@ the next feature starts.
 | [039-command-port](../features/039-command-port/requirements.md) | 23 `HW.*` commands onto the seam, mirror collapse, in-process command suites | — | **Shipped** (2026-09-15) |
 | [040-resp-server](../features/040-resp-server/requirements.md) | Reader/writer, Kestrel + TLS (non-HTTP ALPN), handshake subset (OD3 verified here), auth (037 R11), doorbells, embedded test server | **G0** | **Shipped** (2026-09-15) |
 | [041-garnet-removal](../features/041-garnet-removal/requirements.md) | Cache add-on removed; Garnet deleted; full suite, assurance rig ×2, C4.6 measured, constraints register amended | **G2 G3 G4** | **Shipped** (2026-09-15) |
-| [042-replication](../features/042-replication/requirements.md) | Stage 2 (after 041): WAL-shipping replication — one primary + priority replicas, slots-with-cap, epoch fencing, two-timeout deadman, optional witness, **no elections**; CI failover harness. Closes O10 | — | Specced 2026-09-15 |
+| [042-replication](../features/042-replication/requirements.md) | Stage 2 (after 041): WAL-shipping replication — one primary + priority replicas, slots-with-cap, epoch fencing, **no elections**; CI failover harness. Closes O10 | — | **Shipped** (2026-09-15); failover model superseded by 042-1 |
+| [042-1-replication-improvements](../features/042-1-replication-improvements/requirements.md) | Client-herd mastership: the master is the node the client herd is on; deterministic roster-priority successor with a willingness stagger (no split); client-held in-flight replay (same request id); graceful GOODBYE drain; no auto-failback; witness + timer-promotion removed, deadman → fence backstop. In-process cohesion harness gates every commit | 042 | **Shipped** (2026-09-16) — assurance-rig soak pending |
 
-> **2026-09-15 — the 037 train has landed (038→041).** The RocksDB engine, the command port, the
+> **2026-09-15 — the 037 train has landed (038→041), and 042 shipped the same day.** The RocksDB engine, the command port, the
 > RESP server and the Garnet removal are all shipped: Garnet's package and submodule are gone, the
 > broker is RESP + RocksDB, gates G1–G4 held (full suite green, assurance rig ×2 passed, C4.6 met on
-> RocksDB — see `constraints.md`). 042 (replication) remains specced, not started.
+> RocksDB — see `constraints.md`). **042 (replication) is shipped:** two-node WAL shipping, `-NOTPRIMARY` client failover, OD1 defaults pinned at 5s/8s/1s, O10 closed by RD6 (priorities + fencing, no elections).

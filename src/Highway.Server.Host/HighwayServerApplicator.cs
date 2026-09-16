@@ -88,6 +88,21 @@ internal static class HighwayServerApplicator
         o.ReceiveMaxCount = s.ReceiveMaxCount;
         o.WaitForCommit = s.WaitForCommit;
 
+        o.Replication.StartAsReplica = s.Replication.StartAsReplica;
+        o.Replication.ReplicaId = s.Replication.ReplicaId;
+        o.Replication.Priority = s.Replication.Priority;
+        o.Replication.AdvertiseEndpoint = s.Replication.AdvertiseEndpoint;
+        o.Replication.PrimaryServer = s.Replication.PrimaryServer;
+        o.Replication.SlotLagCapSequences = s.Replication.SlotLagCapSequences;
+        o.Replication.AutoFailover = s.Replication.AutoFailover;
+        o.Replication.FenceTimeout = s.Replication.FenceTimeout;
+        o.Replication.PromoteTimeout = s.Replication.PromoteTimeout;
+        o.Replication.Margin = s.Replication.Margin;
+        o.Replication.WillingnessThreshold = s.Replication.WillingnessThreshold;
+        o.Replication.GoodbyeDrainTimeout = s.Replication.GoodbyeDrainTimeout;
+        o.Replication.WalTtlSeconds = s.Replication.WalTtlSeconds;
+        o.Replication.MaxTotalWalSizeBytes = s.Replication.MaxTotalWalSizeBytes;
+
         o.Observability.RecorderEnabled = s.Observability.RecorderEnabled;
         o.Observability.DefaultCapacity = s.Observability.DefaultCapacity;
         o.Observability.DefaultRetention = s.Observability.DefaultRetention;

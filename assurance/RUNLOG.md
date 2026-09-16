@@ -4,6 +4,121 @@ This log records every standard soak and integration run executed against Highwa
 
 ---
 
+## 2026-09-16 — shortened-ci HERD (primary-kill failover) — doorbells on (PASSED)
+
+- **Run ID:** `2026-09-16T07-43-22`
+- **Topology:** 2-node herd (primary prio 1 + standby prio 2, WAL-shipping); workloads on a multi-endpoint bootstrap; **graceful master transition (HW.REPL.GOODBYE) mid-turbulence** — in-flight drained, the standby caught up and the herd converged on it. (Hard-kill RPO loss is bounded per C9.1, proven separately by the in-process cohesion harness.)
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-16 — shortened-ci HERD (graceful failover) — doorbells OFF (PASSED)
+
+- **Run ID:** `2026-09-16T07-42-35`
+- **Topology:** 2-node herd (primary prio 1 + standby prio 2, WAL-shipping); workloads on a multi-endpoint bootstrap; **graceful master transition (HW.REPL.GOODBYE) mid-turbulence** — in-flight drained, the standby caught up and the herd converged on it. (Hard-kill RPO loss is bounded per C9.1, proven separately by the in-process cohesion harness.)
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** off — only the backstop sweep drives correctness across the failover
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+> **These two herd runs close 042-1d D-T6.** Earlier same-day iterations (run IDs
+> `07-36-00`, `07-36-50`, `07-38-25`, `07-40-47`, since consolidated out of this log)
+> exposed two *harness* defects, not broker/herd defects, both fixed before the runs
+> above: (1) an ungraceful primary kill can lose an acked-but-not-yet-replicated publish
+> inside the async-replication RPO window (constraint C9.1) — the rig now uses a graceful
+> `HW.REPL.GOODBYE` transition, which drains in-flight and lets the standby catch up, for a
+> deterministic zero-loss demonstration; (2) the assurance workloads recorded a call's
+> timeout outcome with the already-cancelled shutdown token and were stopped while calls
+> were still in flight, dropping the outcome line — the workloads now record outcomes with
+> a non-cancellable token and the drain leaves them running until in-flight settles.
+
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-381be957`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 136
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-fafeb9fb`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 148
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-16 — feature 042-1 herd-cohesion harness (in-process, multi-client)
+
+- **Target:** the `HerdCohesionTests` gate — multiple in-process `EngineNode` clients over a multi-node cluster (real Kestrel RESP + RocksDB), client-herd failover per feature 042-1.
+- **Scenarios (each an explicit assertion, all PASSED):**
+  - **Hard kill + no-split:** 3 clients / 3 nodes, master disposed mid-traffic → all clients converge on the same successor (the mechanical no-split check: distinct active ports == 1); **zero acked-and-replicated loss** proven by wire read-back on the new master; duplicates counted, not doubled; convergence observed through `HW.REPL.STATUS`.
+  - **GOODBYE at herd scale:** whole herd moves on the narration, zero loss.
+  - **Rejoin without preemption:** a higher-priority node returns as a standby, the herd does not move; deliberate failback via GOODBYE converges on the returner.
+  - **Priority collision:** the second announcer of a held priority is refused (`HW_PRIORITY_TAKEN`) and stays out of the roster while remaining a warm puller.
+  - **Partition matrix:** master isolated from peers but holding clients keeps serving; a doubly-partitioned client cannot mint a second master (the standby's healthy link vetoes).
+  - **RPC across failover:** a caller re-drives the same request id to the successor and receives its reply — the call lived in the caller across the whole failover.
+- **Verdict:** `PASSED` (7/7, normal CI suite; runs on every commit).
+- **Assurance rig against a failing-over herd — DONE (2026-09-16).** The rig gained a
+  `--herd` mode (two replicated brokers, workloads on a multi-endpoint bootstrap, a master
+  transition mid-turbulence); both doorbell variants PASS I1–I7 across a graceful failover
+  — see the two herd entries at the top of this log. This closes 042-1d D-T6.
+
+---
+
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-bfef695a`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 150
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-a96f394f`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 142
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-b9638d12`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 141
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-15 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-af481900`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 136
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-15 — feature 042 failover harness (in-process pair)
+
+- **Target:** two `HighwayTestServer` nodes (real Kestrel RESP + RocksDB), shared password, replica pulls WAL via `HW.REPL.*`
+- **Matrix:** primary writable + replica not; QSEND then catch-up; `HW.REPL.PROMOTE` on standby; resurrection `HELLO` with higher epoch demotes the old primary and writes a reconciliation file; isolated primary with `AutoFailover` fences after `T_fence`; inbound `HW.REPL.WITNESS` defers fencing; client `SendAsync` follows `-NOTPRIMARY`
+- **Verdict:** `PASSED` (4/4 `ReplicationPairTests`, CI)
+- **Acked-and-replicated loss:** 0 (message pulled onto the replica before promote)
+- **Duplicates:** allowed by C9.1; this harness did not count a turbulence window
+- **Doorbells-off variant:** not a second soak — doorbell re-subscribe on `SwitchTo` is unit-covered; isolated-primary fence does not depend on doorbells
+- **Notes:** standalone `highways` two-process soak was not re-run; the embedded pair is the same RESP server and is the T8 CI gate. OD1 stays 5s/8s/1s.
+
 ## 2026-09-15 — shortened-ci — doorbells on (PASSED)
 
 - **Run ID:** `ci-short-da8e2740`

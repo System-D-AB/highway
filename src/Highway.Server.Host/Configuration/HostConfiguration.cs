@@ -133,6 +133,33 @@ public sealed class ServerSection
     public int ReceiveMaxCount { get; set; } = 500;
     public bool WaitForCommit { get; set; }
     public ObservabilitySection Observability { get; set; } = new();
+    public ReplicationSection Replication { get; set; } = new();
+}
+
+/// <summary>
+/// The <c>"server.replication"</c> section — maps onto <c>HighwayReplicationOptions</c>
+/// (feature 042). Defaults keep a single writable node with no auto-failover; the
+/// timeout invariant (<c>promoteTimeout &gt; fenceTimeout + margin</c>) is validated by
+/// the options class at startup.
+/// </summary>
+public sealed class ReplicationSection
+{
+    public bool StartAsReplica { get; set; }
+    public string ReplicaId { get; set; } = Environment.MachineName;
+    public int Priority { get; set; } = 100;
+    public string? AdvertiseEndpoint { get; set; }
+    public string? PrimaryServer { get; set; }
+    public ulong SlotLagCapSequences { get; set; } = 100_000;
+    public bool AutoFailover { get; set; }
+    public TimeSpan FenceTimeout { get; set; } = TimeSpan.FromSeconds(5);
+    public TimeSpan PromoteTimeout { get; set; } = TimeSpan.FromSeconds(8);
+    public TimeSpan Margin { get; set; } = TimeSpan.FromSeconds(1);
+    public TimeSpan WillingnessThreshold { get; set; } = TimeSpan.FromSeconds(3);
+    public TimeSpan GoodbyeDrainTimeout { get; set; } = TimeSpan.FromSeconds(5);
+    public long WalTtlSeconds { get; set; } = 86_400;
+
+    [JsonConverter(typeof(SizeJsonConverter))]
+    public long MaxTotalWalSizeBytes { get; set; } = 1024L * 1024 * 1024;
 }
 
 /// <summary>The <c>"server.observability"</c> section — maps onto <c>ObservabilityOptions</c>.</summary>

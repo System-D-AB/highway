@@ -49,6 +49,9 @@ internal interface IBrokerState
     /// </summary>
     Task<StateResult<IReadOnlyList<CatalogueEntryDto>>> CatalogueAsync(
         IReadOnlyCollection<string> observedNames, CancellationToken ct = default);
+
+    /// <summary>Replication role/epoch/slots (042 T4). Unavailable on an ephemeral broker.</summary>
+    Task<StateResult<IReadOnlyDictionary<string, string>>> ReplicationAsync(CancellationToken ct = default);
 }
 
 /// <summary>
@@ -232,6 +235,27 @@ internal sealed class BrokerState : IBrokerState, IAsyncDisposable
         }
 
         return StateResult<IReadOnlyList<CatalogueEntryDto>>.Ok(entries);
+    }
+
+    public async Task<StateResult<IReadOnlyDictionary<string, string>>> ReplicationAsync(CancellationToken ct = default)
+    {
+        var db = await TryConnectAsync(ct).ConfigureAwait(false);
+        if (db is null)
+            return StateResult<IReadOnlyDictionary<string, string>>.Fail(UnavailableReason());
+
+        try
+        {
+            var raw = (RedisResult[])(await db.ExecuteAsync("HW.REPL.STATUS").ConfigureAwait(false))!;
+            var map = new Dictionary<string, string>(StringComparer.Ordinal);
+            for (var i = 0; i + 1 < raw.Length; i += 2)
+                map[(string)raw[i]!] = (string)raw[i + 1]!;
+            return StateResult<IReadOnlyDictionary<string, string>>.Ok(map);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Reading replication status failed");
+            return StateResult<IReadOnlyDictionary<string, string>>.Fail($"could not read replication status: {ex.Message}");
+        }
     }
 
     /// <summary>Members of a derived group, from the 025 membership mirror. Empty pre-025.</summary>

@@ -3,6 +3,7 @@ using Highway.Server.Commands.Runtime;
 using Highway.Server.Observability;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
+using Highway.Server.Storage.Rocks;
 
 namespace Highway.Server.Resp;
 
@@ -104,6 +105,22 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
     {
         try { return Task.FromResult(StateResult<IReadOnlyList<CatalogueEntryDto>>.Ok(Catalogue(observedNames))); }
         catch (Exception ex) { return Task.FromResult(StateResult<IReadOnlyList<CatalogueEntryDto>>.Fail($"could not read catalogue: {ex.Message}")); }
+    }
+
+    public Task<StateResult<IReadOnlyDictionary<string, string>>> ReplicationAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            if (store is not RocksDbStore rocks)
+                return Task.FromResult(StateResult<IReadOnlyDictionary<string, string>>.Fail("replication requires a durable RocksDB broker"));
+
+            var map = rocks.Replication.StatsFields().ToDictionary(f => f.Name, f => f.Value, StringComparer.Ordinal);
+            return Task.FromResult(StateResult<IReadOnlyDictionary<string, string>>.Ok((IReadOnlyDictionary<string, string>)map));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(StateResult<IReadOnlyDictionary<string, string>>.Fail($"could not read replication status: {ex.Message}"));
+        }
     }
 
     public IReadOnlyList<NodeDto> Nodes()

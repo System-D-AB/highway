@@ -66,6 +66,9 @@ internal sealed class HwStatsCommand : HighwayCommand
             : _name is not null ? NamedStats(ctx, snap, _name)
             : ServerStats(ctx, snap);
 
+        if (_name is null && !_isRecorder && ctx.Replication is { } feeder)
+            fields.AddRange(feeder.StatsFields());
+
         writer.FieldArray(fields);
     }
 

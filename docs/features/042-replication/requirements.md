@@ -164,7 +164,7 @@ witness-as-requirement, listener/VIP infrastructure, geo-replication, sync-ack i
 
 | | Question | Owner |
 |---|---|---|
-| **OD1** | `T_fence` / `T_promote` / margin defaults (informed by measured heartbeat + lag figures from R7) | design, revisited after harness data |
+| **OD1** | `T_fence` / `T_promote` / margin defaults | **Closed 2026-09-15:** 5s / 8s / 1s. `AutoFailover` remains off by default |
 | **OD2** | Ack-after-replica-applied: adopt when, as what surface (per-queue? global?) | post-v1 of this feature |
-| **OD3** | Read-only stats endpoint on replicas (serve `HW.STATS` while refusing verbs?) | design |
-| **OD4** | Witness protocol shape (one RESP question vs a file/blob lease) | T7 |
+| **OD3** | Read-only stats endpoint on replicas (serve `HW.STATS` while refusing verbs?) | **Closed 2026-09-15:** yes — `HW.STATS` / `HW.DISCOVER` / `HW.REPLAY` run on a non-primary; mutating verbs get `-NOTPRIMARY` |
+| **OD4** | Witness protocol shape (one RESP question vs a file/blob lease) | **Closed 2026-09-15:** `HW.REPL.WITNESS` → `+OK` |
