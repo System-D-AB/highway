@@ -237,9 +237,9 @@ failover** (features 042 + 042-1 — WAL-shipping standbys, epoch fencing, no el
 is the node the client herd is on) and an **opt-in broker-local cache** (feature 044 —
 `IDistributedCache`/`HybridCache` L2, never replicated). **More than 1,200 tests pass.**
 
-**Not yet done:** the packaged broker distribution (the `highways` zip and its service
-installers — until it lands, run the broker from source), metrics (`Meter`) and health
-endpoints. Tracked on the [roadmap](docs/product/roadmap.md).
+**Not yet done:** metrics (`Meter`) and health endpoints, and prebuilt broker distributions for
+Linux and macOS. The Windows (`win-x64`) distribution — the `highways` zip with service
+installers — ships as of 2.0. Tracked on the [roadmap](docs/product/roadmap.md).
 
 ---
 
@@ -250,6 +250,8 @@ Highway declines to promise these, and says so rather than letting you find out:
 - **No broker (Highway.Server), no system.** Durability yes; failover is now available —
   configure standbys and the herd converges on a successor (features 042 + 042-1), with an RPO
   bounded by the async-replication lag window ([C9](docs/product/constraints.md)), not zero.
+  Failover is **new in 2.0** — proven by the in-process herd-cohesion suite; a long-running
+  production soak is still pending.
 - **No exactly-once delivery.** At-least-once, with `[Idempotent]` to suppress redelivery.
 - **The cache is broker-local and never replicated.** It is cold after a failover and
   epoch-invalidated — a cache miss is one more trip to the system of record, not data loss
@@ -257,6 +259,9 @@ Highway declines to promise these, and says so rather than letting you find out:
 - **Not a replayable log.** Pub/sub does not retain history for groups that never registered.
 - **No transactional enlistment**, message priority, or per-message TTL.
 - **No characterised throughput.** No benchmark exists, so no figure is claimed anywhere.
+- **The prebuilt broker distribution is Windows (`win-x64`) only.** Linux and macOS are fully
+  supported from source (a self-contained `dotnet publish`), but no prebuilt zip ships for them
+  yet.
 - **Retention over time is still unbounded** ([C4.1](docs/product/constraints.md), awaiting a
   breaking framing change). Storage growth itself is now bounded — the storage engine's compaction
   reclaims consumed messages ([C4.6](docs/product/constraints.md), met on the current engine).
