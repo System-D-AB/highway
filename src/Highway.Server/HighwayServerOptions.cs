@@ -15,7 +15,7 @@ namespace Highway.Server;
 public sealed class HighwayServerOptions
 {
     /// <summary>
-    /// TCP port Garnet listens on. Default: 6500.
+    /// TCP port the RESP listener binds. Default: 6500 (uncommon — not Redis, which is 6379).
     /// </summary>
     public int Port { get; set; } = 6500;
 
@@ -27,7 +27,7 @@ public sealed class HighwayServerOptions
     public IPAddress BindAddress { get; set; } = IPAddress.Loopback;
 
     /// <summary>
-    /// Directory for Garnet data (AOF + checkpoints). When <c>null</c> (default)
+    /// Directory for the durable store (write-ahead log + checkpoints). When <c>null</c> (default)
     /// the server runs in memory-only mode — no disk writes, no durability.
     /// </summary>
     public string? DataDir { get; set; }

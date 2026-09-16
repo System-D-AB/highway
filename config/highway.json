@@ -1,7 +1,7 @@
 {
   // ── Broker ────────────────────────────────────────────────────────────
   "server": {
-    "port": 6500,                          // Garnet RESP listener
+    "port": 6500,                          // RESP listener
     "bindAddress": "127.0.0.1",            // loopback default; "0.0.0.0" to expose
     "dataDir": "../data",                  // relative -> config file's directory
     "ephemeral": false,                    // true = memory-only, nothing survives
