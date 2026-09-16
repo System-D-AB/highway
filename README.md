@@ -18,8 +18,8 @@
 Highway gives you **durable queues**, **publish/subscribe** and **RPC** — all over one
 broker you run yourself, in one process.
 
-No AWS concepts. No Azure. No RabbitMQ, no Service Bus, no Kafka. No connection strings to
-a managed service, no SDK-shaped abstractions leaking into your domain. You write plain C#
+No AWS concepts. No Azure. No RabbitMQ, no Service Bus, no gRPC, no Kafka, no Redis. No connection
+strings to a managed service, no SDK-shaped abstractions leaking into your domain. You write plain C#
 POCOs — a class per message — and Highway builds the system around them: service discovery,
 load balancing, durable delivery, retries, timeouts and serialization.
 
@@ -30,8 +30,9 @@ infrastructure, not even for the integration tests.
 
 > **2.0.** The broker now runs on a purpose-built stack — a solid embedded storage engine behind a
 > Highway-native RESP server (Garnet is gone) — with **replication and client-herd failover**,
-> and an opt-in broker-local cache. The packages ship on nuget.org as `2.0.0`. See
-> [Status](#status) and [Known limits](#known-limits).
+> and a **built-in `IDistributedCache`** (with `HybridCache` L2) so caching needs no separate
+> Redis. The packages ship on nuget.org as `2.0.0`. See [Status](#status) and
+> [Known limits](#known-limits).
 
 ---
 
