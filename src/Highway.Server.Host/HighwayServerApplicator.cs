@@ -103,6 +103,12 @@ internal static class HighwayServerApplicator
         o.Replication.WalTtlSeconds = s.Replication.WalTtlSeconds;
         o.Replication.MaxTotalWalSizeBytes = s.Replication.MaxTotalWalSizeBytes;
 
+        o.Cache.Enabled = s.Cache.Enabled;
+        o.Cache.DefaultTtl = s.Cache.DefaultTtl;
+        o.Cache.MaxTtl = s.Cache.MaxTtl;
+        o.Cache.MaxSizeBytes = s.Cache.MaxSizeBytes;
+        o.Cache.SweepInterval = s.Cache.SweepInterval;
+
         o.Observability.RecorderEnabled = s.Observability.RecorderEnabled;
         o.Observability.DefaultCapacity = s.Observability.DefaultCapacity;
         o.Observability.DefaultRetention = s.Observability.DefaultRetention;

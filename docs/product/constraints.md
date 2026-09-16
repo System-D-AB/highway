@@ -793,3 +793,57 @@ A returning or newly joined **higher-priority** node joins as a warm standby, sy
 **Status: Met** — feature 042-1 (R13.1–R13.3).
 
 A joining node announces its own-config priority (`HW.REPL.JOIN`); the master admits it into a **replicated roster** (so every standby, and any promoted successor, already holds it) and narrates the change. A priority **already held by a live member is refused** (`ERR HW_PRIORITY_TAKEN`, naming the holder) — first announcer wins, so the succession order can never depend on restart order. A client's connection string is **bootstrap only**; the live roster is the running truth, so the cluster can grow beyond any client's original string (dynamic membership).
+
+---
+
+## C10 — Broker-local cache (feature 044)
+
+The cache is an **opt-in add-on** (`server.cache.enabled`, off by default). A broker with it off
+carries no cache surface, store, or behaviour delta — byte-identical to a pre-044 broker. Every
+guarantee below holds only when it is on.
+
+### C10.1 — The cache is broker-local and never replicated
+
+**Status: Met** — feature 044 (R2), structurally.
+
+The cache lives in a **separate store** — its own RocksDB at `dataDir/cache` on a durable broker,
+or an in-memory store on an ephemeral one — that the replication feeder never sees. A cache write
+uses a different physical database than the replicated dataset, so it **cannot** enter the WAL
+`HW.REPL.PULL` ships (RocksDB has one WAL per database; a separate database is the only way a
+write cannot replicate). This is proven by a type test (the cache store and the feeder share no
+reference) and a behaviour test (a cache write is absent from the broker DB's `GetUpdatesSince`),
+not merely asserted.
+
+### C10.2 — The cache is cold after a failover, and that is safe
+
+**Status: Met** — feature 044 (R6, R8.1).
+
+Because the cache does not replicate, the herd's **new master starts with an empty cache**. On top
+of that, any **epoch change wipes** the cache: a mastership move means another node may have mutated
+the system of record, so every cached value is suspect and is dropped wholesale. A herd-holding
+master that keeps its herd through a peer-only partition does **not** change epoch and so does
+**not** wipe. The accepted cost is a **cold-cache burst**: at the instant the herd lands on a new
+master, every key misses at once → a spike of backing-store traffic while the cache repopulates.
+For most workloads a brief blip; for a very cache-heavy read path, worth knowing. It is strictly
+safer than serving stale data across a mastership change.
+
+### C10.3 — Every entry is TTL-bounded, and the store is size-bounded
+
+**Status: Met** — feature 044 (R5, R7).
+
+A cache set with no caller TTL gets the broker's `defaultTtl` (24 hours); any caller TTL is clamped
+to `maxTtl` (7 days) — an entry is never immortal. A background sweeper drops lapsed entries, and
+when the store exceeds `maxSizeBytes` it is **cleared wholesale** with a named event (v1 has no
+per-key LRU — a cache, cleared, is one round of misses, not data loss). The store cannot grow
+unbounded.
+
+### C10.4 — The cache is best-effort, and a miss is never data loss
+
+**Status: Met** — feature 044 (R3).
+
+The cache rides the shared herd connection, so a cache op issued mid-failover **re-drives to the new
+master and is a miss there** — no special handling, no stale read. A cache read on a non-master is a
+miss; a cache write on a non-master is refused `-NOTPRIMARY` like any write. In every one of these
+cases the caller does what a cache miss always means: one more trip to the system of record, then
+re-cache. The cache is an optimisation over the durable, replicated dataset — never a substitute for
+it.

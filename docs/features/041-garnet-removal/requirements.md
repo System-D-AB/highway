@@ -28,6 +28,14 @@ cache-removal diff here, R1.5, being the sole recorded exception).*
    is the one recorded exception to 037 R1.4 — the cache is an add-on, and add-ons do
    not get feature slots (owner's direction, 2026-09-15).
 
+   > **2026-09-16 — succeeded by feature 044.** The cache returned, but not as the
+   > Garnet-era one. Feature [044](../044-cache/requirements.md) reintroduces
+   > `IDistributedCache` as a **broker-local, never-replicated** add-on over a *separate*
+   > RocksDB (`dataDir/cache`), opt-in and off by default. It is a genuinely different
+   > guarantee — cold after a failover, epoch-invalidated, TTL-bounded — so it is a new
+   > feature, not a revert. This removal note stands as the record of the 026 cache's
+   > retirement; 044 is its successor, not its undo.
+
 ### Requirement 2: The suite is the proof — gate G2 (037 R1.2, R1.4)
 
 #### Acceptance Criteria

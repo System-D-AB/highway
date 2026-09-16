@@ -229,6 +229,14 @@ internal sealed class RespSession
             return SessionResult.One(BulkOrNull(_dispatcher.ReadIdempotencyKey(key)));
         }
 
+        // The broker-local cache read (044). Allowed on a non-master too — a standby's cache
+        // is cold/irrelevant, so it simply misses. A miss is the honest answer.
+        if (_dispatcher.CacheEnabled && key.StartsWith(CommandDispatcher.CacheKeyPrefix, StringComparison.Ordinal))
+        {
+            if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
+            return SessionResult.One(BulkOrNull(_dispatcher.CacheGet(key)));
+        }
+
         // Any other bare GET is SE.Redis's tiebreaker probe (__Booksleeve_TieBreak). We store no
         // plain keys, so a null bulk is the honest answer and what SE.Redis expects unset.
         return SessionResult.One(NullBulk());
@@ -247,10 +255,13 @@ internal sealed class RespSession
             return SessionResult.One(Err("wrong number of arguments for 'SET'"));
 
         var key = Encoding.UTF8.GetString(frame[1]);
-        if (!key.StartsWith(CommandDispatcher.IdempotencyKeyPrefix, StringComparison.Ordinal))
+        var isIdem = key.StartsWith(CommandDispatcher.IdempotencyKeyPrefix, StringComparison.Ordinal);
+        var isCache = _dispatcher.CacheEnabled && key.StartsWith(CommandDispatcher.CacheKeyPrefix, StringComparison.Ordinal);
+        if (!isIdem && !isCache)
             return SessionResult.One(Err(
-                $"SET is served only for idempotency keys ('{CommandDispatcher.IdempotencyKeyPrefix}*'); " +
-                $"'{key}' is not writable over the wire"));
+                $"SET is served only for idempotency keys ('{CommandDispatcher.IdempotencyKeyPrefix}*')" +
+                (_dispatcher.CacheEnabled ? $" and cache keys ('{CommandDispatcher.CacheKeyPrefix}*')" : "") +
+                $"; '{key}' is not writable over the wire"));
 
         if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
         if (!EnsureWritable(out var refused)) return SessionResult.One(refused!);
@@ -280,6 +291,14 @@ internal sealed class RespSession
             }
         }
 
+        // Cache SET (044): unconditional store with the given (or default) TTL. NX has no
+        // meaning for a cache and is ignored.
+        if (isCache)
+        {
+            _dispatcher.CacheSet(key, value, pxMilliseconds);
+            return SessionResult.One(Simple("OK"));
+        }
+
         return _dispatcher.WriteIdempotencyKey(key, value, pxMilliseconds, notExists)
             ? SessionResult.One(Simple("OK"))
             : SessionResult.One(NullBulk());   // NX found a live value — the duplicate path
@@ -296,13 +315,16 @@ internal sealed class RespSession
             return SessionResult.One(Err($"wrong number of arguments for '{(milliseconds ? "PTTL" : "TTL")}'"));
 
         var key = Encoding.UTF8.GetString(frame[1]);
-        if (!key.StartsWith(CommandDispatcher.IdempotencyKeyPrefix, StringComparison.Ordinal))
+        var isIdem = key.StartsWith(CommandDispatcher.IdempotencyKeyPrefix, StringComparison.Ordinal);
+        var isCache = _dispatcher.CacheEnabled && key.StartsWith(CommandDispatcher.CacheKeyPrefix, StringComparison.Ordinal);
+        if (!isIdem && !isCache)
             return SessionResult.One(Err(
-                $"TTL is served only for idempotency keys ('{CommandDispatcher.IdempotencyKeyPrefix}*')"));
+                $"TTL is served only for idempotency keys ('{CommandDispatcher.IdempotencyKeyPrefix}*')" +
+                (_dispatcher.CacheEnabled ? $" and cache keys ('{CommandDispatcher.CacheKeyPrefix}*')" : "")));
 
         if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
 
-        var ms = _dispatcher.ReadIdempotencyTtlMs(key);
+        var ms = isCache ? _dispatcher.CacheTtlMs(key) : _dispatcher.ReadIdempotencyTtlMs(key);
         return SessionResult.One(Integer(ms < 0 || milliseconds ? ms : ms / 1000));
     }
 
@@ -318,10 +340,13 @@ internal sealed class RespSession
             return SessionResult.One(Err($"wrong number of arguments for '{(secondsGranularity ? "SETEX" : "PSETEX")}'"));
 
         var key = Encoding.UTF8.GetString(frame[1]);
-        if (!key.StartsWith(CommandDispatcher.IdempotencyKeyPrefix, StringComparison.Ordinal))
+        var isIdem = key.StartsWith(CommandDispatcher.IdempotencyKeyPrefix, StringComparison.Ordinal);
+        var isCache = _dispatcher.CacheEnabled && key.StartsWith(CommandDispatcher.CacheKeyPrefix, StringComparison.Ordinal);
+        if (!isIdem && !isCache)
             return SessionResult.One(Err(
-                $"SETEX is served only for idempotency keys ('{CommandDispatcher.IdempotencyKeyPrefix}*'); " +
-                $"'{key}' is not writable over the wire"));
+                $"SETEX is served only for idempotency keys ('{CommandDispatcher.IdempotencyKeyPrefix}*')" +
+                (_dispatcher.CacheEnabled ? $" and cache keys ('{CommandDispatcher.CacheKeyPrefix}*')" : "") +
+                $"; '{key}' is not writable over the wire"));
 
         if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
         if (!EnsureWritable(out var refused)) return SessionResult.One(refused!);
@@ -330,7 +355,10 @@ internal sealed class RespSession
             return SessionResult.One(Err("invalid expire time"));
 
         var px = secondsGranularity ? ttl * 1000 : ttl;
-        _dispatcher.WriteIdempotencyKey(key, frame[3], px, notExists: false);
+        if (isCache)
+            _dispatcher.CacheSet(key, frame[3], px);
+        else
+            _dispatcher.WriteIdempotencyKey(key, frame[3], px, notExists: false);
         return SessionResult.One(Simple("OK"));
     }
 
@@ -361,9 +389,20 @@ internal sealed class RespSession
             return SessionResult.One(Integer(1));
         }
 
+        // Cache remove (044).
+        if (_dispatcher.CacheEnabled && key.StartsWith(CommandDispatcher.CacheKeyPrefix, StringComparison.Ordinal))
+        {
+            if (!EnsureAuthorized(out var denied)) return SessionResult.One(denied!);
+            if (!EnsureWritable(out var refused)) return SessionResult.One(refused!);
+            _dispatcher.CacheRemove(key);
+            return SessionResult.One(Integer(1));
+        }
+
         return SessionResult.One(Err(
             $"DEL is served only for reply slots ('{CommandDispatcher.ReplyKeyPrefix}*') and idempotency keys " +
-            $"('{CommandDispatcher.IdempotencyKeyPrefix}*'); '{key}' is not deletable over the wire"));
+            $"('{CommandDispatcher.IdempotencyKeyPrefix}*')" +
+            (_dispatcher.CacheEnabled ? $" and cache keys ('{CommandDispatcher.CacheKeyPrefix}*')" : "") +
+            $"; '{key}' is not deletable over the wire"));
     }
 
     // ---- subscriptions -------------------------------------------------------

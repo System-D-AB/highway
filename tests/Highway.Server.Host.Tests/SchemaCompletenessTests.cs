@@ -50,6 +50,7 @@ public class SchemaCompletenessTests
         ["Authentication"] = "authentication",
         ["Tls"] = "tls",
         ["Replication"] = "server.replication",
+        ["Cache"] = "server.cache",
     };
 
     [Fact]

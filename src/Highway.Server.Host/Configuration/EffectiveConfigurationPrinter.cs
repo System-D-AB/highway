@@ -51,6 +51,11 @@ internal static class EffectiveConfigurationPrinter
         writer.WriteLine($"    replication.goodbyeDrainTimeout  : {c.Server.Replication.GoodbyeDrainTimeout}");
         writer.WriteLine($"    replication.walTtlSeconds        : {c.Server.Replication.WalTtlSeconds}");
         writer.WriteLine($"    replication.maxTotalWalSizeBytes : {c.Server.Replication.MaxTotalWalSizeBytes}");
+        writer.WriteLine($"    cache.enabled                    : {c.Server.Cache.Enabled}");
+        writer.WriteLine($"    cache.defaultTtl                 : {c.Server.Cache.DefaultTtl}");
+        writer.WriteLine($"    cache.maxTtl                     : {c.Server.Cache.MaxTtl}");
+        writer.WriteLine($"    cache.maxSizeBytes               : {c.Server.Cache.MaxSizeBytes}");
+        writer.WriteLine($"    cache.sweepInterval              : {c.Server.Cache.SweepInterval}");
         writer.WriteLine($"    observability.recorderEnabled    : {c.Server.Observability.RecorderEnabled}");
         writer.WriteLine($"    observability.defaultCapacity    : {c.Server.Observability.DefaultCapacity}");
         writer.WriteLine($"    observability.defaultRetention   : {c.Server.Observability.DefaultRetention}");

@@ -39,6 +39,7 @@ internal sealed class CommandDispatcher
     private readonly FlightRecorder _recorder;
     private readonly HighwayServerOptions _options;
     private readonly Highway.Server.Storage.Rocks.ReplicationFeeder? _replication;
+    private readonly Highway.Server.Storage.Cache.IHighwayCacheStore? _cache;
 
     public CommandDispatcher(
         IHighwayStore store,
@@ -46,7 +47,8 @@ internal sealed class CommandDispatcher
         IDoorbell doorbell,
         FlightRecorder recorder,
         HighwayServerOptions options,
-        Highway.Server.Storage.Rocks.ReplicationFeeder? replication = null)
+        Highway.Server.Storage.Rocks.ReplicationFeeder? replication = null,
+        Highway.Server.Storage.Cache.IHighwayCacheStore? cache = null)
     {
         _store = store;
         _locks = locks;
@@ -54,6 +56,7 @@ internal sealed class CommandDispatcher
         _recorder = recorder;
         _options = options;
         _replication = replication;
+        _cache = cache;
         _commands = BuildRegistry();
     }
 
@@ -191,6 +194,49 @@ internal sealed class CommandDispatcher
         using var batch = _store.NewBatch();
         _store.Delete(batch, IdemStoreKey(wireKey));
         batch.Commit();
+    }
+
+    /// <summary>
+    /// The broker-local cache keys (<c>hw:cache:*</c>, feature 044): the third and last raw-key
+    /// family the server routes. Served only when the cache is enabled; it lives in a separate,
+    /// non-replicated store, so these methods never touch the replicated <see cref="IHighwayStore"/>.
+    /// The app key is the wire key with the <c>hw:cache:</c> prefix stripped.
+    /// </summary>
+    public const string CacheKeyPrefix = "hw:cache:";
+
+    /// <summary>True when the broker-local cache is enabled (routes <c>hw:cache:*</c>).</summary>
+    public bool CacheEnabled => _cache is not null;
+
+    private static string CacheKey(string wireKey) => wireKey[CacheKeyPrefix.Length..];
+
+    /// <summary>Cache read — live value or null (miss). Null when the cache is disabled.</summary>
+    public byte[]? CacheGet(string wireKey)
+        => _cache?.Get(CacheKey(wireKey), DateTime.UtcNow.Ticks);
+
+    /// <summary>
+    /// Cache write. <paramref name="pxMilliseconds"/> is the caller's expiry (from SET PX/EX or
+    /// SETEX); null applies the configured default TTL. Every TTL is clamped to the max
+    /// (044 R5). No-op when the cache is disabled.
+    /// </summary>
+    public void CacheSet(string wireKey, byte[] value, long? pxMilliseconds)
+    {
+        if (_cache is null) return;
+        var now = DateTime.UtcNow.Ticks;
+        var ttl = pxMilliseconds is { } px ? TimeSpan.FromMilliseconds(px) : _options.Cache.DefaultTtl;
+        if (ttl > _options.Cache.MaxTtl) ttl = _options.Cache.MaxTtl;
+        _cache.Set(CacheKey(wireKey), value, now + ttl.Ticks);
+    }
+
+    /// <summary>Cache remove. No-op when the cache is disabled.</summary>
+    public void CacheRemove(string wireKey) => _cache?.Remove(CacheKey(wireKey));
+
+    /// <summary>Cache entry TTL in ms — Redis PTTL semantics (-2 absent/expired, -1 no expiry, else remaining).</summary>
+    public long CacheTtlMs(string wireKey)
+    {
+        if (_cache is null) return -2;
+        var now = DateTime.UtcNow.Ticks;
+        var expiry = _cache.GetExpiryTicks(CacheKey(wireKey), now);
+        return expiry is null ? -2 : Math.Max(0, (expiry.Value - now) / TimeSpan.TicksPerMillisecond);
     }
 
     /// <summary>True if <paramref name="name"/> (case-insensitive) is a served <c>HW.*</c> command.</summary>

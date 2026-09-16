@@ -123,8 +123,9 @@ public static class ServiceCollectionExtensions
         // existing registration.
         //
         // The distributed-cache add-on (feature 026) was removed in feature 041 with the Garnet
-        // engine that made it free — see the release notes. The connection source stays: the
-        // engine depends on it.
+        // engine that made it free, then reintroduced in feature 044 as a broker-local,
+        // never-replicated cache — opt in with AddHighwayCache(...). The connection source stays
+        // regardless: the engine depends on it, and the cache adapter rides it.
         services.TryAddSingleton<HighwayConnectionSource>(sp => new HighwayConnectionSource(options));
 
         return services;

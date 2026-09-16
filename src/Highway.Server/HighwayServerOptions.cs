@@ -281,4 +281,44 @@ public sealed class HighwayServerOptions
 
     /// <summary>Replication (042). Defaults keep a single writable node with no auto-failover.</summary>
     public HighwayReplicationOptions Replication { get; set; } = new();
+
+    /// <summary>Broker-local cache (044). Off by default; when enabled, a separate, non-replicated store.</summary>
+    public CacheOptions Cache { get; set; } = new();
+}
+
+/// <summary>
+/// The broker-local cache (feature 044). Off by default. When enabled, the cache is a
+/// separate, non-replicated store (its own RocksDB database at <c>dataDir/cache</c>, or
+/// in-memory on an ephemeral broker), bounded by TTL and wiped on every epoch change.
+/// </summary>
+public sealed class CacheOptions
+{
+    /// <summary>Opt-in. When false the broker serves no cache commands and opens no cache store.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>TTL applied to an entry whose caller supplied no expiration. Default 24h (044).</summary>
+    public TimeSpan DefaultTtl { get; set; } = TimeSpan.FromHours(24);
+
+    /// <summary>Caps any expiration — caller-supplied or default. Default 7d. Must be &gt;= <see cref="DefaultTtl"/>.</summary>
+    public TimeSpan MaxTtl { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>Soft size cap: over this, the sweeper clears the cache (safe — regenerable). Default 256 MiB.</summary>
+    public long MaxSizeBytes { get; set; } = 256L * 1024 * 1024;
+
+    /// <summary>How often the sweeper drops expired entries and checks the size cap. Default 30s.</summary>
+    public TimeSpan SweepInterval { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Refuses a configuration a cache cannot honour, naming the value.</summary>
+    public void Validate()
+    {
+        if (!Enabled) return;
+        if (DefaultTtl <= TimeSpan.Zero)
+            throw new InvalidOperationException($"Cache DefaultTtl must be positive, but was {DefaultTtl}.");
+        if (MaxTtl < DefaultTtl)
+            throw new InvalidOperationException($"Cache MaxTtl ({MaxTtl}) must be >= DefaultTtl ({DefaultTtl}).");
+        if (MaxSizeBytes <= 0)
+            throw new InvalidOperationException($"Cache MaxSizeBytes must be positive, but was {MaxSizeBytes}.");
+        if (SweepInterval <= TimeSpan.Zero)
+            throw new InvalidOperationException($"Cache SweepInterval must be positive, but was {SweepInterval}.");
+    }
 }

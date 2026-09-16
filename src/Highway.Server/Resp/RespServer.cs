@@ -29,6 +29,8 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
 {
     private readonly WebApplication _app;
     private readonly SubscriptionRegistry _registry;
+    private readonly Storage.Cache.IHighwayCacheStore? _cache;
+    private readonly Storage.Cache.CacheSweeper? _cacheSweeper;
 
     public CommandDispatcher Dispatcher { get; }
     public IConnectionAuthenticator Authenticator { get; }
@@ -60,7 +62,25 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
 
         var locks = new StripedLock();
         var replication = store is RocksDbStore rocks ? rocks.Replication : null;
-        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication);
+
+        // 044: the broker-local cache — a SEPARATE, non-replicated store. Durable brokers get
+        // their own RocksDB at dataDir/cache (by convention, no setting); ephemeral brokers get
+        // an in-memory store. The dispatcher routes hw:cache:* to it; it never touches the
+        // replicated store, and the replication feeder never learns it exists.
+        if (options.Cache.Enabled)
+        {
+            _cache = store is RocksDbStore && options.DataDir is { } dir
+                ? Storage.Cache.RocksDbCacheStore.Open(Path.Combine(dir, "cache"))
+                : new Storage.Cache.InMemoryCacheStore();
+            _cacheSweeper = new Storage.Cache.CacheSweeper(
+                _cache, options.Cache.MaxSizeBytes, options.Cache.SweepInterval);
+        }
+
+        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication, _cache);
+
+        // 044 R6: wipe the cache on every epoch change (mastership moved → cached data may be stale).
+        if (replication is not null && _cache is not null)
+            replication.OnEpochChanged += _cache.Clear;
 
         if (replication is not null)
         {
@@ -167,5 +187,7 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
     {
         try { await _app.StopAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
         await _app.DisposeAsync();
+        _cacheSweeper?.Dispose();
+        _cache?.Dispose();
     }
 }

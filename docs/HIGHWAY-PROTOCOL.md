@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 4.8** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
+**Protocol version 4.9** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
 
 ## About
 
@@ -40,7 +40,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.8**
+**Current version: 4.9**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -48,6 +48,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.9 | 044 | **Broker-local cache.** Adds a third raw-key family, `hw:cache:*`, routed on the existing stock `GET`/`SET`/`DEL`/`UNLINK`/`SETEX`/`PSETEX`/`TTL`/`PTTL` — **no new `HW.*` command**. It is served **only when `server.cache.enabled`** (off by default); the family answers exactly as the idempotency family does on the wire, but is backed by a **separate, never-replicated** store (its own RocksDB at `dataDir/cache`, or in-memory on an ephemeral broker). A cache `SET` on a non-master is refused `-NOTPRIMARY` like any write; a cache `GET` on a non-master returns a miss (null). TTL comes from `PX`/`EX`, defaults to the broker's `defaultTtl` when absent, and is clamped to `maxTtl`. Additive and opt-in. |
 | 4.8 | 042-1a | **The herd contract.** `HW.REPL.HELLO` grows two additive forms: an optional 4th argument on the replica form (the caller's endpoint — a promoting node announces itself so a demoted primary's `-NOTPRIMARY` redirects correctly) and the **client handshake** `HW.REPL.HELLO CLIENT <clientId> <lastSeenEpoch>` answering `["master"\|"willing", epoch, rosterVersion]` or `["standby", masterEndpoint, masterEpoch]`. Adds `HW.REPL.JOIN` (roster admission; `ERR HW_PRIORITY_TAKEN` on a held priority), `HW.REPL.GOODBYE` (graceful drain + stand-down, parent R12), and the `roster.*` fields on `HW.REPL.STATUS`. Adds `ERR HW_REPL_GAP` on `HW.REPL.PULL` (a cursor behind the retained WAL is refused, never served a gapped stream — the replica re-syncs via SNAPSHOT). Adds the `hw:door:topology` narration channel (TOPOLOGY / GOODBYE / ROSTER-UPDATE, advisory). **Withdraws** the never-released `HW.REPL.WITNESS <nodeId> <role>` sketch — WITNESS is the bare `+OK` probe; failover is client-herd-driven (feature 042-1), not witness-gated. Additive. |
 | 4.7 | 042 | **Replication (T3–T7).** Adds `HW.REPL.SNAPSHOT` (chunked checkpoint bootstrap), `HW.REPL.PROMOTE`, `HW.REPL.FENCE`, `HW.REPL.STATUS`, `HW.REPL.WITNESS`. A non-primary refuses client writes with `-NOTPRIMARY <endpoint> <epoch>` (not an `ERR HW_` prefix). `HW.STATS` server form appends `repl.*` fields. Additive. |
 | 4.6 | 042 | **Replication stream (T1).** Adds `HW.REPL.HELLO`, `HW.REPL.PULL`, `HW.REPL.ACK` — pull-based, paged, resumable WAL shipping from a primary. Replicas register a slot, pull pages of `(seq, batchBytes)`, and ack a watermark. Epoch is stamped on every reply. Additive. |
@@ -1146,14 +1147,24 @@ served commands are the HW.* set: …` (naming the set), never a plausible `+OK`
 | `CONFIG` | `CONFIG GET …` answers an empty array ("no matching keys" — SE.Redis probes this on connect); any other subcommand `+OK`. Never an error, which would abort a client's connect. |
 | `INFO` | A minimal bulk string declaring a standalone master, for SE.Redis's server-type detection. |
 | `SUBSCRIBE` / `UNSUBSCRIBE` | Doorbell channels only. A subscribed connection is in RESP2 restricted mode: only `SUBSCRIBE`, `UNSUBSCRIBE`, `PING`, `QUIT`. `PUBLISH` is **not** served — doorbells are published server-internally. |
-| `GET` | Served for the two raw-key families a client reads: reply slots `hw:rep:*` and idempotency markers `hw:idem:*`. Any other key answers a null bulk — the honest reply to SE.Redis's tiebreaker probe; there is no general keyspace. |
-| `SET` | Idempotency claim **only** (`hw:idem:*`), with `EX`/`PX`/`NX` honoured. A `SET` on any other key is refused with `ERR HW_INVALID_ARG` naming this boundary. |
-| `SETEX` / `PSETEX` | Idempotency record writes (`hw:idem:*` only) — SE.Redis's unconditional expiring write. |
-| `DEL` / `UNLINK` | One key, from the reply-slot or idempotency families only; answers `:1` (the delete is idempotent — `:1` whether or not the key still existed). Any other key is refused with an error naming the two families. |
-| `TTL` / `PTTL` | Idempotency markers, Redis semantics: `-2` no key, `-1` no expiry, else remaining time. |
+| `GET` | Served for the raw-key families a client reads: reply slots `hw:rep:*`, idempotency markers `hw:idem:*`, and — when the cache is enabled — `hw:cache:*` (a miss on a non-master). Any other key answers a null bulk — the honest reply to SE.Redis's tiebreaker probe; there is no general keyspace. |
+| `SET` | Idempotency claim (`hw:idem:*`, with `EX`/`PX`/`NX` honoured) or — when the cache is enabled — a cache set (`hw:cache:*`, `EX`/`PX` → TTL, `defaultTtl` when absent, clamped to `maxTtl`; `NX` is ignored). A `SET` on any other key is refused with `ERR HW_INVALID_ARG` naming this boundary. |
+| `SETEX` / `PSETEX` | Idempotency record writes (`hw:idem:*`) or cache sets (`hw:cache:*`, when enabled) — SE.Redis's unconditional expiring write. |
+| `DEL` / `UNLINK` | One key, from the reply-slot, idempotency, or (when enabled) cache families; answers `:1` (the delete is idempotent — `:1` whether or not the key still existed). Any other key is refused with an error naming the families. |
+| `TTL` / `PTTL` | Idempotency markers or (when enabled) cache keys, Redis semantics: `-2` no key, `-1` no expiry, else remaining time. |
 
 `KEYS`, `SCAN`, `EVAL`, transactions, cluster commands and streams are not served — 037
 R6.3's rule is that the broker serves its protocol, not a keyspace.
+
+**The cache family is opt-in and broker-local.** `hw:cache:*` is served only when
+`server.cache.enabled` is set; a broker with the cache off answers those keys exactly as any
+other unrecognized key (null / `ERR HW_INVALID_ARG`), byte-identical to a pre-044 broker. When
+on, the family is backed by a **separate store that replication never ships** — it is not part
+of the durable, replicated dataset, does not appear in `HW.REPL.PULL`, and is wiped on any epoch
+change (a mastership move means another node may have mutated the system of record, so every
+cached value is suspect). A herd-holding master that keeps its herd through a peer-only partition
+does **not** change epoch and so does **not** wipe. It is a cache: a miss is one more trip to the
+system of record, never data loss. See feature 044 and [`constraints.md`](product/constraints.md).
 
 ### Authentication and transport security
 

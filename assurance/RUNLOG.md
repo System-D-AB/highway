@@ -4,6 +4,36 @@ This log records every standard soak and integration run executed against Highwa
 
 ---
 
+## 2026-09-16 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-41158a47`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 147
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-16 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-47823903`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 164
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
+## 2026-09-16 — shortened-ci — doorbells on (PASSED)
+
+- **Run ID:** `ci-short-4af0aa56`
+- **Target Rate:** 25 msg/s | **Lease:** 3s | **Doorbells:** on
+- **Verdict:** `PASSED` (Exit Code: 0)
+- **Total Events Processed:** 178
+- **Duplicates Observed:** 0
+- **Dead Letters:** 0
+- **Notes:** I1_QueueCompleteness: PASS; I2_NoPhantoms: PASS; I3_RpcNeverSilent: PASS; I4_PubSubPerLiveGroup: PASS; I5_Duplicates: PASS; I6_DeadLetters: PASS; I7_NothingLeftBehind: PASS
+
 ## 2026-09-16 — shortened-ci HERD (primary-kill failover) — doorbells on (PASSED)
 
 - **Run ID:** `2026-09-16T07-43-22`

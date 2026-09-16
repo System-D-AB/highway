@@ -134,6 +134,20 @@ public sealed class ServerSection
     public bool WaitForCommit { get; set; }
     public ObservabilitySection Observability { get; set; } = new();
     public ReplicationSection Replication { get; set; } = new();
+    public CacheSection Cache { get; set; } = new();
+}
+
+/// <summary>The <c>"server.cache"</c> section — maps onto <c>CacheOptions</c> (feature 044).</summary>
+public sealed class CacheSection
+{
+    public bool Enabled { get; set; }
+    public TimeSpan DefaultTtl { get; set; } = TimeSpan.FromHours(24);
+    public TimeSpan MaxTtl { get; set; } = TimeSpan.FromDays(7);
+
+    [JsonConverter(typeof(SizeJsonConverter))]
+    public long MaxSizeBytes { get; set; } = 256L * 1024 * 1024;
+
+    public TimeSpan SweepInterval { get; set; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>

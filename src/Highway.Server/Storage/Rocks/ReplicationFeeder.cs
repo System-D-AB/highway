@@ -145,6 +145,14 @@ internal sealed class ReplicationFeeder : IDisposable
     /// </summary>
     public Func<IReadOnlyList<string>>? RosterPeers { get; set; }
 
+    /// <summary>
+    /// Raised after the node's epoch changes (promotion, or adopting a higher epoch). The
+    /// broker-local cache subscribes to wipe itself (044 R6): an epoch change is exactly
+    /// the condition "another node may have written the underlying data since this node
+    /// last owned it," so any cached copy is suspect. Fired outside the role lock.
+    /// </summary>
+    public event Action? OnEpochChanged;
+
     /// <summary>The master promised to leave (GOODBYE, 042-1) — a standby is immediately willing.</summary>
     public bool GoodbyeSeen { get; private set; }
 
@@ -393,6 +401,7 @@ internal sealed class ReplicationFeeder : IDisposable
         if (targets.Count > 0)
             AnnouncePromotionAsync(targets, announceEpoch);
 
+        OnEpochChanged?.Invoke();   // 044: promotion bumped the epoch → wipe the local cache
         return true;
     }
 
@@ -456,6 +465,7 @@ internal sealed class ReplicationFeeder : IDisposable
     /// </summary>
     public void ObserveHigherEpoch(ulong observedEpoch, string reason, string? primaryEndpoint = null)
     {
+        var epochChanged = false;
         lock (_roleLock)
         {
             if (observedEpoch < Epoch) return;
@@ -484,7 +494,11 @@ internal sealed class ReplicationFeeder : IDisposable
 
             Epoch = observedEpoch;
             PersistEpoch();
+            epochChanged = true;
         }
+
+        if (epochChanged)
+            OnEpochChanged?.Invoke();   // 044: adopted a higher epoch → wipe the local cache
     }
 
     /// <summary>Kept for the explicit paths that must demote regardless of current role semantics.</summary>
