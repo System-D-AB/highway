@@ -523,7 +523,7 @@ Two TLS configurations leave client-certificate validation weak, and Highway det
 
 > **Updated 2026-09-15 (feature 041).** This section previously described a Garnet **ACL** model —
 > a shipped `config/users.acl` file with a `nopass` default user and per-command allowlists. That
-> model was removed with the Garnet engine: the broker now runs the RESP server over RocksDB and
+> model was removed with the Garnet engine: the broker now runs the RESP server over a purpose-built storage engine and
 > authenticates with its own `AUTH`, not a Garnet ACL file. There is no `users.acl`, no `nopass`
 > line, and no per-command category grants. The command surface is fixed by the server — it serves
 > only the `HW.*` subset plus the handshake and the RPC reply-slot key — so an allowlist that used
