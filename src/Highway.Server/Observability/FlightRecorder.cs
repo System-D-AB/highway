@@ -288,13 +288,24 @@ internal sealed class FlightRecorder : IDisposable
     /// Resolves (and caches) the buffer for a name. Returns null when the name
     /// is configured off, so a disabled name never allocates.
     /// </summary>
+    /// <summary>The reserved cluster-wide RPC-reply bucket (mirrors <c>HwReplyCommand.RecorderName</c>).</summary>
+    internal const string ReplyBucketName = "hw.replies";
+
+    /// <summary>
+    /// Headroom factor for <see cref="ReplyBucketName"/>. It holds <b>every</b> RPC reply across
+    /// <b>all</b> services in one buffer, so at a single service's capacity it ages replies out fast
+    /// under aggregate load and RPC rows lose their outcome (046). An explicit override still wins.
+    /// </summary>
+    internal const int ReplyBucketCapacityFactor = 8;
+
     private NameBuffer? ResolveBuffer(string name)
         => _buffers.GetOrAdd(name, static (key, opts) =>
         {
             opts.Overrides.TryGetValue(key, out var over);
 
             var capture = over?.Capture ?? opts.DefaultCapture;
-            var capacity = over?.Capacity ?? opts.DefaultCapacity;
+            var capacity = over?.Capacity
+                ?? (key == ReplyBucketName ? opts.DefaultCapacity * ReplyBucketCapacityFactor : opts.DefaultCapacity);
             var retention = over?.Retention ?? opts.DefaultRetention;
 
             if (capture == PayloadCapture.Off || capacity <= 0 || retention <= TimeSpan.Zero)

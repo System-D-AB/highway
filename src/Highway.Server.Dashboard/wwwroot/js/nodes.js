@@ -40,7 +40,21 @@ function row(node) {
     </tr>`;
 }
 
-export async function render(container, options) {
+const HEAD = '<thead><tr><th>Node</th><th>State</th><th>Seen from</th><th>Hosts</th></tr></thead>';
+
+function table(nodes, emptyText) {
+    const rows = nodes.map(row).join('');
+    return `<table class="grid">${HEAD}
+        <tbody>${rows || `<tr><td colspan="4" class="muted">${esc(emptyText)}</td></tr>`}</tbody>
+    </table>`;
+}
+
+export async function render(container, options, params) {
+    // A node the broker has not seen for over an hour is "absent" — it may return, so it is
+    // kept, but it does not belong in the list of what is running now (046). Absent nodes move
+    // behind a toggle; the count is itself information.
+    const showAbsent = params && params.get('absent') === '1';
+
     const refresh = async () => {
         const data = await getJson('nodes', 'api/nodes');
         if (!data) return;
@@ -50,13 +64,18 @@ export async function render(container, options) {
             return;
         }
 
-        const rows = data.nodes.map(row).join('');
+        const current = data.nodes.filter((n) => n.state !== 'absent');
+        const absent = data.nodes.filter((n) => n.state === 'absent');
+
+        const toggle = absent.length === 0 ? '' : showAbsent
+            ? '<a href="#/nodes">Hide absent</a>'
+            : `<a href="#/nodes?absent=1">Show absent (${absent.length})</a>`;
+
         container.innerHTML = `
             <h2>Nodes</h2>
-            <table class="grid">
-                <thead><tr><th>Node</th><th>State</th><th>Seen from</th><th>Hosts</th></tr></thead>
-                <tbody>${rows || '<tr><td colspan="4" class="muted">No nodes registered.</td></tr>'}</tbody>
-            </table>`;
+            ${table(current, 'No live or stale nodes.')}
+            <p>${toggle}</p>
+            ${showAbsent && absent.length ? `<h3 class="muted">Absent</h3>${table(absent, '')}` : ''}`;
     };
 
     setActiveView(refresh, options.pollIntervalMs);

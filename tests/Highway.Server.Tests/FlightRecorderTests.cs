@@ -53,6 +53,27 @@ public class FlightRecorderTests
         All(recorder, "noisy.svc").Should().HaveCount(10);
     }
 
+    /// <summary>
+    /// 046 R5 — the reserved <c>hw.replies</c> bucket is cluster-wide (every RPC reply, all
+    /// services), so it gets 8x a single service's capacity, or replies age out under aggregate
+    /// load and RPC rows lose their outcome.
+    /// </summary>
+    [Fact]
+    public void ReplyBucket_GetsEightTimesTheDefaultCapacity()
+    {
+        using var recorder = new FlightRecorder(Opts(o => o.DefaultCapacity = 10));
+
+        for (var i = 0; i < 200; i++)
+            recorder.Record(HighwayEventType.RpcReplied, FlightRecorder.ReplyBucketName, requestId: $"r{i}");
+        for (var i = 0; i < 200; i++)
+            recorder.Record(HighwayEventType.RpcEnqueued, "svc", requestId: $"s{i}");
+
+        All(recorder, FlightRecorder.ReplyBucketName).Should().HaveCount(
+            10 * FlightRecorder.ReplyBucketCapacityFactor,
+            "the cluster-wide reply bucket holds 8x a single service's capacity");
+        All(recorder, "svc").Should().HaveCount(10, "a service keeps the default capacity");
+    }
+
     [Fact]
     public void CaptureHeadersOnly_KeepsSizeButNotContent()
     {

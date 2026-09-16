@@ -540,6 +540,26 @@ Highway never asks a node what its address is, and never stores one. A node behi
 container, or scaled horizontally under one name would report a number nobody can reach, and
 storing it would mean a record that outlives the socket it describes.
 
+### C7.4 — The recorder is bounded, and reads it correctly for the life of the broker
+
+**Status: Met** — feature 002, corrected by feature 046.
+
+Each name's history is a fixed circular buffer with per-name retention; nothing about the recorder
+grows without bound (that boundedness is what makes the diagnostic affordable — see the deferred
+"longer-retention index" note). **Correctness of the read never depends on the sweep having run:**
+retention is applied at read, and — since 046 — a read anchors at the oldest slot and walks the
+whole ring, so a buffer that has *wrapped and then been swept* still returns exactly its live
+events, newest included. (Before 046 a post-wrap sweep left the read scanning the wrong slots, so
+after ~1h of uptime the dashboard silently dropped the most recent operations and surfaced stale
+ones — fixed, with a wrap→sweep→read regression test.)
+
+RPC replies are recorded in one reserved, cluster-wide bucket, `hw.replies` (every reply, all
+services), correlated to a request by id. It is given **8× a single service's capacity** so a
+retained request keeps its reply under realistic aggregate load; it is still bounded, so a very high
+sustained RPC rate can age replies out within the retention window — raise its capacity/retention
+override to widen that. An RPC row whose reply has aged out shows its outcome as incomplete rather
+than inventing one.
+
 ---
 
 ## C8 — Recurring jobs (feature 028)

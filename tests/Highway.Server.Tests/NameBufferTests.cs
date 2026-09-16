@@ -143,6 +143,56 @@ public class NameBufferTests
         buffer.Bytes.Should().BeLessThanOrEqualTo(before / 2);
     }
 
+    // ── 046: the wrapped-and-holed bug ──────────────────────────────────────
+    // Before 046, Read used `start = _count == Capacity ? _next : 0` and scanned only `_count`
+    // slots. Correct while full-and-wrapped or never-wrapped, but a buffer that has WRAPPED and
+    // then been SWEPT is neither: it has _next != 0, _count < Capacity, and null holes — and Read
+    // then scanned the wrong slots and dropped the newest events. This is the field-reported
+    // "RPC calls stop appearing after ~1 hour, with stale timestamps" defect.
+
+    [Fact]
+    public void Read_AfterWrapThenSweep_ReturnsAllLiveEventsInOrder()
+    {
+        var buffer = New(capacity: 4, retention: TimeSpan.FromMinutes(10));
+        for (var i = 0; i < 6; i++)                       // wrap a 4-slot ring; live ring = T0+2..T0+5
+            buffer.Append(Event(T0.AddMinutes(i)));
+
+        buffer.SweepExpired(T0.AddMinutes(13));           // cutoff T0+3 → drops T0+2, holes the ring
+
+        ReadAll(buffer, now: T0.AddMinutes(13)).Select(e => e.Timestamp)
+            .Should().Equal(new[] { T0.AddMinutes(3), T0.AddMinutes(4), T0.AddMinutes(5) },
+                "every live event survives, in order — the old code dropped T0+3");
+    }
+
+    [Fact]
+    public void Read_AfterWrapThenSweep_KeepsTheNewestEvent()
+    {
+        var buffer = New(capacity: 4, retention: TimeSpan.FromMinutes(10));
+        for (var i = 0; i < 6; i++)                       // live ring = T0+2..T0+5
+            buffer.Append(Event(T0.AddMinutes(i)));
+
+        buffer.SweepExpired(T0.AddMinutes(15));           // cutoff T0+5 → only T0+5 survives
+
+        ReadAll(buffer, now: T0.AddMinutes(15)).Select(e => e.Timestamp)
+            .Should().Equal(new[] { T0.AddMinutes(5) },
+                "the newest event must appear — the old code returned nothing here");
+    }
+
+    [Fact]
+    public void TrimTo_OnAHoledBuffer_DropsOldestFirst_KeepingNewest()
+    {
+        var buffer = New(capacity: 4, retention: TimeSpan.FromMinutes(10));
+        for (var i = 0; i < 6; i++)                       // live ring = T0+2..T0+5, ~1 KB each
+            buffer.Append(Event(T0.AddMinutes(i), payload: new byte[1000]));
+
+        buffer.SweepExpired(T0.AddMinutes(13));           // holes the ring; remaining T0+3, T0+4, T0+5
+        buffer.TrimTo(buffer.Bytes / 3);                  // keep roughly the newest one
+
+        var kept = ReadAll(buffer, now: T0.AddMinutes(13)).Select(e => e.Timestamp).ToList();
+        kept.Should().Contain(T0.AddMinutes(5), "trim keeps the newest");
+        kept.Should().NotContain(T0.AddMinutes(3), "trim drops the oldest first, not the newest");
+    }
+
     [Fact]
     public void Append_IsSafeUnderConcurrency()
     {

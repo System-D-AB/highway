@@ -22,27 +22,32 @@ function step(s) {
     </tr>`;
 }
 
-function body(d) {
-    switch (d.payloadState) {
+// Renders one payload panel (request or response). The server decides the state; this only
+// renders it, honouring feature 002's capture modes. 'none' is the RPC response of a one-way or
+// queue message, or a reply that is no longer retained (046).
+function payloadPanel(heading, stateVal, payloadB64) {
+    switch (stateVal) {
         case 'captured':
             try {
                 const text = new TextDecoder().decode(
-                    Uint8Array.from(atob(d.payload), (c) => c.charCodeAt(0)));
+                    Uint8Array.from(atob(payloadB64), (c) => c.charCodeAt(0)));
                 // Pretty-printed when it parses; shown raw when it does not, because a
                 // body that will not parse is itself worth seeing.
                 let shown = text;
                 try { shown = JSON.stringify(JSON.parse(text), null, 2); } catch { /* raw */ }
-                return `<h3>Message</h3><pre class="body">${esc(shown)}</pre>`;
+                return `<h3>${esc(heading)}</h3><pre class="body">${esc(shown)}</pre>`;
             } catch {
-                return '<h3>Message</h3><p class="muted">The body could not be decoded.</p>';
+                return `<h3>${esc(heading)}</h3><p class="muted">The body could not be decoded.</p>`;
             }
         case 'headers-only':
             // Not an exemption from feature 002's capture modes, and it says which one.
-            return '<h3>Message</h3><p class="unavailable">Withheld: this name is configured HeadersOnly.</p>';
+            return `<h3>${esc(heading)}</h3><p class="unavailable">Withheld: this name is configured HeadersOnly.</p>`;
         case 'disabled':
-            return '<h3>Message</h3><p class="unavailable">Withheld: recording is disabled for this name.</p>';
+            return `<h3>${esc(heading)}</h3><p class="unavailable">Withheld: recording is disabled for this name.</p>`;
+        case 'none':
+            return `<h3>${esc(heading)}</h3><p class="muted">No response recorded — a one-way or queue message, or the reply is not retained.</p>`;
         default:
-            return '<h3>Message</h3><p class="muted">No body was captured for this message.</p>';
+            return `<h3>${esc(heading)}</h3><p class="muted">No body was captured for this message.</p>`;
     }
 }
 
@@ -78,7 +83,8 @@ export async function render(container, options, params) {
                 <tbody>${shown.map(step).join('')}</tbody>
             </table>
             <p>${toggle}</p>
-            ${body(d)}`;
+            ${payloadPanel('Message', d.payloadState, d.payload)}
+            ${payloadPanel('Response', d.responseState, d.responsePayload)}`;
     };
 
     setActiveView(refresh, options.pollIntervalMs);

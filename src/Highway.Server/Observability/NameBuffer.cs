@@ -87,12 +87,15 @@ internal sealed class NameBuffer
 
         lock (_gate)
         {
-            // Oldest first: when full the oldest sits at _next, otherwise at 0.
-            var start = _count == Capacity ? _next : 0;
-
-            for (var i = 0; i < _count; i++)
+            // Oldest first, anchored at _next and walking every slot. _next is always the oldest
+            // position in ring order (Append writes at _next then advances), so _next → forward is
+            // oldest → newest in EVERY state: never-wrapped (the null tail is skipped, then [0,_count)
+            // in order), full-and-wrapped, and — crucially — wrapped-and-holed after a sweep/trim,
+            // where the old `_count`-window logic read the wrong slots and dropped the newest events
+            // (046). Nulls are skipped; retention/window/node still filter. O(Capacity), on a read.
+            for (var i = 0; i < Capacity; i++)
             {
-                var evt = _ring[(start + i) % Capacity];
+                var evt = _ring[(_next + i) % Capacity];
                 if (evt is null) continue;
                 if (evt.Timestamp < cutoff) continue;      // past retention
                 if (evt.Timestamp < from || evt.Timestamp > to) continue;
@@ -146,11 +149,10 @@ internal sealed class NameBuffer
 
         lock (_gate)
         {
-            var start = _count == Capacity ? _next : 0;
-
+            // Drop the truly-oldest first: anchor at _next (the oldest position), skip holes (046).
             for (var i = 0; i < Capacity && _bytes > targetBytes; i++)
             {
-                var index = (start + i) % Capacity;
+                var index = (_next + i) % Capacity;
                 var evt = _ring[index];
                 if (evt is null) continue;
 

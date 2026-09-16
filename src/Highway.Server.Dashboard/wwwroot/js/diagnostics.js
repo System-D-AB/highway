@@ -13,10 +13,10 @@ export async function render(container, options) {
         const rows = (data.names || []).map((n) => `
             <tr>
                 <td><a href="#/entity?kind=Unknown&name=${encodeURIComponent(n.name)}">${esc(n.name)}</a></td>
-                <td>${n.events}</td>
+                <td>${n.count}</td>
                 <td>${esc(bytes(n.bytes))}</td>
                 <td>${esc(n.capture)}</td>
-                <td>${n.dropped}</td>
+                <td>${n.droppedCapacity}</td>
             </tr>`).join('');
 
         container.innerHTML = `

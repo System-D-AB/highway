@@ -194,7 +194,11 @@ internal sealed record MessageDetailDto(
     string Outcome,
     IReadOnlyList<MessageStepRowDto> Steps,
     string? Payload,
-    string PayloadState);
+    string PayloadState,
+    // 046: the RPC response, from the RpcReplied event (merged from the hw.replies bucket).
+    // ResponseState is "none" for a one-way/queue message or a reply not retained.
+    string? ResponsePayload,
+    string ResponseState);
 
 // ---- feature 023 T6: one node's work ---------------------------------------
 

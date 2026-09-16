@@ -183,7 +183,12 @@ internal static class DashboardEndpoints
             // The body obeys feature 002's capture modes. The dashboard is not an exemption
             // from the setting that exists to keep application data out of the recorder.
             var capture = GetCaptureMode(recorder, name);
-            var payload = events.Select(e => e.Payload).FirstOrDefault(p => p is { Length: > 0 });
+            // 046: the request payload is the first non-reply event's payload; the response is the
+            // RpcReplied event's payload (merged from the hw.replies bucket by ReadAllFor).
+            var replyEvent = events.FirstOrDefault(e => e.EventType == HighwayEventType.RpcReplied);
+            var payload = events
+                .Where(e => e.EventType != HighwayEventType.RpcReplied)
+                .Select(e => e.Payload).FirstOrDefault(p => p is { Length: > 0 });
 
             var state = capture switch
             {
@@ -193,12 +198,36 @@ internal static class DashboardEndpoints
                 _ => "disabled",
             };
 
+            string responseState;
+            string? responsePayload = null;
+            if (replyEvent is null)
+            {
+                responseState = "none";   // one-way / queue message, or the reply is not retained
+            }
+            else
+            {
+                var replyCapture = GetCaptureMode(recorder, "hw.replies");
+                responseState = replyCapture switch
+                {
+                    PayloadCapture.Full when replyEvent.Payload is { Length: > 0 } => "captured",
+                    PayloadCapture.Full when replyEvent.PayloadSize == 0 => "captured", // an empty reply is still captured
+                    PayloadCapture.Full => "not-captured",
+                    PayloadCapture.HeadersOnly => "headers-only",
+                    _ => "disabled",
+                };
+                responsePayload = responseState == "captured" && replyEvent.Payload is { Length: > 0 }
+                    ? Convert.ToBase64String(replyEvent.Payload)
+                    : null;
+            }
+
             return Results.Json(new MessageDetailDto(
                 id, name, summary?.Outcome.ToString() ?? "Incomplete",
                 steps.Select(s => new MessageStepRowDto(
                     s.At, s.Type, s.Visibility.ToString(), s.Node, s.SincePreviousMs, s.Detail)).ToArray(),
                 state == "captured" && payload is not null ? Convert.ToBase64String(payload) : null,
-                state));
+                state,
+                responsePayload,
+                responseState));
         });
 
         app.MapGet("/api/recorder", (FlightRecorder recorder, DashboardInfo info) =>
