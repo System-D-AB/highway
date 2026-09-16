@@ -137,15 +137,37 @@ your code rather than a `catch` block.
 
 ---
 
+## High availability via replication
+
+Run more than one broker and Highway tolerates a server failure without losing acked work.
+Standbys follow the primary by **WAL shipping**; on a failure the model is **client-herd
+mastership** — the master is simply the node the client herd is connected to, and the herd
+converges on the highest-priority reachable successor.
+
+- **No elections, no quorum, no votes.** Succession is a deterministic priority order, and
+  **epoch fencing** guarantees at most one writable master — no split-brain.
+- **Clients replay their own in-flight work** with the same request id across the failover, so a
+  call in flight when the master dies gets its answer from the successor, not a duplicate or a loss.
+- **Graceful handover** (`HW.REPL.GOODBYE`) drains a node before it steps down; failover is
+  automatic and there is no auto-failback to surprise you.
+
+Turn it on with `HighwayReplicationOptions` (start-as-replica, a primary to follow, a priority).
+The RPO is the async-replication lag window — bounded and reported, never silent
+([C9](docs/product/constraints.md)); features
+[042](docs/features/042-replication/) + [042-1](docs/features/042-1-replication-improvements/).
+
+---
+
 ## Also included
 
 - **Recurring jobs** — a schedule that sends a queue message. No Hangfire, no Quartz, no
   cron container. `o.Jobs.Daily<GenerateStatements>(new TimeOnly(2, 0))`,
   `o.Jobs.Every<ReconcileLedger>(TimeSpan.FromMinutes(15))`, or a five-field cron expression.
   Schedules survive restarts; missed occurrences collapse to one catch-up fire.
-- **Distributed cache** — Highway registers `IDistributedCache` and `IBufferDistributedCache`
-  automatically, so `HybridCache` works with Highway as L2 and you get stampede protection
-  and L1 layering for free.
+- **Distributed cache** — opt in with `AddHighwayCache()` and Highway provides an
+  `IDistributedCache` (and a `HybridCache` L2) backed by a **broker-local, never-replicated**
+  store, so caching needs no separate Redis. It is cold after a failover and TTL-bounded — a
+  cache, not a second source of truth.
 - **A dashboard** — embedded in the broker, on its own port. Live message flow, a service
   catalogue, queue depths, dead letters and a flight recorder you can replay.
 - **Delayed delivery, dead letters, idempotency, graceful node decommissioning** — the
@@ -247,11 +269,6 @@ installers — ships as of 2.0. Tracked on the [roadmap](docs/product/roadmap.md
 
 Highway declines to promise these, and says so rather than letting you find out:
 
-- **No broker (Highway.Server), no system.** Durability yes; failover is now available —
-  configure standbys and the herd converges on a successor (features 042 + 042-1), with an RPO
-  bounded by the async-replication lag window ([C9](docs/product/constraints.md)), not zero.
-  Failover is **new in 2.0** — proven by the in-process herd-cohesion suite; a long-running
-  production soak is still pending.
 - **No exactly-once delivery.** At-least-once, with `[Idempotent]` to suppress redelivery.
 - **The cache is broker-local and never replicated.** It is cold after a failover and
   epoch-invalidated — a cache miss is one more trip to the system of record, not data loss
