@@ -100,7 +100,7 @@ public sealed class RespHighwayServer : IHighwayServer
         }
 
         _started = true;
-        _logger.LogInformation("Highway broker listening on {Endpoint} (RocksDB + RESP).", Endpoint);
+        _logger.LogInformation("Highway broker listening on {Endpoint}.", Endpoint);
     }
 
     /// <inheritdoc/>
