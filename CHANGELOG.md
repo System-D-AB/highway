@@ -8,6 +8,17 @@ The wire protocol has its own authoritative history in
 [`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md); this file records the product and
 package changes and links there rather than restating command-level detail.
 
+## [2.0.1] — 2026-09-16
+
+### Fixed
+
+- **The packaged broker now writes log files.** A broker installed as a Windows service produced no
+  readable log: its console output is discarded by the Service Control Manager, and the shipped
+  `logs/` folder was never written to. The host now logs through Serilog to **rolling daily files**
+  in `logs/` (resolved from the executable location, so it is correct under the service whose working
+  directory is `System32`), in addition to the console for interactive runs. Files are size- and
+  retention-bounded. No configuration is required (feature 045).
+
 ## [2.0.0] — 2026-09-16
 
 The broker is now a purpose-built stack — a RocksDB storage engine behind a Highway-native RESP
@@ -76,5 +87,6 @@ The first public preview: the three verbs (durable queues, pub/sub, RPC), dead l
 delivery, `[Idempotent]`, recurring jobs, the flight recorder and dashboard, authentication and
 TLS, and NuGet packaging — on the original Garnet-backed broker.
 
+[2.0.1]: https://github.com/systemdab/highway/releases/tag/v2.0.1
 [2.0.0]: https://github.com/systemdab/highway/releases/tag/v2.0.0
 [1.0.0-preview.1]: https://github.com/systemdab/highway/releases/tag/v1.0.0-preview.1

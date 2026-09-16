@@ -124,8 +124,9 @@ try {
 
     # Empty directories need an explicit trailing-slash entry — writing files alone
     # would silently drop data/ and logs/. R3.1 ships both: data/ is the default
-    # dataDir target and logs/ is where the scripts redirect output, so a missing
-    # logs/ makes `run.bat >> logs\highway.log` fail on first use.
+    # dataDir target, and logs/ is where the broker writes its rolling daily log files
+    # (feature 045) — a missing logs/ would just be recreated, but shipping it keeps the
+    # documented layout intact.
     foreach ($dir in Get-ChildItem -Path $stageDir -Recurse -Directory) {
         if (-not (Get-ChildItem -Path $dir.FullName -Recurse -File)) {
             $dirEntry = $dir.FullName.Substring($stageFull.Length + 1).Replace('\', '/') + '/'

@@ -2,6 +2,7 @@ using Highway.Server.Host.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Serilog;
 
 namespace Highway.Server.Host;
 
@@ -26,6 +27,15 @@ internal static class HostFactory
         var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
 
         builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = ShutdownTimeout);
+
+        // Feature 045: replace the default logging pipeline with Serilog (console + rolling files
+        // in the distribution's logs/ folder). A broker installed as a Windows service has no
+        // console for the default provider to reach, so without a file sink it produced no
+        // readable log at all. ClearProviders drops the default Console/EventLog set so there is
+        // exactly one pipeline.
+        builder.Logging.ClearProviders();
+        builder.Services.AddSerilog(
+            HostLogging.CreateLogger(HostLogging.ResolveLogDirectory()), dispose: true);
 
         // The mode is detected, never declared: both are registered and each no-ops
         // off its platform, so exactly one takes effect and the other costs nothing.

@@ -26,7 +26,7 @@ highway-{version}-win-x64/
 ├── config/
 │   └── highway.json              Server and dashboard configuration
 ├── data/                         Persistent storage (checkpoints and AOF)
-├── logs/                         Standard redirection target for scripts
+├── logs/                         Rolling daily broker logs (highway-YYYYMMDD.log)
 ├── scripts/
 │   ├── run.bat                   Double-clickable foreground runner
 │   ├── run.ps1                   PowerShell foreground runner
@@ -53,7 +53,7 @@ bin\highways.exe --install --start --config config\highway.json
 **Service Characteristics:**
 - **Startup:** Automatic (starts on system boot).
 - **Failure Policy:** Restarts after 5 seconds on 1st crash, 30 seconds on 2nd crash, 60 seconds on 3rd crash (reset period: 24 hours).
-- **Shutdown:** Stops gracefully, committing all Garnet checkpoints and closing the AOF.
+- **Shutdown:** Stops gracefully, flushing the storage engine's write-ahead log and checkpoint.
 
 ### Service Management Verbs
 ```cmd
@@ -61,6 +61,15 @@ bin\highways.exe --status               # Query service status (Running / Stoppe
 bin\highways.exe --stop                 # Stop the service cleanly
 bin\highways.exe --start                # Start the service
 bin\highways.exe --uninstall            # Stop and remove the service
+```
+
+### Logs
+The broker writes rolling daily log files to the `logs/` folder — `logs\highway-YYYYMMDD.log` —
+whether it runs interactively or as a Windows service. (A service has no console, so these files
+are the place to look.) Files roll daily and on size, and old files are pruned automatically. The
+newest, live one:
+```powershell
+Get-Content -Path .\logs\highway-*.log -Tail 50 -Wait
 ```
 
 ### Multiple Instances on One Machine

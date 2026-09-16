@@ -23,6 +23,11 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+    <!-- Feature 045: rolling file logs into the distribution's logs/ folder, so a broker
+         installed as a Windows service (no console, stdout discarded) has readable logs. -->
+    <PackageReference Include="Serilog.Extensions.Hosting" />
+    <PackageReference Include="Serilog.Sinks.File" />
+    <PackageReference Include="Serilog.Sinks.Console" />
   </ItemGroup>
 
 </Project>

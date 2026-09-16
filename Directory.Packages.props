@@ -26,6 +26,9 @@
          Pinned to 11.1.2.3412 — the exact version the sibling stow-rocksdb bake-off
          (spec v2-001-engine-bakeoff) measured and chose. -->
     <PackageVersion Include="RocksDB" Version="11.1.2.3412" />
+    <PackageVersion Include="Serilog.Extensions.Hosting" Version="9.0.0" />
+    <PackageVersion Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />
 
     <!-- Test dependencies -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
