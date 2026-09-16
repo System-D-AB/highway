@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using Highway.Server.Storage.Layout;
+using Microsoft.Extensions.Logging;
 using RocksDbSharp;
 
 namespace Highway.Server.Storage.Rocks;
@@ -72,7 +73,7 @@ public sealed class RocksDbStore : IHighwayStore
     /// Opens (or creates) a store at <paramref name="path"/>. The column families are
     /// created if absent and their order is asserted (physical-layout.md §6).
     /// </summary>
-    public static RocksDbStore Open(string path, bool ownsDirectory = false, HighwayReplicationOptions? replication = null)
+    public static RocksDbStore Open(string path, bool ownsDirectory = false, HighwayReplicationOptions? replication = null, ILogger? logger = null)
     {
         replication?.Validate();
         Directory.CreateDirectory(path);
@@ -85,6 +86,7 @@ public sealed class RocksDbStore : IHighwayStore
             !string.IsNullOrWhiteSpace(replication.PrimaryServer) &&
             File.Exists(Path.Combine(path, ReplicaPuller.ResyncMarkerFileName)))
         {
+            logger?.LogWarning("[replication] resync marker present; wiping the local database to re-bootstrap from the primary");
             WipeForResync(path);
         }
 
@@ -92,7 +94,10 @@ public sealed class RocksDbStore : IHighwayStore
             !string.IsNullOrWhiteSpace(replication.PrimaryServer) &&
             !File.Exists(Path.Combine(path, "CURRENT")))
         {
-            ReplicaPuller.DownloadSnapshot(replication.PrimaryServer, path);
+            var primaryHost = ReplicationFeeder.HostOf(replication.PrimaryServer) ?? "(primary)";
+            logger?.LogInformation("[replication] replica data directory is blank; bootstrapping snapshot from {Primary}", primaryHost);
+            var elapsed = ReplicaPuller.DownloadSnapshot(replication.PrimaryServer, path);
+            logger?.LogInformation("[replication] snapshot bootstrap complete in {Ms} ms", (long)elapsed.TotalMilliseconds);
         }
         var options = new DbOptions()
             .SetCreateIfMissing(true)

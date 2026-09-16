@@ -66,10 +66,17 @@ public sealed class RespHighwayServer : IHighwayServer
         _opts.Replication.AdvertiseEndpoint ??= $"{_opts.BindAddress}:{_opts.Port}";
         _opts.Replication.Validate();
 
+        // 047: one replication log category, threaded into the store bootstrap, the feeder, and
+        // the puller, so replication is visible in logs/ without HW.REPL.STATUS or extra tooling.
+        var replLogger = _loggerFactory.CreateLogger("Highway.Replication");
+
         // Store: RocksDB when a data directory is configured (durable), in-memory otherwise.
         _store = _opts.DataDir is { } dir
-            ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, _opts.Replication)
+            ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, _opts.Replication, replLogger)
             : new InMemoryStore();
+
+        if (_store is Storage.Rocks.RocksDbStore durable)
+            durable.Replication.Logger = replLogger;
 
         // Production keeps the loopback exemption (C6.x); the test server turns it off.
         var authenticator = new PasswordAuthenticator(_opts.Authentication, exemptLoopback: true);
@@ -81,7 +88,7 @@ public sealed class RespHighwayServer : IHighwayServer
         if (_store is Storage.Rocks.RocksDbStore rocks &&
             !string.IsNullOrWhiteSpace(_opts.Replication.PrimaryServer))
         {
-            _puller = new ReplicaPuller(rocks, _opts.Replication);
+            _puller = new ReplicaPuller(rocks, _opts.Replication, replLogger);
         }
 
         // Components (the dashboard) read broker state in-process from the store — never over a

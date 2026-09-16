@@ -14,6 +14,13 @@ Highway is a high-throughput, low-latency message broker and stream store built 
    - **Durable data store:** `./data` (beside the distribution)
 4. Press `Ctrl+C` in the console window to stop cleanly.
 
+> **Reaching the dashboard from another machine.** Both the broker (`server.bindAddress`) and the
+> dashboard (`dashboard.bindAddress`) default to **loopback (`127.0.0.1`)**, so from a remote browser
+> the dashboard simply won't load — open it *on the server* at `http://localhost:7500`, or set
+> `dashboard.bindAddress` to `0.0.0.0` **and** a `dashboard.apiKey` (an exposed dashboard with no key
+> is an open window into the broker). These are two separate listeners: exposing the broker for
+> replication does not expose the dashboard.
+
 ---
 
 ## 2. Directory Layout

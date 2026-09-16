@@ -1,4 +1,5 @@
 using System.Globalization;
+using Microsoft.Extensions.Logging;
 using RocksDbSharp;
 using StackExchange.Redis;
 
@@ -28,11 +29,13 @@ internal sealed class ReplicaPuller : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _loop;
     private readonly string _dataDir;
+    private readonly ILogger? _logger;   // 047: optional log sink (null in tests)
 
-    public ReplicaPuller(RocksDbStore store, HighwayReplicationOptions options)
+    public ReplicaPuller(RocksDbStore store, HighwayReplicationOptions options, ILogger? logger = null)
     {
         _store = store;
         _options = options;
+        _logger = logger;
         _dataDir = store.DataDir;
         _applier = new BatchApplier(store.Replication.Engine, store.Replication.Epoch);
         _loop = Task.Run(() => RunAsync(_cts.Token));
@@ -92,6 +95,13 @@ internal sealed class ReplicaPuller : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(_options.PrimaryServer))
             return;
 
+        // 047: log the peer as host:port only — the connection string carries the password.
+        var primaryHost = ReplicationFeeder.HostOf(_options.PrimaryServer) ?? "(primary)";
+        var id = string.IsNullOrWhiteSpace(_options.ReplicaId) ? "replica" : _options.ReplicaId;
+        _logger?.LogInformation("[replication] replica active: following {Primary} as {ReplicaId} (priority {Priority})",
+            primaryHost, id, _options.Priority);
+        var connected = false;
+
         while (!ct.IsCancellationRequested)
         {
             try
@@ -118,14 +128,25 @@ internal sealed class ReplicaPuller : IAsyncDisposable
 
                 var db = mux.GetDatabase();
                 await AnnounceJoinAsync(db).ConfigureAwait(false);
+                if (!connected)
+                {
+                    _logger?.LogInformation("[replication] replica connected to primary {Primary}, streaming from seq {Seq}",
+                        primaryHost, _applier.Watermark);
+                    connected = true;
+                }
                 await PumpAsync(db, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return;
             }
-            catch
+            catch (Exception ex)
             {
+                if (connected)
+                {
+                    _logger?.LogWarning("[replication] replica lost the primary connection ({Error}); retrying", ex.Message);
+                    connected = false;
+                }
                 try { await Task.Delay(200, ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
             }
@@ -218,6 +239,7 @@ internal sealed class ReplicaPuller : IAsyncDisposable
     private void MarkResyncRequired(ulong watermark, string detail)
     {
         ResyncRequired = true;
+        _logger?.LogWarning("[replication] replica WAL gap at seq {Watermark}; re-bootstrap required — restart this replica to re-snapshot", watermark);
         try
         {
             File.WriteAllText(Path.Combine(_dataDir, ResyncMarkerFileName),

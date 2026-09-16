@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using RocksDbSharp;
 using StackExchange.Redis;
 
@@ -53,6 +54,21 @@ internal sealed class ReplicationFeeder : IDisposable
     private readonly Timer? _deadman;
 
     private string? _knownPrimaryEndpoint;
+
+    /// <summary>
+    /// Optional log sink (feature 047). Set by the host after the store opens; when present, every
+    /// role/topology transition and slot change is written here as well as to the in-memory tail
+    /// <c>HW.REPL.STATUS</c> serves, so an operator sees replication in <c>logs/</c> without tooling.
+    /// </summary>
+    public ILogger? Logger { get; set; }
+
+    /// <summary>Records a transition to the in-memory tail AND the log (047). Transitions are the
+    /// only enqueue sites and none is on the per-pull path, so this stays milestone-level.</summary>
+    private void Note(string transition, LogLevel level = LogLevel.Information)
+    {
+        _transitions.Enqueue(transition);
+        Logger?.Log(level, "[replication] {Transition}", transition);
+    }
 
     public ReplicationFeeder(RocksDb db, string dataDir, HighwayReplicationOptions options)
     {
@@ -161,7 +177,7 @@ internal sealed class ReplicationFeeder : IDisposable
 
     /// <summary>A JOIN refused for a held priority (parent R13.3) — loud, in the transition log, never fatal.</summary>
     public void NoteJoinRefused(string detail)
-        => _transitions.Enqueue($"join-refused at={Options.Clock.GetUtcNow():o} detail={detail}");
+        => Note($"join-refused at={Options.Clock.GetUtcNow():o} detail={detail}", LogLevel.Warning);
 
     /// <summary>
     /// The herd contract's willingness answer (042-1a D1): may this node accept an arriving
@@ -185,7 +201,7 @@ internal sealed class ReplicationFeeder : IDisposable
     public void NoteResyncRequired(ulong watermark, string detail)
     {
         ResyncRequired = true;
-        _transitions.Enqueue($"resync-required watermark={watermark} at={Options.Clock.GetUtcNow():o} detail={detail}");
+        Note($"resync-required watermark={watermark} at={Options.Clock.GetUtcNow():o} detail={detail}", LogLevel.Warning);
     }
 
     public ulong MinAckedWatermark()
@@ -209,6 +225,9 @@ internal sealed class ReplicationFeeder : IDisposable
         if (replicaEpoch >= Epoch)
             ObserveHigherEpoch(replicaEpoch, "HELLO carried a higher epoch", callerEndpoint);
 
+        // 047: log a first attach (or re-attach after a drop). HELLO recurs on every pull, so this
+        // is guarded to only fire when the slot is genuinely new/absent — not per HELLO.
+        var isNewSlot = !_slots.ContainsKey(replicaId);
         _slots.AddOrUpdate(
             replicaId,
             _ => new ReplicaSlot(replicaId, lastAppliedSeq, replicaEpoch, SlotState.Active),
@@ -218,6 +237,9 @@ internal sealed class ReplicationFeeder : IDisposable
                 ReplicaEpoch = replicaEpoch,
                 State = SlotState.Active,
             });
+        if (isNewSlot)
+            Logger?.LogInformation("[replication] replica {ReplicaId} attached (watermark={Watermark}, epoch={Epoch})",
+                replicaId, lastAppliedSeq, replicaEpoch);
         EnforceCap();
         return (Epoch, MinAckedWatermark());
     }
@@ -347,6 +369,8 @@ internal sealed class ReplicationFeeder : IDisposable
                 _slots[id] = slot with { State = SlotState.Dropped };
                 var ev = $"slot-dropped replica={id} lag={lag} cap={cap}";
                 _dropEvents.Enqueue(ev);
+                Logger?.LogWarning("[replication] replica {ReplicaId} slot dropped: lag {Lag} exceeds cap {Cap}; it must re-bootstrap",
+                    id, lag, cap);
             }
             else if (lag > cap / 4)
             {
@@ -368,7 +392,7 @@ internal sealed class ReplicationFeeder : IDisposable
             if (Options.Priority == 0)
             {
                 error = "priority 0 never promotes";
-                _transitions.Enqueue($"promote-refused reason=priority-0 at={Options.Clock.GetUtcNow():o}");
+                Note($"promote-refused reason=priority-0 at={Options.Clock.GetUtcNow():o}", LogLevel.Warning);
                 return false;
             }
 
@@ -379,7 +403,7 @@ internal sealed class ReplicationFeeder : IDisposable
             LastPromotion = Options.Clock.GetUtcNow();
             LastPromotionReason = reason;
             LastPeerContact = LastPromotion.Value;
-            _transitions.Enqueue($"promote epoch={Epoch} reason={reason} at={LastPromotion:o}");
+            Note($"promote epoch={Epoch} reason={reason} at={LastPromotion:o}");
             announceEpoch = Epoch;
         }
 
@@ -442,7 +466,7 @@ internal sealed class ReplicationFeeder : IDisposable
         {
             if (Role != ReplicaRole.Primary) return;
             Role = ReplicaRole.Fenced;
-            _transitions.Enqueue($"fence epoch={Epoch} reason={reason} at={Options.Clock.GetUtcNow():o}");
+            Note($"fence epoch={Epoch} reason={reason} at={Options.Clock.GetUtcNow():o}", LogLevel.Warning);
         }
     }
 
@@ -452,7 +476,7 @@ internal sealed class ReplicationFeeder : IDisposable
         {
             if (Role != ReplicaRole.Fenced) return;
             Role = ReplicaRole.Primary;
-            _transitions.Enqueue($"unfence epoch={Epoch} at={Options.Clock.GetUtcNow():o}");
+            Note($"unfence epoch={Epoch} at={Options.Clock.GetUtcNow():o}");
         }
     }
 
@@ -485,11 +509,11 @@ internal sealed class ReplicationFeeder : IDisposable
                 var from = Role;
                 Role = ReplicaRole.Demoted;
                 LastReconciliationPath = WriteReconciliationReport();
-                _transitions.Enqueue($"demote from={from} observedEpoch={observedEpoch} reason={reason} file={LastReconciliationPath}");
+                Note($"demote from={from} observedEpoch={observedEpoch} reason={reason} file={LastReconciliationPath}", LogLevel.Warning);
             }
             else
             {
-                _transitions.Enqueue($"adopt-epoch from={Epoch} to={observedEpoch} reason={reason}");
+                Note($"adopt-epoch from={Epoch} to={observedEpoch} reason={reason}");
             }
 
             Epoch = observedEpoch;
@@ -551,7 +575,7 @@ internal sealed class ReplicationFeeder : IDisposable
         {
             if (Role != ReplicaRole.Primary || IsDraining) return;
             _drainDeadline = Options.Clock.GetUtcNow() + Options.GoodbyeDrainTimeout;
-            _transitions.Enqueue($"goodbye-begin epoch={Epoch} reason={reason} deadline={_drainDeadline:o}");
+            Note($"goodbye-begin epoch={Epoch} reason={reason} deadline={_drainDeadline:o}");
         }
 
         Narrator?.Invoke($"GOODBYE {Epoch.ToString(CultureInfo.InvariantCulture)}");
@@ -576,7 +600,7 @@ internal sealed class ReplicationFeeder : IDisposable
             Role = ReplicaRole.Demoted;   // the clean stood-down state (parent R12.4)
             if (Engine.GetLatestSequenceNumber() > MinAckedWatermark())
                 LastReconciliationPath = WriteReconciliationReport();
-            _transitions.Enqueue($"goodbye-complete epoch={Epoch} cause={cause} at={now:o}");
+            Note($"goodbye-complete epoch={Epoch} cause={cause} at={now:o}");
         }
 
         _drainTimer?.Dispose();
@@ -687,7 +711,7 @@ internal sealed class ReplicationFeeder : IDisposable
         {
             // A failed persist is survivable until restart; the transition log records the
             // in-memory truth. Do not fail a promotion over a disk hiccup on this file.
-            _transitions.Enqueue($"epoch-persist-failed epoch={Epoch}");
+            Note($"epoch-persist-failed epoch={Epoch}", LogLevel.Error);
         }
     }
 
