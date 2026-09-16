@@ -6,8 +6,8 @@
     <LangVersion>latest</LangVersion>
 
     <!-- Central Versioning (Feature 035 / D5) -->
-    <VersionPrefix>1.0.0</VersionPrefix>
-    <VersionSuffix>preview.1</VersionSuffix>
+    <VersionPrefix>2.0.0</VersionPrefix>
+    <VersionSuffix></VersionSuffix>
 
     <!-- Central Package Metadata (R1.2 / R3.1) -->
     <Authors>System D AB</Authors>

@@ -28,9 +28,10 @@ server for tests), so every call is a round trip through a local store rather th
 somebody else's cloud. It needs the **.NET 10 SDK** and nothing else — no Docker, no external
 infrastructure, not even for the integration tests.
 
-> **Pre-1.0.** The core is complete and in use, and the packages are on nuget.org as
-> `1.0.0-preview.1`. The broker distribution and two storage guarantees are still
-> outstanding — see [Status](#status) and [Known limits](#known-limits).
+> **2.0.** The broker now runs on a purpose-built stack — a RocksDB storage engine behind a
+> Highway-native RESP server (Garnet is gone) — with **replication and client-herd failover**,
+> and an opt-in broker-local cache. The packages ship on nuget.org as `2.0.0`. See
+> [Status](#status) and [Known limits](#known-limits).
 
 ---
 
@@ -228,8 +229,12 @@ written, and the specs record the decisions that were rejected as well as the on
 
 ## Status
 
-Core-complete and pre-1.0. Queues, pub/sub, RPC, dead letters, delayed delivery, recurring
-jobs, distributed cache, dashboard, authentication, TLS, and NuGet packaging (`1.0.0-preview.1`) all ship today. **968 tests pass.**
+**2.0 — released.** Queues, pub/sub, RPC, dead letters, delayed delivery, recurring jobs,
+dashboard, authentication, TLS, and NuGet packaging (`2.0.0`) all ship today, now on a
+RocksDB + RESP broker (Garnet removed in feature 041). **2.0 adds replication with client-herd
+failover** (features 042 + 042-1 — WAL-shipping standbys, epoch fencing, no elections; the master
+is the node the client herd is on) and an **opt-in broker-local cache** (feature 044 —
+`IDistributedCache`/`HybridCache` L2, never replicated). **More than 1,200 tests pass.**
 
 **Not yet done:** the packaged broker distribution (the `highways` zip and its service
 installers — until it lands, run the broker from source), metrics (`Meter`) and health
@@ -241,14 +246,19 @@ endpoints. Tracked on the [roadmap](docs/product/roadmap.md).
 
 Highway declines to promise these, and says so rather than letting you find out:
 
-- **No broker (Highway.Server), no system.** One broker. Durability yes, failover no.
+- **No broker (Highway.Server), no system.** Durability yes; failover is now available —
+  configure standbys and the herd converges on a successor (features 042 + 042-1), with an RPO
+  bounded by the async-replication lag window ([C9](docs/product/constraints.md)), not zero.
 - **No exactly-once delivery.** At-least-once, with `[Idempotent]` to suppress redelivery.
+- **The cache is broker-local and never replicated.** It is cold after a failover and
+  epoch-invalidated — a cache miss is one more trip to the system of record, not data loss
+  ([C10](docs/product/constraints.md)).
 - **Not a replayable log.** Pub/sub does not retain history for groups that never registered.
 - **No transactional enlistment**, message priority, or per-message TTL.
 - **No characterised throughput.** No benchmark exists, so no figure is claimed anywhere.
-- **Storage growth is not yet bounded** — the append-only file grows with total history and
-  restart replays it. [Constraint C4.6](docs/product/constraints.md), unmet and measured,
-  with the investigation recorded.
+- **Retention over time is still unbounded** ([C4.1](docs/product/constraints.md), awaiting a
+  breaking framing change). Storage growth itself is now bounded — RocksDB compaction reclaims
+  consumed messages ([C4.6](docs/product/constraints.md), met on the RocksDB engine).
 
 Every one is a numbered row in [constraints.md](docs/product/constraints.md) with an
 implementation status, so intent and reality can be compared line by line.
