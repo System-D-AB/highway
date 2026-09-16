@@ -23,13 +23,13 @@
 > | RPC and durable Pub/Sub, at-least-once both paths | **Shipped** — G2 |
 > | **Queue — `SendAsync`, `[Queue]`, `IProcess<T>`** | **Shipped** — feature 014 |
 > | **Pub/Sub Unification — one engine, two verbs** | **Shipped** — feature 018. `HW.RECEIVE`/`HW.RACK` removed; subscribers consume via queue commands |
-> | `HW.*` protocol, Highway.Server as the broker (RESP + RocksDB since 037–041; was a Garnet extension) | **Shipped** — G6 |
+> | `HW.*` protocol, Highway.Server as the broker (RESP + a purpose-built storage engine since 037–041; was a Garnet extension) | **Shipped** — G6 |
 > | Timeouts, competing consumers, structured errors, DI scoping | **Shipped** — G7 |
 > | Heartbeat, service registry, `HW.DISCOVER` / `HW.STATS` | **Shipped** |
 > | **Dead letters, delayed delivery, `[Idempotent]`** | **Shipped** — feature 013 |
 > | **Diagnosable failures — `HW.FAIL`, failure context** | **Shipped** — feature 015 |
 > | **Authentication and TLS** | **Shipped** — feature 012. Not required on loopback, required off it; TLS opt-in always |
-> | **Distributed Cache — `IDistributedCache` + `HybridCache` integration** | **Shipped as a broker-local cache** — the Garnet-era 026 cache was removed in feature 041; feature 044 (2026-09-16) reintroduces `IDistributedCache`/`HybridCache` L2 as an **opt-in, never-replicated** add-on over a separate RocksDB (`dataDir/cache`), cold-after-failover and TTL-bounded (C10). Off by default |
+> | **Distributed Cache — `IDistributedCache` + `HybridCache` integration** | **Shipped as a broker-local cache** — the Garnet-era 026 cache was removed in feature 041; feature 044 (2026-09-16) reintroduces `IDistributedCache`/`HybridCache` L2 as an **opt-in, never-replicated** add-on over a separate store (`dataDir/cache`), cold-after-failover and TTL-bounded (C10). Off by default |
 > | **Recurring Jobs — schedule-driven message firing** | **Shipped** — feature 028. Uses HW.JOB commands and queue promotion |
 > | Embedded Control Panel / web dashboard | **Partially built** — flight recorder view delivered in feature 011. Server settings and catalog views are deferred |
 > | Flight recorder, `HW.REPLAY`, activity emission | **Shipped** — G8. The recorder is **volatile** (in-process, lost on restart); Highway emits `Activity` and takes no OpenTelemetry dependency, so the application wires its own pipeline |
@@ -63,7 +63,7 @@ Choosing between them is one sentence: **one handler → Send, many handlers →
 
 The deployment consequence is the point of having both of the last two: run three instances of a **queue** handler and they *share* the work; run three instances of a **subscriber** and they each get *their own copy*.
 
-Highway runs its own broker on one connection and one server, without a second piece of infrastructure. (An earlier draft, when the broker was a full Garnet instance, delivered a distributed cache through the same connection — feature 026. That cache was **removed in feature 041** with the Garnet engine it depended on. **Feature 044 (2026-09-16) brings a cache back on RocksDB** — but as an opt-in, **broker-local, never-replicated** add-on over a *separate* database (`dataDir/cache`), cold after a failover and TTL-bounded, so it is a genuinely different guarantee than the 026 cache rather than its return. See `constraints.md` C10 and `roadmap.md`.)
+Highway runs its own broker on one connection and one server, without a second piece of infrastructure. (An earlier draft, when the broker was a full Garnet instance, delivered a distributed cache through the same connection — feature 026. That cache was **removed in feature 041** with the Garnet engine it depended on. **Feature 044 (2026-09-16) brings a cache back** — but as an opt-in, **broker-local, never-replicated** add-on over a *separate* database (`dataDir/cache`), cold after a failover and TTL-bounded, so it is a genuinely different guarantee than the 026 cache rather than its return. See `constraints.md` C10 and `roadmap.md`.)
 
 > **Update 2026-09-15 (feature 042) — a second node is now a product, not a hope.** The default remains one writable broker. Operators who want a warm standby configure `HighwayReplicationOptions` (start-as-replica, a primary connection string, optional auto-failover). Failover is **priority plus fencing**, not an election: `T_promote > T_fence + margin` (defaults 8s / 5s / 1s), an optional witness that only answers "I see you", and `-NOTPRIMARY <endpoint> <epoch>` so clients follow the new primary. Replicas serve no client traffic. The v1 RPO is the measured replication lag window — an ack can be lost if the primary dies before the replica has it; that is stated in `constraints.md` C9 rather than papered over. There is no quorum and no plan to add one (O10 closed). Protocol: [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) Replication Commands.
 
@@ -315,13 +315,13 @@ made the copy wrong in the first place.
 - **Atomicity lives server-side.** `HW.PUBLISH` either enqueues to all groups or fails — no partial delivery.
 - **Server manages state.** Subscriber group membership, node catalogs, and processing leases are server-side concerns. The client is stateless (beyond its own DI container).
 - **RESP framing preserved.** Tools like `redis-cli`, RESP protocol analyzers, and SE.Redis `Execute()` all work. The commands are custom; the wire format is not.
-- **Durability applies.** The RocksDB store (with its write-ahead log) means all queued messages survive server restart (features 037–041; was Garnet AOF before).
+- **Durability applies.** The durable store (with its write-ahead log) means all queued messages survive server restart (features 037–041; was Garnet AOF before).
 
 ## Highway.Server — Hosting & Control Panel
 
 ### What Highway.Server actually is
 
-Highway.Server is a **purpose-built broker: a Kestrel RESP server over a RocksDB storage engine, with Highway's `HW.*` commands as its whole command surface** (features 037–041). It speaks RESP on the wire, so `redis-cli` and SE.Redis connect unmodified, but it is not a general Redis/Garnet server — it serves only the `HW.*` subset plus the handshake and the one RPC reply-slot key.
+Highway.Server is a **purpose-built broker: a Kestrel RESP server over a solid embedded storage engine, with Highway's `HW.*` commands as its whole command surface** (features 037–041). It speaks RESP on the wire, so `redis-cli` and SE.Redis connect unmodified, but it is not a general Redis/Garnet server — it serves only the `HW.*` subset plus the handshake and the one RPC reply-slot key.
 
 > **Was (before feature 041):** "a Garnet process with Highway's custom commands registered — Garnet, pre-configured and extended." Highway ran as a Garnet extension until the 037–041 engine swap replaced Garnet with the RocksDB + RESP stack and deleted it.
 
