@@ -1,6 +1,19 @@
+[CmdletBinding()]
+param(
+    [string]$Version = "2.0.0",
+    [string]$Rid = "win-x64",
+    [string]$ZipPath = ""
+)
+
 $ErrorActionPreference = 'Stop'
 
-$zipPath = "c:\Software\ai\highway\artifacts\dist\highway-1.0.0-preview.1-win-x64.zip"
+# Resolve the repo root relative to this script (build/verify/), so the check is not tied to a
+# machine-specific absolute path or a single release version.
+$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if ([string]::IsNullOrWhiteSpace($ZipPath)) {
+    $ZipPath = Join-Path $repoRoot "artifacts\dist\highway-$Version-$Rid.zip"
+}
+$zipPath = $ZipPath
 if (-not (Test-Path $zipPath)) {
     throw "Zip file not found at $zipPath"
 }
