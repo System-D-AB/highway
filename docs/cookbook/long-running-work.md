@@ -143,6 +143,6 @@ RPC recovery take two hours — against a `CallTimeout` measured in seconds.
 
 ## Cross-references
 
-- `docs/features/019-long-running-tasks/` — `HW.TOUCH` and the renewal design
+- [`design/durable-queues.md`](../design/durable-queues.md) — `HW.TOUCH` and the renewal design
 - `docs/product/constraints.md` — C1.6 (a handler may run longer than the lease), C7.1
 - `docs/HIGHWAY-PROTOCOL.md` — `HW.TOUCH`

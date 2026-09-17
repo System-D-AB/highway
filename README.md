@@ -153,8 +153,8 @@ converges on the highest-priority reachable successor.
 
 Turn it on with `HighwayReplicationOptions` (start-as-replica, a primary to follow, a priority).
 The RPO is the async-replication lag window — bounded and reported, never silent
-([C9](docs/product/constraints.md)); features
-[042](docs/features/042-replication/) + [042-1](docs/features/042-1-replication-improvements/).
+([C9](docs/product/constraints.md)); see
+[Replication & Failover](docs/design/replication-and-failover.md).
 
 ---
 
@@ -242,11 +242,7 @@ while published events reach both. See [samples/README.md](samples/README.md).
 | [Wire protocol](docs/HIGHWAY-PROTOCOL.md) | Every `HW.*` command, reply shape, error code and key. **The single definition** — test-enforced against the server in both directions |
 | [Constraints](docs/product/constraints.md) | Every guarantee Highway makes, numbered, each with whether the code currently keeps it |
 | [Cookbook](docs/cookbook/) | Patterns for specific problems |
-| [Product](docs/product/product.md) · [Roadmap](docs/product/roadmap.md) | Vision, package architecture, what is being built next |
-| [Feature specs](docs/features/) | Requirements, design and tasks for every feature ever built |
-
-That last one is unusual and deliberate: every feature here was specified before it was
-written, and the specs record the decisions that were rejected as well as the ones taken.
+| [Design docs](docs/design/) | How each capability works — protocol, queues, pub/sub, replication, storage, cache, observability |
 
 ---
 
@@ -261,7 +257,7 @@ is the node the client herd is on) and an **opt-in broker-local cache** (feature
 
 **Not yet done:** metrics (`Meter`) and health endpoints, and prebuilt broker distributions for
 Linux and macOS. The Windows (`win-x64`) distribution — the `highways` zip with service
-installers — ships as of 2.0. Tracked on the [roadmap](docs/product/roadmap.md).
+installers — ships as of 2.0.
 
 ---
 

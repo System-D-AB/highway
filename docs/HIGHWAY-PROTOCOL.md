@@ -8,7 +8,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 **Scope.** Highway's extension surface only. Garnet's own command set is out of scope — except for the handful of stock commands a Highway client is *required* to issue, which are listed in [Stock Garnet Dependencies](#stock-garnet-dependencies). A client built from the `HW.*` commands alone cannot function.
 
-**Authority.** `docs/product/product.md` § "Highway Protocol (HW.* Commands)" contains an earlier command table. That document is read-only and remains the product's founding vision, but its protocol table has diverged from the implementation and **this file supersedes it** for anything implementation-facing. Where the two disagree, this file governs. Feature specs under `docs/features/` keep the *reasoning* behind each decision; this file is the reference for *what* the protocol is.
+**Authority.** This file is the single authoritative definition of the protocol. Any earlier command table in the maintainer's internal product notes is superseded by it for anything implementation-facing; where they disagree, this file governs. The local feature working notes keep the *reasoning* behind each decision; this file is the reference for *what* the protocol is.
 
 **How this file stays true.** The [Command Index](#command-index) is parsed by `ProtocolConformanceTests` and checked against a running server in both directions — a command documented but not registered, registered but not documented, or registered with a different arity all fail the test suite. The rest of the file is prose and is the author's responsibility; a feature that changes the protocol is required to update this file in the same feature.
 
@@ -963,7 +963,7 @@ A payload would have to *end* with the eight trailer bytes to be misread as carr
 
 ## Replication Commands
 
-The primary ships its WAL to warm-standby replicas over RESP. Pull is replica-driven and stateless per request — the replica owns its cursor; the primary owns slots. Replicas serve no `HW.*` client traffic. See [feature 042](features/042-replication/design.md) and, for the failover control model (client-herd mastership, the handshake, the roster), [feature 042-1](features/042-1-replication-improvements/design.md).
+The primary ships its WAL to warm-standby replicas over RESP. Pull is replica-driven and stateless per request — the replica owns its cursor; the primary owns slots. Replicas serve no `HW.*` client traffic. See [Replication & Failover](design/replication-and-failover.md) for the failover control model — client-herd mastership, the handshake, the roster.
 
 **Client bootstrap.** A client's connection string may name several endpoints in the ordinary SE.Redis comma form — `host1:6500,host2:6500,password=…`. The string is **bootstrap only**: enough to reach some node; the live roster (`HW.REPL.STATUS` `roster.*`) is the running truth for successor order, so the cluster can grow beyond any client's original string. A single-endpoint string is unchanged behaviour.
 

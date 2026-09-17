@@ -39,7 +39,7 @@ gigabyte budgets onto a fan-out mechanism. They belong on the queue.
 
 ### C1.1 — A sent message is processed at least once
 
-**Status: Met** — feature 014. Proven under sustained multi-process load and crash turbulence by feature 032 (`assurance/runs/2026-08-18T10-47-30/`, `docs/features/032-assurance-rig/runs.md`).
+**Status: Met** — feature 014. Proven under sustained multi-process load and crash turbulence by the feature 032 assurance rig (`assurance/runs/2026-08-18T10-47-30/`).
 
 Exactly one `IProcess<T>` handles each message. Multiple instances of the same application
 **compete** — they share the work, they do not each get a copy.
@@ -357,7 +357,7 @@ measurements. (Retired in feature 041 — see the 2026-09-15 addendum below.)
 restart replays all of it. A busy broker needs its data directory watched, and a periodic
 planned restart against a fresh directory is currently the only remedy.
 
-> **Addendum 2026-09-11.** Two things are outstanding here, and they pull in opposite directions. **(a)** The user reports this constraint has since been solved; the fix is not visible in this repository and the status below is therefore stale. Whoever made it should update this entry — the register's whole value is that its statuses can be trusted, and a solved constraint reading *"measured not to work"* costs more than an unsolved one. **(b)** Independently, [`research/2026-09-11-rocksdb-http-and-replication.md`](research/2026-09-11-rocksdb-http-and-replication.md) § I.2 argues the failure is structural to Garnet's AOF rather than a configuration matter: on an LSM engine this is not solved but absent, because compaction reclaiming space is the engine's ordinary job. That research is exploratory and nothing is approved.
+> **Addendum 2026-09-11.** Two things are outstanding here, and they pull in opposite directions. **(a)** The user reports this constraint has since been solved; the fix is not visible in this repository and the status below is therefore stale. Whoever made it should update this entry — the register's whole value is that its statuses can be trusted, and a solved constraint reading *"measured not to work"* costs more than an unsolved one. **(b)** Independently, internal storage-engine research (§ I.2) argues the failure is structural to Garnet's AOF rather than a configuration matter: on an LSM engine this is not solved but absent, because compaction reclaiming space is the engine's ordinary job. That research is exploratory and nothing is approved.
 
 > **Addendum 2026-09-15 (feature 041, gate G4) — Met on RocksDB; the Garnet failure was structural.**
 > The engine swap resolves this constraint, and it resolves it by *construction*, not by tuning. The
@@ -663,7 +663,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 >   and has no Garnet command categories, so the trap cannot arise. `AclStrictCustomCommands` is gone
 >   with Garnet.
 >
-> A dated addendum recording the same retirement sits in `research.md` (the 012 analysis is history,
+> A dated addendum recording the same retirement sits in the local research notes (the 012 analysis is history,
 > corrected there by note rather than edit).
 
 ---
@@ -733,11 +733,11 @@ C1.4; feature 018 unified the two delivery engines.
 ## Deferred work
 
 Registered here rather than in a separate `TODOS.md` — a second register is a second thing to
-get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the roadmap.
+get stale, and this register is already maintained and cross-linked.
 
 | Item | Deferred from | Why |
 |---|---|---|
-| **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in `docs/features/015-recoverability/requirements.md` § Deferred |
+| **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in the feature 015 (recoverability) working notes |
 | **Polly / `Microsoft.Extensions.Resilience`** | 015 | The .NET built-in for retry pipelines and the obvious "does the framework already do this?" answer. Moot until the tiers return. Highway takes no dependency beyond Garnet and StackExchange.Redis, so it is a real trade rather than a free win |
 | **Skip-while-outstanding overlap for jobs** | 028, OD4 | Needs an ack-side completion hook (`HW.QACK` does not know a message was a job occurrence); without it, detection is an O(depth) scan under exclusive locks on the claim path. Ships when the hook is designed |
 | **Time-zone schedules (DST semantics)** | 028, OD2 | UTC-only shipped; local-time schedules are a real feature with real edge cases, not a parameter |
@@ -751,12 +751,9 @@ get stale, and this one is already linked from `CLAUDE.md`, `product.md` and the
 ## Cross-references
 
 - [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) — the wire contract these guarantees are built on
-- [`roadmap.md`](roadmap.md) — what is being built and in what order
-- [`product.md`](product.md) — vision and positioning
-- [`brainstorming.md`](brainstorming.md) — design discussions that have not (yet) become features; the 2026-08-09 API-surface review and do-nothing triage live there
-- `docs/features/013-reliable-delivery/` — dead letters, delayed delivery, deduplication
-- `docs/features/014-queue/` — the queue
-- `docs/features/042-replication/` — two-node replication, fencing, no elections
+- [`design/durable-queues.md`](../design/durable-queues.md) — queues, dead letters, delayed delivery, deduplication
+- [`design/replication-and-failover.md`](../design/replication-and-failover.md) — two-node replication, fencing, no elections
+- [`design/`](../design/README.md) — all topical design docs
 
 ## C9 — Replication (feature 042)
 

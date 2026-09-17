@@ -37,10 +37,21 @@ highway-data-*/
 # docs/features/032-assurance-rig/runs.md, not the raw artefacts (OD11).
 assurance/runs/
 
-# Agent working copies of feature specs. The specs themselves live in docs/features/.
+# Agent working copies of feature specs. The specs themselves live in internal/features/.
 .agent/
 
 # Local package-verification output (feature 035 T5)
 build/dist/
 
 artifacts/
+
+# The maintainer's LOCAL working docs — not part of the public repo:
+#   internal/features/  — per-feature requirements/design/tasks (the deep working notes)
+#   internal/product/   — product vision, roadmap, research, brainstorming
+# The public record is the topical design docs (docs/design/), the guarantees register
+# (docs/product/constraints.md), the fail-safe doctrine and the UserGuide.
+internal/
+
+# AI-assistant instructions and steering are the maintainer's local working config, not published.
+CLAUDE.md
+.kiro/

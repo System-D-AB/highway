@@ -105,7 +105,7 @@ second connection string, no extra infrastructure.
 > **Correction, 2026-08-09.** This entry originally read "All integration tests green." It was
 > not true when written: four TLS tests were failing because the new pre-018 startup check
 > opened a *plaintext* loopback connection, so no TLS-enabled server could start at all. Three
-> further defects were found afterwards by verification — see `docs/features/018-.../tasks.md`
+> further defects were found afterwards by verification — see the feature 018 (pub/sub unification) notes
 > T2a. A run log that reports a green suite it did not observe is worse than one that reports
 > nothing, because the next person trusts it.
 **Ran:** build verification only, at the time.

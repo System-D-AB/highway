@@ -308,5 +308,5 @@ running. Stop it before rebuilding.
 ## Further reading
 
 - [`docs/HIGHWAY-PROTOCOL.md`](../docs/HIGHWAY-PROTOCOL.md) — the wire protocol, in one file
-- [`docs/product/product.md`](../docs/product/product.md) — what Highway is for
+- [`docs/design/overview.md`](../docs/design/overview.md) — what Highway is
 - [`RUNLOG.md`](RUNLOG.md) — every sample run, and what it found
