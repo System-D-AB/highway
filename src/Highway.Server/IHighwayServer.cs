@@ -21,4 +21,12 @@ public interface IHighwayServer : IDisposable, IAsyncDisposable
     /// <paramref name="ct"/> is cancelled, then disposes the server.
     /// </summary>
     Task RunAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Raised when replication has scheduled an auto-rejoin (050 T3): a demoted ex-primary has
+    /// written its rejoin marker and needs a restart so <see cref="Start"/>/<c>Open</c> re-syncs it
+    /// as the new primary's replica. The packaged host handles this by stopping the application, so
+    /// the service supervisor relaunches it. Never fires for an in-memory server (no store to rejoin).
+    /// </summary>
+    event Action? RejoinRequested;
 }

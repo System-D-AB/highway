@@ -23,6 +23,41 @@ internal sealed class ReplicaPuller : IAsyncDisposable
 {
     internal const string ResyncMarkerFileName = "resync-required";
 
+    /// <summary>
+    /// Marker written by a demoting ex-primary (050 T2): names the new primary it learned at
+    /// runtime and the epoch it demoted to. <see cref="RocksDbStore.Open"/> honours it — wipe,
+    /// re-bootstrap from that primary, come up as its replica — then consumes it. Distinct from
+    /// the resync marker, which serves a *configured* replica that hit a WAL gap; this one carries
+    /// the endpoint because a demoted ex-primary has no static <c>PrimaryServer</c>.
+    /// </summary>
+    internal const string RejoinMarkerFileName = "rejoin-required";
+
+    /// <summary>Writes the rejoin marker: the learned primary endpoint and the observed epoch.</summary>
+    internal static void WriteRejoinMarker(string dataDir, string primaryEndpoint, ulong observedEpoch)
+        => File.WriteAllText(
+            Path.Combine(dataDir, RejoinMarkerFileName),
+            $"endpoint={primaryEndpoint}\nepoch={observedEpoch.ToString(CultureInfo.InvariantCulture)}\n");
+
+    /// <summary>Reads the rejoin marker, or null when absent or malformed (no endpoint).</summary>
+    internal static (string Endpoint, ulong Epoch)? ReadRejoinMarker(string dataDir)
+    {
+        var path = Path.Combine(dataDir, RejoinMarkerFileName);
+        if (!File.Exists(path)) return null;
+
+        string? endpoint = null;
+        ulong epoch = 0;
+        foreach (var line in File.ReadAllLines(path))
+        {
+            var i = line.IndexOf('=');
+            if (i <= 0) continue;
+            var key = line[..i];
+            var value = line[(i + 1)..];
+            if (key == "endpoint") endpoint = value;
+            else if (key == "epoch") _ = ulong.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out epoch);
+        }
+        return string.IsNullOrWhiteSpace(endpoint) ? null : (endpoint!, epoch);
+    }
+
     private readonly RocksDbStore _store;
     private readonly HighwayReplicationOptions _options;
     private readonly BatchApplier _applier;

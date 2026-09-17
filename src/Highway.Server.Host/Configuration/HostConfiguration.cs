@@ -164,7 +164,9 @@ public sealed class ReplicationSection
     public string? AdvertiseEndpoint { get; set; }
     public string? PrimaryServer { get; set; }
     public ulong SlotLagCapSequences { get; set; } = 100_000;
+    public TimeSpan SlotStaleAfter { get; set; } = TimeSpan.FromSeconds(60);
     public bool AutoFailover { get; set; }
+    public bool AutoRejoin { get; set; } = true;
     public TimeSpan FenceTimeout { get; set; } = TimeSpan.FromSeconds(5);
     public TimeSpan PromoteTimeout { get; set; } = TimeSpan.FromSeconds(8);
     public TimeSpan Margin { get; set; } = TimeSpan.FromSeconds(1);

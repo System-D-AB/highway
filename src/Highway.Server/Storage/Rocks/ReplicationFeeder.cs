@@ -162,6 +162,26 @@ internal sealed class ReplicationFeeder : IDisposable
     public Func<IReadOnlyList<string>>? RosterPeers { get; set; }
 
     /// <summary>
+    /// Registers this node into the replicated roster (050 T1 / F1). Set by the owning store,
+    /// which holds the <c>IHighwayStore</c> the feeder itself does not; fired by
+    /// <see cref="TryPromote"/> after the promotion announce so a node that <b>promotes</b> (not
+    /// only one that <b>starts</b> primary) appears in the roster — the successor priority map and
+    /// the dashboard succession view stay complete after a failover instead of going blank exactly
+    /// when the cluster needs its own membership. Idempotent: the upsert is keyed on the node id.
+    /// Null in socketless harnesses — nothing else depends on it.
+    /// </summary>
+    public Action? RegisterSelfInRoster { get; set; }
+
+    /// <summary>
+    /// Fired when a demotion has scheduled an auto-rejoin (050 T2/T3): a rejoin marker is now on
+    /// disk naming the new primary, and a restart will re-sync this node as its replica. The host
+    /// wires this to a graceful stop so an external supervisor restarts the process at once; if it
+    /// is left null the marker is still honoured on the next restart from any cause, so rejoin is
+    /// never lost, only delayed. Fired outside the role lock. No-op when <c>AutoRejoin</c> is off.
+    /// </summary>
+    public Action? RejoinRequested { get; set; }
+
+    /// <summary>
     /// Raised after the node's epoch changes (promotion, or adopting a higher epoch). The
     /// broker-local cache subscribes to wipe itself (044 R6): an epoch change is exactly
     /// the condition "another node may have written the underlying data since this node
@@ -228,14 +248,16 @@ internal sealed class ReplicationFeeder : IDisposable
         // 047: log a first attach (or re-attach after a drop). HELLO recurs on every pull, so this
         // is guarded to only fire when the slot is genuinely new/absent — not per HELLO.
         var isNewSlot = !_slots.ContainsKey(replicaId);
+        var contactNow = Options.Clock.GetUtcNow();
         _slots.AddOrUpdate(
             replicaId,
-            _ => new ReplicaSlot(replicaId, lastAppliedSeq, replicaEpoch, SlotState.Active),
+            _ => new ReplicaSlot(replicaId, lastAppliedSeq, replicaEpoch, SlotState.Active, contactNow),
             (_, existing) => existing with
             {
                 AckedSeq = Math.Max(existing.AckedSeq, lastAppliedSeq),
                 ReplicaEpoch = replicaEpoch,
                 State = SlotState.Active,
+                LastContact = contactNow,
             });
         if (isNewSlot)
             Logger?.LogInformation("[replication] replica {ReplicaId} attached (watermark={Watermark}, epoch={Epoch})",
@@ -249,8 +271,13 @@ internal sealed class ReplicationFeeder : IDisposable
         NotePeerContact();
         if (!_slots.TryGetValue(replicaId, out var slot) || slot.State == SlotState.Dropped)
             return false;
-        if (appliedSeq > slot.AckedSeq)
-            _slots[replicaId] = slot with { AckedSeq = appliedSeq, State = SlotState.Active };
+        // Any ack is a contact — refresh liveness even when it does not advance the watermark (050 T4).
+        _slots[replicaId] = slot with
+        {
+            AckedSeq = Math.Max(slot.AckedSeq, appliedSeq),
+            State = SlotState.Active,
+            LastContact = Options.Clock.GetUtcNow(),
+        };
         EnforceCap();
         return true;
     }
@@ -358,17 +385,32 @@ internal sealed class ReplicationFeeder : IDisposable
     {
         var latest = Engine.GetLatestSequenceNumber();
         var cap = Options.SlotLagCapSequences;
-        if (cap == 0) return;
+        var now = Options.Clock.GetUtcNow();
+        var staleAfter = Options.SlotStaleAfter;
 
         foreach (var (id, slot) in _slots)
         {
             if (slot.State == SlotState.Dropped) continue;
+
+            // 050 T4 (F3): time-based staleness. A slot that has made no contact within the bound is
+            // dropped even when it is under the lag cap — a replica that silently stopped acking must
+            // not keep reading as Active on a live primary. Independent of the lag cap (which may be 0).
+            if (staleAfter > TimeSpan.Zero && slot.LastContact != default && now - slot.LastContact > staleAfter)
+            {
+                _slots[id] = slot with { State = SlotState.Dropped };
+                var silentMs = (now - slot.LastContact).TotalMilliseconds;
+                _dropEvents.Enqueue($"slot-dropped-stale replica={id} silentMs={silentMs:F0} bound={staleAfter}");
+                Logger?.LogWarning("[replication] replica {ReplicaId} slot dropped: silent {SilentMs:F0} ms exceeds {Bound}; it must re-bootstrap",
+                    id, silentMs, staleAfter);
+                continue;
+            }
+
+            if (cap == 0) continue;   // lag cap disabled — the staleness rule above still applies
             var lag = latest > slot.AckedSeq ? latest - slot.AckedSeq : 0;
             if (lag > cap)
             {
                 _slots[id] = slot with { State = SlotState.Dropped };
-                var ev = $"slot-dropped replica={id} lag={lag} cap={cap}";
-                _dropEvents.Enqueue(ev);
+                _dropEvents.Enqueue($"slot-dropped replica={id} lag={lag} cap={cap}");
                 Logger?.LogWarning("[replication] replica {ReplicaId} slot dropped: lag {Lag} exceeds cap {Cap}; it must re-bootstrap",
                     id, lag, cap);
             }
@@ -424,6 +466,13 @@ internal sealed class ReplicationFeeder : IDisposable
         _ = announceTo;   // superseded by the roster broadcast
         if (targets.Count > 0)
             AnnouncePromotionAsync(targets, announceEpoch);
+
+        // 050 T1 (F1): a node that PROMOTES at runtime must self-register in the roster too —
+        // the same record the startup path writes for a node that STARTS writable. Without it the
+        // set loses its own membership map at the moment of failover (blank succession view, lost
+        // successor priorities). The owning store performs the upsert (it holds the store handle);
+        // it is idempotent on the node id and, written through the store, WAL-ships to every standby.
+        RegisterSelfInRoster?.Invoke();
 
         OnEpochChanged?.Invoke();   // 044: promotion bumped the epoch → wipe the local cache
         return true;
@@ -490,6 +539,7 @@ internal sealed class ReplicationFeeder : IDisposable
     public void ObserveHigherEpoch(ulong observedEpoch, string reason, string? primaryEndpoint = null)
     {
         var epochChanged = false;
+        var rejoinRequested = false;
         lock (_roleLock)
         {
             if (observedEpoch < Epoch) return;
@@ -500,29 +550,66 @@ internal sealed class ReplicationFeeder : IDisposable
             // node that is (still) Primary records it only when the epoch supersedes it
             // — i.e., exactly when this call is about to demote it.
             if (primaryEndpoint is not null && (Role != ReplicaRole.Primary || observedEpoch > Epoch))
+            {
                 _knownPrimaryEndpoint = primaryEndpoint;
-
-            if (observedEpoch == Epoch) return;
-
-            if (Role is ReplicaRole.Primary or ReplicaRole.Fenced)
-            {
-                var from = Role;
-                Role = ReplicaRole.Demoted;
-                LastReconciliationPath = WriteReconciliationReport();
-                Note($"demote from={from} observedEpoch={observedEpoch} reason={reason} file={LastReconciliationPath}", LogLevel.Warning);
-            }
-            else
-            {
-                Note($"adopt-epoch from={Epoch} to={observedEpoch} reason={reason}");
+                // A node already Demoted that only now learns where the new primary is (the
+                // announce arrived after a bare-epoch demotion) can schedule its rejoin here.
+                if (Role == ReplicaRole.Demoted)
+                    ScheduleRejoinIfConfigured(Math.Max(Epoch, observedEpoch), ref rejoinRequested);
             }
 
-            Epoch = observedEpoch;
-            PersistEpoch();
-            epochChanged = true;
+            // Equal epoch: no role change (this call may only have just learned the endpoint,
+            // above) — fall through so the rejoin hook still fires. Only a strictly higher epoch
+            // demotes or is adopted.
+            if (observedEpoch > Epoch)
+            {
+                if (Role is ReplicaRole.Primary or ReplicaRole.Fenced)
+                {
+                    var from = Role;
+                    Role = ReplicaRole.Demoted;
+                    _slots.Clear();   // 050 T4 (F3): a demoted node holds no replicas — drop phantom slots now
+                    LastReconciliationPath = WriteReconciliationReport();
+                    Note($"demote from={from} observedEpoch={observedEpoch} reason={reason} file={LastReconciliationPath}", LogLevel.Warning);
+                    // 050 T2/T3 (F2): schedule the demoted ex-primary to rejoin the new primary as a
+                    // replica. Needs the endpoint — set just above when the announce carried it; if it
+                    // did not, the schedule fires when a later redirect/announce supplies it (above).
+                    ScheduleRejoinIfConfigured(observedEpoch, ref rejoinRequested);
+                }
+                else
+                {
+                    Note($"adopt-epoch from={Epoch} to={observedEpoch} reason={reason}");
+                }
+
+                Epoch = observedEpoch;
+                PersistEpoch();
+                epochChanged = true;
+            }
         }
 
         if (epochChanged)
             OnEpochChanged?.Invoke();   // 044: adopted a higher epoch → wipe the local cache
+        if (rejoinRequested)
+            RejoinRequested?.Invoke();  // 050: ask the host to restart so Open re-syncs us as a replica
+    }
+
+    /// <summary>
+    /// Writes the rejoin marker (050 T2) if auto-rejoin is on, this node is demoted, and it knows
+    /// where the new primary is — at most once (a marker already on disk is left as-is). Called
+    /// under <c>_roleLock</c>; sets <paramref name="rejoinRequested"/> so the caller fires the
+    /// <see cref="RejoinRequested"/> hook outside the lock. Bounded by construction: only a demotion
+    /// (a strictly higher epoch) reaches here, and a rejoined node is a Replica that never re-demotes
+    /// at the same epoch — so it cannot loop.
+    /// </summary>
+    private void ScheduleRejoinIfConfigured(ulong primaryEpoch, ref bool rejoinRequested)
+    {
+        if (!Options.AutoRejoin) return;
+        if (Role != ReplicaRole.Demoted) return;
+        if (_knownPrimaryEndpoint is not { } target) return;
+        if (File.Exists(Path.Combine(_dataDir, ReplicaPuller.RejoinMarkerFileName))) return;
+
+        ReplicaPuller.WriteRejoinMarker(_dataDir, target, primaryEpoch);
+        Note($"rejoin-scheduled primary={HostOf(target) ?? target} epoch={primaryEpoch}", LogLevel.Warning);
+        rejoinRequested = true;
     }
 
     /// <summary>Kept for the explicit paths that must demote regardless of current role semantics.</summary>
@@ -598,6 +685,7 @@ internal sealed class ReplicationFeeder : IDisposable
             var cause = ConnectedClients == 0 ? "herd-left" : "drain-deadline";
             _drainDeadline = null;
             Role = ReplicaRole.Demoted;   // the clean stood-down state (parent R12.4)
+            _slots.Clear();               // 050 T4 (F3): stood down → hold no replicas
             if (Engine.GetLatestSequenceNumber() > MinAckedWatermark())
                 LastReconciliationPath = WriteReconciliationReport();
             Note($"goodbye-complete epoch={Epoch} cause={cause} at={now:o}");
@@ -616,6 +704,7 @@ internal sealed class ReplicationFeeder : IDisposable
 
     public IReadOnlyList<(string Name, string Value)> StatsFields()
     {
+        EnforceCap();   // 050 T4: refresh slot staleness so a read never shows a phantom Active replica
         var fields = new List<(string, string)>
         {
             ("repl.role", Role.ToString()),
@@ -737,7 +826,7 @@ internal sealed class ReplicationFeeder : IDisposable
     }
 }
 
-internal readonly record struct ReplicaSlot(string ReplicaId, ulong AckedSeq, ulong ReplicaEpoch, SlotState State = SlotState.Active);
+internal readonly record struct ReplicaSlot(string ReplicaId, ulong AckedSeq, ulong ReplicaEpoch, SlotState State = SlotState.Active, DateTimeOffset LastContact = default);
 
 internal readonly record struct ReplicationPage(
     ulong Epoch,

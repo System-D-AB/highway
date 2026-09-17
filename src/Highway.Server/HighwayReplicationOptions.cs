@@ -24,8 +24,26 @@ public sealed class HighwayReplicationOptions
     /// <summary>Drop a replica slot whose acked watermark lags the primary by more than this many sequences.</summary>
     public ulong SlotLagCapSequences { get; set; } = 100_000;
 
+    /// <summary>
+    /// Drop a replica slot that has made no contact (HELLO / PULL / ACK) for this long, even when it
+    /// is under the lag cap (050 T4 / F3). Stops a silently-gone replica from reading as <c>Active</c>
+    /// on a live primary and inflating the redundancy the dashboard shows. Default 60s;
+    /// <see cref="TimeSpan.Zero"/> disables the time-based rule (lag-cap dropping still applies).
+    /// </summary>
+    public TimeSpan SlotStaleAfter { get; set; } = TimeSpan.FromSeconds(60);
+
     /// <summary>Opt-in automatic failover (the two-timeout deadman). Off by default.</summary>
     public bool AutoFailover { get; set; }
+
+    /// <summary>
+    /// Automatic rejoin of a demoted ex-primary (050 F2). When a node that believed itself
+    /// primary observes a higher epoch and demotes, it records where the new primary is and, on
+    /// its next restart, wipes and re-syncs as that primary's replica — restoring redundancy with
+    /// no operator step. Its diverged tail is preserved in a reconciliation report first (herd-wins
+    /// RPO, C9.2a), never merged. On by default: the alternative (a demoted node stranded forever)
+    /// is strictly worse. Set false to keep a demoted node in place for manual recovery.
+    /// </summary>
+    public bool AutoRejoin { get; set; } = true;
 
     /// <summary>Primary fences itself after this long without replica or witness contact. Default 5s (OD1).</summary>
     public TimeSpan FenceTimeout { get; set; } = TimeSpan.FromSeconds(5);

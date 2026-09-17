@@ -94,7 +94,9 @@ internal static class HighwayServerApplicator
         o.Replication.AdvertiseEndpoint = s.Replication.AdvertiseEndpoint;
         o.Replication.PrimaryServer = s.Replication.PrimaryServer;
         o.Replication.SlotLagCapSequences = s.Replication.SlotLagCapSequences;
+        o.Replication.SlotStaleAfter = s.Replication.SlotStaleAfter;
         o.Replication.AutoFailover = s.Replication.AutoFailover;
+        o.Replication.AutoRejoin = s.Replication.AutoRejoin;
         o.Replication.FenceTimeout = s.Replication.FenceTimeout;
         o.Replication.PromoteTimeout = s.Replication.PromoteTimeout;
         o.Replication.Margin = s.Replication.Margin;

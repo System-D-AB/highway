@@ -43,7 +43,10 @@ internal static class HostFactory
         builder.Services.AddSystemd();
 
         builder.Services.AddHostedService(sp =>
-            new HighwayBrokerService(configuration, sp.GetRequiredService<ILoggerFactory>()));
+            new HighwayBrokerService(
+                configuration,
+                sp.GetRequiredService<ILoggerFactory>(),
+                sp.GetRequiredService<IHostApplicationLifetime>()));
 
         return builder;
     }

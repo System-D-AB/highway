@@ -55,6 +55,9 @@ public sealed class RespHighwayServer : IHighwayServer
     /// <inheritdoc/>
     public string Endpoint => $"{_opts.BindAddress}:{_opts.Port}";
 
+    /// <inheritdoc/>
+    public event Action? RejoinRequested;
+
     /// <summary>The flight recorder, for in-process components and tests (022).</summary>
     internal FlightRecorder? Recorder => _server?.Recorder;
 
@@ -76,7 +79,13 @@ public sealed class RespHighwayServer : IHighwayServer
             : new InMemoryStore();
 
         if (_store is Storage.Rocks.RocksDbStore durable)
+        {
             durable.Replication.Logger = replLogger;
+            // 050 T3: a demoted ex-primary that scheduled a rejoin needs a restart so Open re-syncs
+            // it as the new primary's replica. Forward the store's signal to our own event; the host
+            // stops the app and the service supervisor relaunches it.
+            durable.Replication.RejoinRequested = () => RejoinRequested?.Invoke();
+        }
 
         // Production keeps the loopback exemption (C6.x); the test server turns it off.
         var authenticator = new PasswordAuthenticator(_opts.Authentication, exemptLoopback: true);

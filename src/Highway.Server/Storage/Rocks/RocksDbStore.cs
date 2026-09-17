@@ -67,6 +67,14 @@ public sealed class RocksDbStore : IHighwayStore
         // A promotion announces its new epoch to every roster peer (042-1d); the closure
         // reads through this fully-built store, invoked only at promote time.
         Replication.RosterPeers = () => RosterStore.Read(this).Members.Select(m => m.Endpoint).ToArray();
+        // 050 T1 (F1): a node that promotes at runtime self-registers into the roster — the same
+        // record the startup path writes for a node that starts writable — so the successor order
+        // (and the dashboard succession view) survives a failover. Idempotent on the node id, and
+        // written through this store so it WAL-ships to every standby.
+        Replication.RegisterSelfInRoster = () => RosterStore.TryUpsert(
+            this,
+            new RosterMember(Replication.Options.ReplicaId, Replication.Options.Priority, Replication.SelfEndpoint),
+            out _, out _);
     }
 
     /// <summary>
@@ -77,6 +85,24 @@ public sealed class RocksDbStore : IHighwayStore
     {
         replication?.Validate();
         Directory.CreateDirectory(path);
+
+        // 050 T2/T3 (F2): a demoted ex-primary wrote a rejoin marker naming the new primary it
+        // learned at runtime. Honour it by re-syncing as that primary's replica — reusing the same
+        // wipe → snapshot → puller path a configured replica uses. The node has no static
+        // PrimaryServer, so the marker supplies the endpoint; any auth/TLS tail on the node's own
+        // (rare) PrimaryServer config is carried over. WipeForRejoin preserves the marker itself, so
+        // a failed snapshot download leaves it for the next restart to retry rather than silently
+        // coming back up as a stale primary; a successful Open consumes it below.
+        if (replication is { AutoRejoin: true } && ReplicaPuller.ReadRejoinMarker(path) is { } rejoin)
+        {
+            var priorTail = replication.PrimaryServer is { } ps && ps.Contains(',') ? ps[ps.IndexOf(',')..] : "";
+            replication.StartAsReplica = true;
+            replication.PrimaryServer = rejoin.Endpoint + priorTail;
+            logger?.LogWarning(
+                "[replication] rejoin marker present; wiping and re-syncing as a replica of {Primary} (epoch {Epoch})",
+                ReplicationFeeder.HostOf(rejoin.Endpoint) ?? rejoin.Endpoint, rejoin.Epoch);
+            WipeForRejoin(path);
+        }
 
         // G4: a replica that hit a WAL gap wrote the resync marker and was restarted.
         // Wipe the stale database (keeping node-local replication files — the epoch must
@@ -111,6 +137,12 @@ public sealed class RocksDbStore : IHighwayStore
 
         var db = RocksDb.Open(options, path, families);
 
+        // 050 T2/T3: a rejoin bootstrap succeeded (the snapshot applied and the DB opened) — consume
+        // the marker so a clean restart does not wipe again. A failed download would have thrown
+        // above, leaving the marker in place for the next attempt.
+        var rejoinMarker = Path.Combine(path, ReplicaPuller.RejoinMarkerFileName);
+        if (File.Exists(rejoinMarker)) File.Delete(rejoinMarker);
+
         AssertColumnFamilyOrder(db);
         return new RocksDbStore(db, path, ownsDirectory, replication);
     }
@@ -126,6 +158,24 @@ public sealed class RocksDbStore : IHighwayStore
         {
             var name = Path.GetFileName(entry);
             if (name is "repl-epoch.txt" or "snapshot-bootstrap.log")
+                continue;
+            if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+            else File.Delete(entry);
+        }
+    }
+
+    /// <summary>
+    /// Wipes the database ahead of a rejoin re-bootstrap (050 T2), preserving the persisted epoch,
+    /// the bootstrap log, AND the rejoin marker — the marker must survive a failed snapshot download
+    /// so the next restart retries the rejoin instead of coming up as a stale primary. The marker is
+    /// consumed only after <see cref="Open"/> succeeds.
+    /// </summary>
+    private static void WipeForRejoin(string path)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(path))
+        {
+            var name = Path.GetFileName(entry);
+            if (name is "repl-epoch.txt" or "snapshot-bootstrap.log" or ReplicaPuller.RejoinMarkerFileName)
                 continue;
             if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
             else File.Delete(entry);

@@ -10,7 +10,10 @@ namespace Highway.Server.Host;
 /// <c>RunAsync</c> performs on cancellation: components first, then the recorder,
 /// then the store is flushed and closed.
 /// </summary>
-internal sealed class HighwayBrokerService(HostConfiguration configuration, ILoggerFactory loggerFactory)
+internal sealed class HighwayBrokerService(
+    HostConfiguration configuration,
+    ILoggerFactory loggerFactory,
+    IHostApplicationLifetime lifetime)
     : IHostedService
 {
     private readonly ILogger<HighwayBrokerService> _logger = loggerFactory.CreateLogger<HighwayBrokerService>();
@@ -19,6 +22,18 @@ internal sealed class HighwayBrokerService(HostConfiguration configuration, ILog
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _server = HighwayServerApplicator.BuildServer(configuration, loggerFactory);
+
+        // 050 T3: when replication schedules an auto-rejoin, a demoted ex-primary must restart so the
+        // store re-syncs it as the new primary's replica. Stop the application; the service supervisor
+        // (Windows service recovery / systemd Restart= / the run loop) relaunches it, and Open honours
+        // the rejoin marker. Subscribed before Start so no signal is missed.
+        _server.RejoinRequested += () =>
+        {
+            _logger.LogWarning(
+                "Highway broker: replication scheduled an auto-rejoin — stopping so the service restarts and re-syncs as a replica of the new primary.");
+            lifetime.StopApplication();
+        };
+
         _server.Start();
         _logger.LogInformation("Highway broker listening on {Endpoint}", _server.Endpoint);
         return Task.CompletedTask;

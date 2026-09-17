@@ -43,7 +43,9 @@ internal static class EffectiveConfigurationPrinter
         writer.WriteLine($"    replication.advertiseEndpoint    : {c.Server.Replication.AdvertiseEndpoint ?? "(own endpoint)"}");
         writer.WriteLine($"    replication.primaryServer        : {Redact(c.Server.Replication.PrimaryServer)}");
         writer.WriteLine($"    replication.slotLagCapSequences  : {c.Server.Replication.SlotLagCapSequences}");
+        writer.WriteLine($"    replication.slotStaleAfter       : {c.Server.Replication.SlotStaleAfter}");
         writer.WriteLine($"    replication.autoFailover         : {c.Server.Replication.AutoFailover}");
+        writer.WriteLine($"    replication.autoRejoin           : {c.Server.Replication.AutoRejoin}");
         writer.WriteLine($"    replication.fenceTimeout         : {c.Server.Replication.FenceTimeout}");
         writer.WriteLine($"    replication.promoteTimeout       : {c.Server.Replication.PromoteTimeout}");
         writer.WriteLine($"    replication.margin               : {c.Server.Replication.Margin}");
