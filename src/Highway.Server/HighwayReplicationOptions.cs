@@ -21,6 +21,15 @@ public sealed class HighwayReplicationOptions
     /// <summary>Primary connection string a replica pulls from (SE.Redis form).</summary>
     public string? PrimaryServer { get; set; }
 
+    /// <summary>
+    /// The SE.Redis connection-string tail (e.g. <c>,password=…</c>) used to authenticate an
+    /// auto-rejoin's snapshot/pull to the learned primary (050 T3). Set by the server from its own
+    /// authentication at startup — a replica set shares one secret — because the rejoin endpoint is
+    /// learned at runtime and carries no credentials of its own. Internal: derived, never user-set,
+    /// so it is not part of the configuration schema.
+    /// </summary>
+    internal string? AuthTail { get; set; }
+
     /// <summary>Drop a replica slot whose acked watermark lags the primary by more than this many sequences.</summary>
     public ulong SlotLagCapSequences { get; set; } = 100_000;
 

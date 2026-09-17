@@ -95,7 +95,12 @@ public sealed class RocksDbStore : IHighwayStore
         // coming back up as a stale primary; a successful Open consumes it below.
         if (replication is { AutoRejoin: true } && ReplicaPuller.ReadRejoinMarker(path) is { } rejoin)
         {
-            var priorTail = replication.PrimaryServer is { } ps && ps.Contains(',') ? ps[ps.IndexOf(',')..] : "";
+            // The rejoin endpoint was learned at runtime and carries no credentials. Use the tail
+            // from this node's own (rare) PrimaryServer config if it has one, else the shared-secret
+            // tail the server derived from its authentication (050 T3) — a replica set shares it.
+            var priorTail = replication.PrimaryServer is { } ps && ps.Contains(',')
+                ? ps[ps.IndexOf(',')..]
+                : (replication.AuthTail ?? "");
             replication.StartAsReplica = true;
             replication.PrimaryServer = rejoin.Endpoint + priorTail;
             logger?.LogWarning(

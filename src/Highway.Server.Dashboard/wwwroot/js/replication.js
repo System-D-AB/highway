@@ -16,6 +16,32 @@ export async function render(container, options) {
         const fields = data.fields || [];
         const byName = Object.fromEntries(fields.map((f) => [f.name, f.value]));
 
+        // Leadership + redundancy banner (050 T5): who is primary, at what epoch, since when, and
+        // whether redundancy is currently intact — loud on the tab, not inferred from a stat tile.
+        const role = byName['repl.role'] || '—';
+        const epoch = byName['repl.epoch'] || '—';
+        const redundancy = byName['repl.redundancy'] || '';
+        const since = byName['repl.leadershipSince'] || '';
+        const sinceText = since ? new Date(since).toLocaleString() : '—';
+        const primaryShown = (role === 'Replica' || role === 'Demoted')
+            ? (byName['repl.redirect'] || '—')
+            : (byName['repl.endpoint'] || '—');
+        const banner = `<div style="padding:10px 14px;border-left:4px solid var(--accent);background:rgba(127,127,127,.08);border-radius:6px;margin-bottom:12px;">
+            Primary is now <b class="mono">${esc(primaryShown)}</b> · epoch ${esc(epoch)} · since ${esc(sinceText)}</div>`;
+        const danger = (msg) => `<div style="padding:10px 14px;border-left:4px solid #e5484d;background:rgba(229,72,77,.12);border-radius:6px;margin-bottom:12px;font-weight:600;">⚠ ${esc(msg)}</div>`;
+        let alert = '';
+        if (redundancy === 'no-standby') alert = danger('No redundancy: this primary has no live standby attached.');
+        else if (redundancy === 'demoted') alert = danger('This node is demoted and not yet following a primary.');
+        else if (redundancy === 'fenced') alert = danger('This node is fenced (read-only) — no peer or client contact.');
+
+        // Event timeline (050 T5): recent role/topology transitions, newest first.
+        const timeline = [];
+        for (let i = 0; ; i++) { const ev = byName[`repl.event.${i}`]; if (!ev) break; timeline.push(ev); }
+        const timelineHtml = timeline.length
+            ? `<h3>Recent role changes</h3>
+               <ul class="mono" style="margin:0;padding-left:18px;line-height:1.6;">${timeline.slice().reverse().map((e) => `<li>${esc(e)}</li>`).join('')}</ul>`
+            : '';
+
         // The replicated roster — every member with its priority and endpoint (047).
         const roster = [];
         for (let i = 0; ; i++) {
@@ -91,6 +117,7 @@ export async function render(container, options) {
 
         container.innerHTML = `
             <h2>Replication</h2>
+            ${banner}${alert}
             <p class="muted">
                 One primary, warm standbys. Replicas serve no client traffic. Lag is WAL sequences
                 behind the primary; a slot past the cap is dropped and must re-bootstrap.
@@ -119,7 +146,8 @@ export async function render(container, options) {
             <table class="grid">
                 <thead><tr><th>Replica</th><th>Endpoint</th><th>Priority</th><th>State</th><th>Acked seq</th><th>Lag</th></tr></thead>
                 <tbody>${rows || emptySlots}</tbody>
-            </table>`;
+            </table>
+            ${timelineHtml}`;
     };
 
     setActiveView(refresh, options.pollIntervalMs);

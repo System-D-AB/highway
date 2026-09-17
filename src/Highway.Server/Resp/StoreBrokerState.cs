@@ -115,6 +115,19 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
                 return Task.FromResult(StateResult<IReadOnlyDictionary<string, string>>.Fail("replication requires a durable RocksDB broker"));
 
             var map = rocks.Replication.StatsFields().ToDictionary(f => f.Name, f => f.Value, StringComparer.Ordinal);
+            // 049/050 T5: the dashboard succession view reads roster.* — include the replicated roster
+            // (the same fields HW.REPL.STATUS emits) so it populates from api/replication too, not only
+            // from HW.REPL.STATUS. Without this the succession table was always empty on the dashboard.
+            var roster = Storage.Rocks.RosterStore.Read(store);
+            map["roster.version"] = roster.Version.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var r = 0;
+            foreach (var m in roster.Members)
+            {
+                map[$"roster.{r}.id"] = m.NodeId;
+                map[$"roster.{r}.priority"] = m.Priority.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                map[$"roster.{r}.endpoint"] = m.Endpoint;
+                r++;
+            }
             return Task.FromResult(StateResult<IReadOnlyDictionary<string, string>>.Ok((IReadOnlyDictionary<string, string>)map));
         }
         catch (Exception ex)

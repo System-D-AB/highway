@@ -60,6 +60,9 @@ public static class Program
         if (parsed.Goodbye)
             return DispatchReplVerb(parsed, environment, "HW.REPL.GOODBYE", parsed.GoodbyeReason, "goodbye begun ({0}); the node drains, then stands down");
 
+        if (parsed.DrainAndStop)
+            return DispatchDrainAndStop(parsed, environment);
+
         if (parsed.Validate)
         {
             try
@@ -199,9 +202,90 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// 050 T7 — the safe-upgrade one-liner: hand the master off with <c>HW.REPL.GOODBYE</c>, wait for
+    /// the drain to complete, then stop the service cleanly. The operator's whole rolling-upgrade step
+    /// for the primary becomes <c>--drain-and-stop → swap binaries → --start</c>, with the failover
+    /// made deliberate and lossless instead of an ungraceful restart that degrades the cluster.
+    /// </summary>
+    private static int DispatchDrainAndStop(HostArguments parsed, System.Collections.IDictionary? environment)
+    {
+        try
+        {
+            var loaded = ConfigurationLoader.Load(
+                parsed.ConfigPath ?? DiscoverConfigFile(),
+                environment,
+                cliPort: parsed.Port,
+                cliBindAddress: parsed.BindAddress,
+                cliDataDir: parsed.DataDir);
+
+            var c = loaded.Configuration;
+            var endpoint = $"{c.Server.BindAddress}:{c.Server.Port}";
+            if (!string.IsNullOrEmpty(c.Authentication.Password))
+                endpoint += $",password={c.Authentication.Password}";
+
+            using var mux = StackExchange.Redis.ConnectionMultiplexer.Connect(endpoint);
+            var db = mux.GetDatabase();
+
+            Console.WriteLine("Draining: HW.REPL.GOODBYE (graceful hand-off to the successor)…");
+            try { db.Execute("HW.REPL.GOODBYE", "drain-and-stop"); }
+            catch (Exception ex) { Console.WriteLine($"  goodbye not applicable ({ex.Message}); proceeding to stop"); }
+
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            var drained = false;
+            while (DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(500);
+                var fields = ReadReplStatus(db);
+                if (fields is null) { drained = true; break; }   // no replication → nothing to drain
+                fields.TryGetValue("repl.draining", out var draining);
+                fields.TryGetValue("repl.role", out var role);
+                fields.TryGetValue("repl.clients", out var clients);
+                if (!string.Equals(draining, "True", StringComparison.OrdinalIgnoreCase)
+                    && (string.Equals(role, "Demoted", StringComparison.OrdinalIgnoreCase) || clients == "0"))
+                {
+                    drained = true;
+                    break;
+                }
+            }
+
+            Console.WriteLine(drained
+                ? "Drained; the node has stood down. Stopping the service…"
+                : "Drain timed out; stopping anyway (any in-flight work replays to the new master).");
+
+            if (OperatingSystem.IsWindows())
+                return WindowsServiceManager.Dispatch(HostArguments.Parse(["--stop"]));
+
+            Console.WriteLine("Node drained. Stop the unit to finish: 'systemctl stop <your-highway-unit>', then swap binaries and start.");
+            return ExitCodes.Success;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.Unexpected;
+        }
+    }
+
+    private static Dictionary<string, string>? ReadReplStatus(StackExchange.Redis.IDatabase db)
+    {
+        try
+        {
+            var flat = (StackExchange.Redis.RedisResult[])db.Execute("HW.REPL.STATUS")!;
+            var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+            for (var i = 0; i + 1 < flat.Length; i += 2)
+                fields[flat[i].ToString()!] = flat[i + 1].ToString()!;
+            return fields;
+        }
+        catch
+        {
+            return null;   // a broker without replication configured
+        }
+    }
+
     private static string Usage() => """
           --promote [reason]         issue HW.REPL.PROMOTE against the configured broker, then exit
           --goodbye [reason]         issue HW.REPL.GOODBYE (graceful drain + stand-down), then exit
+          --drain-and-stop           GOODBYE, wait for the drain, then stop the service (safe rolling upgrade)
           --version                 print version, storage format and RID, then exit
           --validate                load and validate configuration, print it masked, exit
           --config <path>           configuration file (default: discovery in CWD, config/, beside exe)

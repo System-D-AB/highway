@@ -139,3 +139,55 @@ When upgrading across incompatible storage format versions or performing store m
      ```
 6. **Resume Producers**:
    - Resume client producer traffic.
+
+---
+
+## 6. Runbook: Rolling Upgrade of a Replica Set (Zero-Downtime)
+
+Upgrading the binaries of a two-node replica set **without an unplanned failover**. A bare restart of
+the primary looks like a failure to the client herd and forces an ungraceful failover; this procedure
+makes every hand-off deliberate and lossless. It relies on **auto-rejoin** (on by default,
+`server.replication.autoRejoin`): a demoted node re-syncs as a replica of the new primary on its next
+start, so you never reconfigure or wipe by hand.
+
+**Order: upgrade the replica(s) first, the primary last.**
+
+### 1. Upgrade each replica
+On the replica node:
+```cmd
+bin\highways.exe --stop
+:: swap the bin\ files for the new version
+bin\highways.exe --start
+```
+The replica reconnects and catches up (lag → 0). Confirm on the primary's dashboard **Replication** tab
+that the standby reads **Active** again before continuing.
+
+### 2. Hand the primary off, then upgrade it
+On the primary node, one command drains and stops it:
+```cmd
+bin\highways.exe --drain-and-stop
+```
+This issues `HW.REPL.GOODBYE` (the herd moves to the highest-priority standby with zero client loss),
+waits for the drain to complete, then stops the service. Swap the binaries and start it:
+```cmd
+:: swap the bin\ files for the new version
+bin\highways.exe --start
+```
+On start it **auto-rejoins as a replica** of the node that took over — the cluster is a healthy pair
+again, with no reconfigure and no wipe.
+
+### 3. (Optional) Return mastership to the preferred node
+There is **no automatic failback**. If you want the original node to be primary again, hand it back
+deliberately once it is caught up (Active on the dashboard):
+```cmd
+:: on the current primary
+bin\highways.exe --goodbye
+```
+The herd converges back onto the higher-priority node.
+
+### What you should see
+- The dashboard **leadership banner** naming the current primary and epoch, updating at each hand-off.
+- No **"No redundancy"** alert once both nodes are attached.
+- Zero client errors: clients follow each `-NOTPRIMARY` redirect automatically. **List every broker
+  endpoint in the client connection string** — a single-endpoint client has no failover, and the
+  client warns at startup when it detects this.

@@ -36,6 +36,9 @@ internal sealed class HostArguments
     public bool Goodbye { get; private set; }
     public string? GoodbyeReason { get; private set; }
 
+    /// <summary>--drain-and-stop: GOODBYE, wait for the drain to complete, then stop the service (050 T7).</summary>
+    public bool DrainAndStop { get; private set; }
+
     public static HostArguments Parse(string[] args)
     {
         var result = new HostArguments();
@@ -58,6 +61,11 @@ internal sealed class HostArguments
             index = 1;
             if (index < args.Length && !args[index].StartsWith('-'))
                 result.GoodbyeReason = args[index++];
+        }
+        else if (args[0] == "--drain-and-stop")
+        {
+            result.DrainAndStop = true;
+            index = 1;
         }
         else if (Verbs.Contains(args[0]))
         {

@@ -5,6 +5,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Highway.Client.Wire;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using StackExchange.Redis;
 
 /// <summary>
@@ -20,10 +22,24 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
     private bool _disposed;
 
     private readonly string _originalServer;
+    private readonly ILogger _logger;
+    private int _warnedSingleEndpoint;   // 050 T6: warn about a single-endpoint replica set at most once
 
-    public HighwayConnectionSource(IHighwayConnectionSettings settings)
+    /// <summary>Identifies the master a client has adopted, with the epoch it was last seen at (050 T5).</summary>
+    public readonly record struct MasterChange(string Endpoint, ulong Epoch);
+
+    /// <summary>
+    /// Raised when this client adopts a new master — a failover walk, a <c>-NOTPRIMARY</c> redirect,
+    /// or the initial connect settling on a different endpoint (050 R7.4). The application can
+    /// subscribe (the source is a DI singleton) to react — circuit-break, alert, drop a cache — and
+    /// every change is also logged. Never fires when the endpoint is unchanged.
+    /// </summary>
+    public event Action<MasterChange>? MasterChanged;
+
+    public HighwayConnectionSource(IHighwayConnectionSettings settings, ILoggerFactory? loggerFactory = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<HighwayConnectionSource>();
         _originalServer = settings.Server ?? "";
 
         // 042 R6.1: the connection string may name several hosts
@@ -153,9 +169,11 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(endpoint);
         var next = endpoint + OptionsOf(_originalServer);
         IConnectionMultiplexer? old;
+        string previousHost;
         lock (_syncLock)
         {
-            if (string.Equals(HostOf(_activeServer), endpoint, StringComparison.OrdinalIgnoreCase)
+            previousHost = HostOf(_activeServer);
+            if (string.Equals(previousHost, endpoint, StringComparison.OrdinalIgnoreCase)
                 && _multiplexer is { IsConnected: true })
                 return;
 
@@ -166,6 +184,7 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
         }
 
         DisposeLater(old);
+        RaiseMasterChanged(previousHost, endpoint);
         _ = GetMultiplexerAsync();
     }
 
@@ -215,6 +234,36 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
         }
     }
 
+    /// <summary>Logs and raises <see cref="MasterChanged"/> — only when the master host actually changed (050 T5).</summary>
+    private void RaiseMasterChanged(string? previousHost, string newHost)
+    {
+        if (string.Equals(previousHost, newHost, StringComparison.OrdinalIgnoreCase)) return;
+        var epoch = Volatile.Read(ref _lastSeenEpoch);
+        _logger.LogInformation("Highway master changed to {Master} (epoch {Epoch})", newHost, epoch);
+        MasterChanged?.Invoke(new MasterChange(newHost, epoch));
+    }
+
+    /// <summary>
+    /// 050 T6 (F5): the single-endpoint footgun. When the broker is part of a replica set but this
+    /// client's connection string names only one host, the client has no failover target — warn once,
+    /// naming the endpoints it is missing. Internal so the check is unit-testable without a wire read.
+    /// </summary>
+    internal void MaybeWarnSingleEndpoint(int rosterMemberCount)
+    {
+        if (rosterMemberCount <= 1 || ConfiguredEndpoints.Length != 1) return;
+        if (Interlocked.Exchange(ref _warnedSingleEndpoint, 1) != 0) return;
+
+        var configured = HostOf(_activeServer);
+        var missing = (_roster ?? [])
+            .Select(e => e.Endpoint)
+            .Where(ep => !string.Equals(ep, configured, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        _logger.LogWarning(
+            "Highway replica set has {Count} members but the connection string names only one endpoint — " +
+            "this client has NO failover. Add the other endpoints to the connection string: {Missing}",
+            rosterMemberCount, string.Join(", ", missing));
+    }
+
     /// <summary>
     /// Reads the live roster off the current connection (`HW.REPL.STATUS` roster.* fields).
     /// Best-effort: a broker without replication, or a transient failure, leaves the cache
@@ -262,6 +311,8 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
                 _roster = entries;
             }
         }
+
+        MaybeWarnSingleEndpoint(entries.Count);   // 050 T6: the single-endpoint footgun, once
     }
 
     /// <summary>
@@ -336,14 +387,17 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
                     if (verdict.Adopt)
                     {
                         IConnectionMultiplexer? old;
+                        string previousHost;
                         lock (_syncLock)
                         {
+                            previousHost = HostOf(_activeServer);
                             old = _multiplexer;
                             _multiplexer = probe;
                             _connectTask = Task.FromResult(probe);
                             _activeServer = host + OptionsOf(_originalServer);
                         }
                         DisposeLater(old);
+                        RaiseMasterChanged(previousHost, host);
                         _ = RefreshRosterAsync(ct);
                         return true;
                     }

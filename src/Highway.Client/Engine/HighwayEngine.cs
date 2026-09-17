@@ -53,7 +53,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
         Topology = topology
             ?? new TopologyManifest(options.NodeName, [], new CanUseContracts([], [], []));
         _hostingReport = hostingReport;
-        _connectionSource = connectionSource ?? new HighwayConnectionSource(options);
+        _connectionSource = connectionSource ?? new HighwayConnectionSource(options, _loggerFactory);
     }
 
     /// <inheritdoc/>

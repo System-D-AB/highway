@@ -73,6 +73,11 @@ public sealed class RespHighwayServer : IHighwayServer
         // the puller, so replication is visible in logs/ without HW.REPL.STATUS or extra tooling.
         var replLogger = _loggerFactory.CreateLogger("Highway.Replication");
 
+        // 050 T3: derive the shared-secret tail an auto-rejoin uses to authenticate its snapshot/pull
+        // to the learned primary (the endpoint itself carries no credentials). Set before Open.
+        _opts.Replication.AuthTail = string.IsNullOrEmpty(_opts.Authentication.Password)
+            ? null : $",password={_opts.Authentication.Password}";
+
         // Store: RocksDB when a data directory is configured (durable), in-memory otherwise.
         _store = _opts.DataDir is { } dir
             ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, _opts.Replication, replLogger)

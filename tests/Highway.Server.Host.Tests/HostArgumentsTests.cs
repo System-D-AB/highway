@@ -91,4 +91,13 @@ public class HostArgumentsTests
         parsed.PromoteReason.Should().Be("ops");
         parsed.Verb.Should().BeNull();
     }
+
+    [Fact]
+    public void DrainAndStop_IsAHostVerb()
+    {
+        var parsed = HostArguments.Parse(["--drain-and-stop"]);
+        parsed.DrainAndStop.Should().BeTrue();
+        parsed.Verb.Should().BeNull();
+        parsed.Goodbye.Should().BeFalse();
+    }
 }

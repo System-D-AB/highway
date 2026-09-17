@@ -813,6 +813,32 @@ A joining node announces its own-config priority (`HW.REPL.JOIN`); the master ad
 
 ---
 
+### C9.8 — A primary restart no longer silently degrades HA (feature 050-a)
+
+**Status: Met** — feature 050-a, 2026-09-17.
+
+Before 050-a, a routine restart of the primary in a two-node set could leave it permanently degraded
+with no signal: a *promoted* node never self-registered in the roster (blank succession view), and a
+demoted ex-primary — having no `primaryServer` — could not follow the successor, sitting `Demoted`
+until a manual reconfigure + wipe + restart. 050-a closes the class:
+
+- **Promotion self-registers** in the replicated roster (F1), so succession and the priority map
+  survive a failover.
+- **Auto-rejoin** (F2; `server.replication.autoRejoin`, on by default): a demoted ex-primary records
+  the new primary it learned and, on its next start, wipes and re-syncs as its replica — its diverged
+  tail preserved in a reconciliation report first (the C9.1 RPO made operational), with no
+  auto-failback (C9.6). The snapshot pull authenticates with the node's own shared secret.
+- **Slot aging** (F3; `server.replication.slotStaleAfter`, 60s): slots clear on demotion and a silent
+  slot is dropped even under the lag cap, so a phantom `Active` replica cannot persist.
+- **Loud on every channel** (F6): redundancy state, leadership-since and an event timeline on
+  `HW.REPL.STATUS`; a dashboard leadership banner, no-redundancy alert and timeline; a client
+  role-change event; and a single-endpoint-client startup warning.
+- **Safe upgrades**: a `--drain-and-stop` verb + a rolling-upgrade runbook, proven zero-loss by an
+  in-process herd-rig scenario (`RollingUpgradeTests`).
+
+The root cure — a symmetric member/peer config that removes the learned-endpoint marker entirely — is
+the deferred **050-b**.
+
 ## C10 — Broker-local cache (feature 044)
 
 The cache is an **opt-in add-on** (`server.cache.enabled`, off by default). A broker with it off

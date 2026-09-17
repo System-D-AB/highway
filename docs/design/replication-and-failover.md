@@ -1,6 +1,6 @@
 # Replication & Failover
 
-> **Status:** current (off by default); active hardening — see [Roadmap](#roadmap)
+> **Status:** current (off by default). 050-a failover resilience is shipped; 050-b (symmetric config) is the follow-on.
 > **Protocol:** the *Replication Commands* section of
 > [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) is authoritative for the `HW.REPL.*` family.
 > Guarantees are C9 in [`constraints.md`](../product/constraints.md); the observability doctrine is
@@ -61,17 +61,27 @@ durable on the master and replicated within the lag window. Each client replays 
 *unacknowledged* work to the new master with the same request id on convergence, so a single server
 failure loses no acked work.
 
-## Roadmap
+## Failover resilience (050-a, shipped)
 
-A routine primary restart currently exposes real gaps that are being closed: a node that *promotes*
-doesn't self-register in the roster; a demoted ex-primary can't rejoin automatically under asymmetric
-config; stale slots and degraded states aren't loud enough. Feature 050 addresses these — roster
-self-register on promote, automatic rejoin of a demoted node, slot aging, a cluster-wide loud
-leadership change on every channel, and a proven `--drain-and-stop` rolling-upgrade path — followed
-by a symmetric member/peer config model. This work answers the
-["loud, bounded, never total" doctrine](../product/fail-safe-and-observability.md), whose
-leadership-change channel matrix depends on the metrics (051) and health/readiness endpoints (052)
-that expose replication state to machines.
+A routine primary restart used to leave a two-node set degraded; 050-a closes that class:
+
+- a node that **promotes** (not just one that *starts* primary) self-registers in the roster, so the
+  succession view and the successor-priority map survive a failover;
+- a demoted ex-primary **auto-rejoins** the new primary — on its next start it wipes and re-syncs as a
+  replica of the endpoint it learned, no reconfigure or wipe by hand (opt-out via
+  `server.replication.autoRejoin`); its diverged tail is written to a reconciliation report first, and
+  there is no auto-failback;
+- stale slots **age out** — cleared on demotion, and a silent slot is dropped past
+  `server.replication.slotStaleAfter` — so the dashboard never shows a phantom "Active" replica;
+- the leadership change is **loud**: a dashboard leadership banner, a no-redundancy alert, an event
+  timeline, a client role-change event, and a single-endpoint-client startup warning;
+- **safe upgrades**: a `--drain-and-stop` verb and a rolling-upgrade runbook, proven zero-loss by an
+  in-process herd-rig scenario.
+
+Still ahead — **050-b**: a symmetric member/peer config model that dissolves the asymmetric-config
+stranding at the root, so rejoin needs no learned-endpoint marker. This work answers the
+["loud, bounded, never total" doctrine](../product/fail-safe-and-observability.md); the machine
+channels it depends on — metrics (051) and health/readiness endpoints (052) — are separate pillars.
 
 ## Guarantees & limits
 

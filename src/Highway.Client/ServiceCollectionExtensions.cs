@@ -126,7 +126,8 @@ public static class ServiceCollectionExtensions
         // engine that made it free, then reintroduced in feature 044 as a broker-local,
         // never-replicated cache — opt in with AddHighwayCache(...). The connection source stays
         // regardless: the engine depends on it, and the cache adapter rides it.
-        services.TryAddSingleton<HighwayConnectionSource>(sp => new HighwayConnectionSource(options));
+        services.TryAddSingleton<HighwayConnectionSource>(sp =>
+            new HighwayConnectionSource(options, sp.GetService<ILoggerFactory>()));
 
         return services;
     }

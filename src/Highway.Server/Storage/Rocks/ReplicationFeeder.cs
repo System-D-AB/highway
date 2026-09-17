@@ -49,6 +49,7 @@ internal sealed class ReplicationFeeder : IDisposable
     private readonly ConcurrentDictionary<string, SnapshotSessionState> _snapshots = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _dropEvents = new();
     private readonly ConcurrentQueue<string> _transitions = new();
+    private DateTimeOffset? _leadershipSince;   // when this node's current epoch/leadership was established (050 T5)
     private readonly string _dataDir;
     private readonly Lock _roleLock = new();
     private readonly Timer? _deadman;
@@ -67,6 +68,7 @@ internal sealed class ReplicationFeeder : IDisposable
     private void Note(string transition, LogLevel level = LogLevel.Information)
     {
         _transitions.Enqueue(transition);
+        while (_transitions.Count > 256) _transitions.TryDequeue(out _);   // bounded event tail (050 T5)
         Logger?.Log(level, "[replication] {Transition}", transition);
     }
 
@@ -445,6 +447,7 @@ internal sealed class ReplicationFeeder : IDisposable
             LastPromotion = Options.Clock.GetUtcNow();
             LastPromotionReason = reason;
             LastPeerContact = LastPromotion.Value;
+            _leadershipSince = LastPromotion;   // 050 T5: this node's leadership epoch starts now
             Note($"promote epoch={Epoch} reason={reason} at={LastPromotion:o}");
             announceEpoch = Epoch;
         }
@@ -582,6 +585,7 @@ internal sealed class ReplicationFeeder : IDisposable
 
                 Epoch = observedEpoch;
                 PersistEpoch();
+                _leadershipSince = Options.Clock.GetUtcNow();   // 050 T5: adopted a new leadership epoch
                 epochChanged = true;
             }
         }
@@ -723,7 +727,15 @@ internal sealed class ReplicationFeeder : IDisposable
             ("repl.resyncRequired", ResyncRequired.ToString()),
             ("repl.clients", ConnectedClients.ToString(CultureInfo.InvariantCulture)),
             ("repl.draining", IsDraining.ToString()),
+            ("repl.leadershipSince", _leadershipSince?.ToString("o") ?? ""),
+            ("repl.redundancy", ComputeRedundancy()),
         };
+
+        // 050 T5: a short, bounded timeline of recent role/topology transitions for the dashboard.
+        var events = _transitions.ToArray();
+        var eventFrom = Math.Max(0, events.Length - 10);
+        for (var e = eventFrom; e < events.Length; e++)
+            fields.Add(($"repl.event.{e - eventFrom}", events[e]));
 
         var i = 0;
         foreach (var slot in _slots.Values)
@@ -738,6 +750,27 @@ internal sealed class ReplicationFeeder : IDisposable
         }
 
         return fields;
+    }
+
+    /// <summary>
+    /// The cluster's redundancy state (050 T5 / F6), for the dashboard banner, clients and (later)
+    /// metrics/health. The two degraded states are <c>no-standby</c> (a primary the roster expects
+    /// standbys for, with none attached) and <c>demoted</c> (a superseded node not yet rejoined);
+    /// <c>single</c> is an intentional lone node (no standby expected), never an alarm.
+    /// </summary>
+    private string ComputeRedundancy()
+    {
+        var rosterCount = RosterPeers?.Invoke().Count ?? 0;
+        var activeStandbys = _slots.Values.Count(s => s.State == SlotState.Active);
+        return Role switch
+        {
+            ReplicaRole.Demoted => "demoted",
+            ReplicaRole.Fenced => "fenced",
+            ReplicaRole.Replica => "replica",
+            ReplicaRole.Primary when rosterCount <= 1 => "single",
+            ReplicaRole.Primary when activeStandbys == 0 => "no-standby",
+            _ => "healthy",
+        };
     }
 
     /// <summary>

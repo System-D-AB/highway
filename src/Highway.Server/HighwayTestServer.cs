@@ -126,6 +126,11 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
     private static (RespServer Server, IHighwayStore Store, ReplicaPuller? Puller) StartServer(
         HighwayServerOptions opts, IHighwayStore? reuseStore)
     {
+        // 050 T3: an auto-rejoin's snapshot pull authenticates with the node's own shared secret,
+        // since the learned rejoin endpoint carries no credentials. Set before Open honours a marker.
+        opts.Replication.AuthTail = string.IsNullOrEmpty(opts.Authentication.Password)
+            ? null : $",password={opts.Authentication.Password}";
+
         var store = reuseStore
             ?? (opts.DataDir is { } dir
                 ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, opts.Replication)
