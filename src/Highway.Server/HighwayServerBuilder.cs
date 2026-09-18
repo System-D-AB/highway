@@ -335,6 +335,20 @@ public sealed class HighwayServerBuilder
                 $"HighwayServerOptions.MaxIdentifierBytes ({opts.MaxIdentifierBytes}) exceeds " +
                 $"{Internal.Envelope.MaxUnambiguousIdentifierBytes}, above which a pre-013 entry could be " +
                 "mistaken for a current one and delivered as a corrupt payload.");
+
+        // 057: message size is a chosen, bounded envelope. Positive, and at most the 15 MiB ceiling —
+        // a message is buffered whole in memory at several hops, so it is raised-but-bounded, not
+        // unlimited (chunk-and-stream for larger payloads).
+        if (opts.MaxPayloadBytes <= 0)
+            throw new InvalidOperationException(
+                $"HighwayServerOptions.MaxPayloadBytes must be positive, but was {opts.MaxPayloadBytes}.");
+
+        if (opts.MaxPayloadBytes > Abstractions.HighwayLimits.MaxPayloadCeilingBytes)
+            throw new InvalidOperationException(
+                $"HighwayServerOptions.MaxPayloadBytes ({opts.MaxPayloadBytes}) exceeds the 15 MiB ceiling " +
+                $"({Abstractions.HighwayLimits.MaxPayloadCeilingBytes} bytes). A message is buffered whole in " +
+                "memory at several hops (client, RESP frame, store, WAL, replication); for larger payloads " +
+                "chunk-and-stream instead of one message.");
     }
 
     /// <summary>

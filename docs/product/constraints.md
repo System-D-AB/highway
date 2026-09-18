@@ -267,6 +267,14 @@ path stays O(1). After 018 the one setting covers both verbs.
 
 **See C4.7** — this bounds a queue, not the process.
 
+> **Message size vs. queue size (feature 057, 2026-09-18).** `MaxQueueBytes` bounds a *queue*;
+> `MaxPayloadBytes` bounds a single *message*. The message default is **5 MiB**, configurable up to a
+> **15 MiB** ceiling — a configured value above it is refused at build, because a message is buffered
+> whole in memory at several hops (client, RESP frame, store, WAL, replication), so the bound protects
+> memory, not disk (RocksDB stores multi-MB values without trouble). A message still counts against its
+> queue's `MaxQueueBytes`. The server is the authority (`HW_PAYLOAD_TOO_LARGE`); the client learns the
+> server's configured limit at connect and enforces it as a fail-fast (057-b).
+
 ### C4.3 — Reaching a limit is never silent
 
 **Status: Met** — feature 016.

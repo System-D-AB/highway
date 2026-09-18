@@ -40,7 +40,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.9**
+**Current version: 4.10**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -48,6 +48,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.10 | 057 | **Message size.** The default `MaxPayloadBytes` is raised from 1 MiB to **5 MiB**, configurable up to a **15 MiB** ceiling (above which the server refuses at build). The `HW.STATS` server form appends a `maxPayloadBytes` field so a client learns the server's configured limit at connect and does not falsely reject below a raised server limit. Additive. |
 | 4.9 | 044 | **Broker-local cache.** Adds a third raw-key family, `hw:cache:*`, routed on the existing stock `GET`/`SET`/`DEL`/`UNLINK`/`SETEX`/`PSETEX`/`TTL`/`PTTL` — **no new `HW.*` command**. It is served **only when `server.cache.enabled`** (off by default); the family answers exactly as the idempotency family does on the wire, but is backed by a **separate, never-replicated** store (its own RocksDB at `dataDir/cache`, or in-memory on an ephemeral broker). A cache `SET` on a non-master is refused `-NOTPRIMARY` like any write; a cache `GET` on a non-master returns a miss (null). TTL comes from `PX`/`EX`, defaults to the broker's `defaultTtl` when absent, and is clamped to `maxTtl`. Additive and opt-in. |
 | 4.8 | 042-1a | **The herd contract.** `HW.REPL.HELLO` grows two additive forms: an optional 4th argument on the replica form (the caller's endpoint — a promoting node announces itself so a demoted primary's `-NOTPRIMARY` redirects correctly) and the **client handshake** `HW.REPL.HELLO CLIENT <clientId> <lastSeenEpoch>` answering `["master"\|"willing", epoch, rosterVersion]` or `["standby", masterEndpoint, masterEpoch]`. Adds `HW.REPL.JOIN` (roster admission; `ERR HW_PRIORITY_TAKEN` on a held priority), `HW.REPL.GOODBYE` (graceful drain + stand-down, parent R12), and the `roster.*` fields on `HW.REPL.STATUS`. Adds `ERR HW_REPL_GAP` on `HW.REPL.PULL` (a cursor behind the retained WAL is refused, never served a gapped stream — the replica re-syncs via SNAPSHOT). Adds the `hw:door:topology` narration channel (TOPOLOGY / GOODBYE / ROSTER-UPDATE, advisory). **Withdraws** the never-released `HW.REPL.WITNESS <nodeId> <role>` sketch — WITNESS is the bare `+OK` probe; failover is client-herd-driven (feature 042-1), not witness-gated. Additive. |
 | 4.7 | 042 | **Replication (T3–T7).** Adds `HW.REPL.SNAPSHOT` (chunked checkpoint bootstrap), `HW.REPL.PROMOTE`, `HW.REPL.FENCE`, `HW.REPL.STATUS`, `HW.REPL.WITNESS`. A non-primary refuses client writes with `-NOTPRIMARY <endpoint> <epoch>` (not an `ERR HW_` prefix). `HW.STATS` server form appends `repl.*` fields. Additive. |
@@ -135,7 +136,7 @@ No C0 control characters, no DEL, no `@`. Validation runs on raw bytes before an
 
 ### Payloads
 
-Payloads are **not** identifiers. They are opaque bytes, stored and returned byte-for-byte, subject only to a size cap (`MaxPayloadBytes`, default 1 MiB). Any byte value is permitted, including control characters and invalid UTF-8.
+Payloads are **not** identifiers. They are opaque bytes, stored and returned byte-for-byte, subject only to a size cap (`MaxPayloadBytes`, default 5 MiB, configurable to a 15 MiB ceiling). Any byte value is permitted, including control characters and invalid UTF-8.
 
 ### The Highway envelope
 
@@ -595,7 +596,7 @@ Discovery is a lookup, not a scan — the registration form maintains the index 
 ### HW.STATS
 
 ```
-HW.STATS                →   kind server  nodes N services N channels N
+HW.STATS                →   kind server  nodes N services N channels N … maxPayloadBytes N
 HW.STATS <service>      →   kind service queueDepth N hosts N inFlight N
 HW.STATS <channel>      →   kind channel groups N pending N backlog N
 ```
@@ -1416,7 +1417,7 @@ Options that change observable protocol behaviour. All are server-side.
 
 | Option | Default | Effect |
 |---|---|---|
-| `MaxPayloadBytes` | 1 MiB | Payload cap for `HW.CALL`, `HW.REPLY`, `HW.PUBLISH`. Exceeding → `HW_PAYLOAD_TOO_LARGE`. |
+| `MaxPayloadBytes` | 5 MiB (max 15 MiB) | Payload cap for `HW.CALL`, `HW.REPLY`, `HW.PUBLISH`, `HW.QSEND`. Exceeding → `HW_PAYLOAD_TOO_LARGE`. A configured value above the 15 MiB ceiling is refused at build (a message is buffered whole in memory). The server advertises the effective value on the `HW.STATS` server form so clients track it. |
 | `MaxIdentifierBytes` | 256 | Identifier length cap. Exceeding → `HW_INVALID_ARG`. |
 | `MaxCatalogBytes` | 256 KiB | Catalog cap for the `HW.HEARTBEAT` registration form. |
 | `Lease` | 5 minutes | How long a claimed RPC request or received message may go unacknowledged before redelivery. `TimeSpan.Zero` disables lease sweeps. |

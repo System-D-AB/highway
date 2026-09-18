@@ -126,6 +126,25 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             _connection = connection;
             _pendingCalls = new PendingCallRegistry(_connection);
 
+            // 057-b: learn the server's configured max message size so the client never falsely rejects
+            // below a raised server limit. Advisory — the server stays the authority, so a missing field
+            // (older server) or a transient failure just leaves the client's configured default in force.
+            try
+            {
+                var stats = (StackExchange.Redis.RedisResult[])(await mux.GetDatabase()
+                    .ExecuteAsync("HW.STATS").ConfigureAwait(false))!;
+                for (var i = 0; i + 1 < stats.Length; i += 2)
+                {
+                    if (stats[i].ToString() == "maxPayloadBytes"
+                        && int.TryParse(stats[i + 1].ToString(), out var serverMax) && serverMax > 0)
+                    {
+                        _options.LearnedServerMaxPayloadBytes = serverMax;
+                        break;
+                    }
+                }
+            }
+            catch { /* advisory — the server remains the authority (HW_PAYLOAD_TOO_LARGE) */ }
+
             // 042-1b B-T5: after the herd converges on a new master, pending RPCs are
             // re-driven with their original ids — the caller is the truth for "unanswered".
             var pendingForReplay = _pendingCalls;

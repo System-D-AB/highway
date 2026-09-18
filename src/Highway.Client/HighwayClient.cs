@@ -21,12 +21,6 @@ namespace Highway.Client;
 /// </summary>
 internal sealed class HighwayClient : IHighwayClient
 {
-    /// <summary>
-    /// Client-side mirror of the server's MaxPayloadBytes default (004). The
-    /// server remains the authority — a mismatch surfaces as HW_PAYLOAD_TOO_LARGE.
-    /// </summary>
-    internal const int MaxPayloadBytes = 1 * 1024 * 1024;
-
     private readonly ICatalog _catalog;
     private readonly HighwayOptions _options;
     private readonly IHighwayEngine _engine;
@@ -116,13 +110,13 @@ internal sealed class HighwayClient : IHighwayClient
                 $"The request could not be serialized: {ex.Message}"));
         }
 
-        if (envelope.Length > MaxPayloadBytes)
+        if (envelope.Length > _options.EffectiveMaxPayloadBytes)
         {
             return Cast<TResponse>(PendingCallRegistry.BuildErrorResponse(
                 responseType,
                 StatusCodes.Status413PayloadTooLarge,
                 "PAYLOAD_TOO_LARGE",
-                $"The request envelope is {envelope.Length} bytes, exceeding the maximum of {MaxPayloadBytes} bytes."));
+                $"The request envelope is {envelope.Length} bytes, exceeding the maximum of {_options.EffectiveMaxPayloadBytes} bytes. Raise MaxPayloadBytes on the server (and client) to send larger messages."));
         }
 
         var requestId = requestIdForSpan;
@@ -192,8 +186,8 @@ internal sealed class HighwayClient : IHighwayClient
             throw new HighwayTransportException($"The message could not be serialized: {ex.Message}");
         }
 
-        if (envelope.Length > MaxPayloadBytes)
-            throw new PayloadTooLargeException(envelope.Length, MaxPayloadBytes);
+        if (envelope.Length > _options.EffectiveMaxPayloadBytes)
+            throw new PayloadTooLargeException(envelope.Length, _options.EffectiveMaxPayloadBytes);
 
         var messageId = Guid.NewGuid().ToString("N");
         await connection.QSendAsync(queueName, messageId, envelope, deliverAt, ct).ConfigureAwait(false);
@@ -243,8 +237,8 @@ internal sealed class HighwayClient : IHighwayClient
             throw new HighwayTransportException($"The message could not be serialized: {ex.Message}");
         }
 
-        if (envelope.Length > MaxPayloadBytes)
-            throw new PayloadTooLargeException(envelope.Length, MaxPayloadBytes);
+        if (envelope.Length > _options.EffectiveMaxPayloadBytes)
+            throw new PayloadTooLargeException(envelope.Length, _options.EffectiveMaxPayloadBytes);
 
         // The connection retries the transient class (watch-conflicted publishes
         // delivered nothing) with bounded backoff before this throws.

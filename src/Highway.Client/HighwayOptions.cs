@@ -86,6 +86,21 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     public TimeSpan CallTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// Maximum message (envelope) size this client will send, in bytes (feature 057). Default 5 MiB,
+    /// configurable up to a 15 MiB ceiling. The client fails fast above this before serializing to the
+    /// wire; the <b>server</b> is the authority (an oversize message is refused with
+    /// <c>HW_PAYLOAD_TOO_LARGE</c>). When the client learns the server's configured limit at connect
+    /// (057-b), the learned value governs and this is the pre-connect default and the fallback.
+    /// </summary>
+    public int MaxPayloadBytes { get; set; } = Highway.Abstractions.HighwayLimits.DefaultMaxPayloadBytes;
+
+    /// <summary>The server's configured MaxPayloadBytes, learned at connect (057-b); null until learned.</summary>
+    internal int? LearnedServerMaxPayloadBytes { get; set; }
+
+    /// <summary>The limit the client enforces: the server's learned value when known, else the configured default.</summary>
+    internal int EffectiveMaxPayloadBytes => LearnedServerMaxPayloadBytes ?? MaxPayloadBytes;
+
+    /// <summary>
     /// The herd health timeout <c>x</c> (042-1 / parent R3.3): with no successful
     /// exchange against the master for this long, the client treats a TCP-alive but
     /// frozen master as lost and walks the roster for a successor. The contract orders

@@ -40,6 +40,16 @@ internal static class HighwayOptionsValidator
             throw new InvalidOperationException(
                 $"HighwayOptions.ReceiveBatchSize must be between 1 and {MaxReceiveBatchSize}, but was {options.ReceiveBatchSize}.");
 
+        if (options.MaxPayloadBytes <= 0)
+            throw new InvalidOperationException(
+                $"HighwayOptions.MaxPayloadBytes must be positive, but was {options.MaxPayloadBytes}.");
+
+        if (options.MaxPayloadBytes > Highway.Abstractions.HighwayLimits.MaxPayloadCeilingBytes)
+            throw new InvalidOperationException(
+                $"HighwayOptions.MaxPayloadBytes ({options.MaxPayloadBytes}) exceeds the 15 MiB ceiling " +
+                $"({Highway.Abstractions.HighwayLimits.MaxPayloadCeilingBytes} bytes). A message is buffered whole " +
+                "in memory; for larger payloads chunk-and-stream instead of one message.");
+
         if (options.BackstopInterval < TimeSpan.FromMilliseconds(50))
             throw new InvalidOperationException(
                 $"HighwayOptions.BackstopInterval must be at least 50ms, but was {options.BackstopInterval}.");

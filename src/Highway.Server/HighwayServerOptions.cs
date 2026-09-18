@@ -114,11 +114,12 @@ public sealed class HighwayServerOptions
     public TimeSpan ReplySlotTtl { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Maximum allowed payload size in bytes for a single RPC or pub/sub message.
-    /// Requests exceeding this limit are rejected with a RESP error.
-    /// Default: 1 MiB.
+    /// Maximum allowed payload (envelope) size in bytes for a single RPC or pub/sub message; requests
+    /// exceeding it are refused with <c>HW_PAYLOAD_TOO_LARGE</c> (permanent). Default 5 MiB (feature
+    /// 057), configurable up to a 15 MiB ceiling — above the ceiling <c>Build()</c> refuses, because a
+    /// message is buffered whole in memory at several hops (chunk-and-stream for larger payloads).
     /// </summary>
-    public int MaxPayloadBytes { get; set; } = 1 * 1024 * 1024;
+    public int MaxPayloadBytes { get; set; } = Highway.Abstractions.HighwayLimits.DefaultMaxPayloadBytes;
 
     /// <summary>
     /// Maximum allowed length in bytes for an identifier (service, channel,

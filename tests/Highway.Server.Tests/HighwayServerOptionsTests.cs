@@ -18,7 +18,7 @@ public class HighwayServerOptionsTests
         opts.DataDir.Should().BeNull();
         opts.Lease.Should().Be(TimeSpan.FromMinutes(5));
         opts.ReplySlotTtl.Should().Be(TimeSpan.FromMinutes(5));
-        opts.MaxPayloadBytes.Should().Be(1 * 1024 * 1024);
+        opts.MaxPayloadBytes.Should().Be(5 * 1024 * 1024);
         opts.ReceiveDefaultCount.Should().Be(10);
         opts.ReceiveMaxCount.Should().Be(500);
         opts.WaitForCommit.Should().BeFalse();

@@ -191,6 +191,9 @@ internal sealed class HwStatsCommand : HighwayCommand
             ("groupsRetired", ctx.Recorder.GroupsRetired.ToString()),
             ("messagesDiscarded", ctx.Recorder.MessagesDiscarded.ToString()),
             ("sendsRefused", ctx.Recorder.SendsRefused.ToString()),
+            // 057-b: advertise the server's configured message-size limit so a client learns it at
+            // connect and never falsely rejects below a raised server limit.
+            ("maxPayloadBytes", ctx.Options.MaxPayloadBytes.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         ];
     }
 
