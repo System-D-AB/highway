@@ -9,6 +9,45 @@ namespace Highway.Server.Dashboard;
 
 internal static class DashboardEndpoints
 {
+    /// <summary>
+    /// The machine-facing health surface (feature 052): liveness, readiness and a replication
+    /// summary. Mapped on its own — separately from <see cref="Map"/> — so it can bind even when the
+    /// dashboard UI is disabled (a headless broker still needs probes). <c>/health</c> and
+    /// <c>/ready</c> are keyless (an orchestrator probe leaks nothing beyond up/down and a role
+    /// word); <c>/replication</c> exposes topology and rides the same API key as the dashboard
+    /// (the <see cref="ApiKeyMiddleware"/> exempts the first two).
+    /// </summary>
+    public static void MapHealth(IEndpointRouteBuilder app)
+    {
+        // R1 liveness: Kestrel answering IS the signal — no dependency, no state read, no auth.
+        app.MapGet("/health", () => Results.Text("OK", "text/plain; charset=utf-8"));
+
+        // R2 readiness: role-driven, computed by the feeder fresh per probe (repl.ready/repl.readyReason)
+        // so it flips within a probe interval on a promotion/demotion/GOODBYE. 200 only when this node
+        // can serve client writes now; a broker with no feeder is a standalone writable primary.
+        app.MapGet("/ready", async (IBrokerState state) =>
+        {
+            var result = await state.ReplicationAsync();
+            if (result.Value is not { } f)
+                return Results.Text("standalone", "text/plain; charset=utf-8");
+
+            var ready = f.GetValueOrDefault("repl.ready", "") == "True";
+            var reason = f.GetValueOrDefault("repl.readyReason", "unknown");
+            return Results.Text(reason, "text/plain; charset=utf-8", null, ready ? 200 : 503);
+        });
+
+        // R3 detail: the HW.REPL.STATUS fields as JSON (gated by the API key when one is set).
+        app.MapGet("/replication", async (IBrokerState state) =>
+        {
+            var result = await state.ReplicationAsync();
+            if (result.Value is null)
+                return Results.Json(new { unavailable = result.Unavailable, fields = Array.Empty<object>() });
+
+            var fields = result.Value.Select(kv => new { name = kv.Key, value = kv.Value }).ToArray();
+            return Results.Json(new { unavailable = (string?)null, fields });
+        });
+    }
+
     public static void Map(IEndpointRouteBuilder app)
     {
         app.MapGet("/", (HttpContext ctx) =>

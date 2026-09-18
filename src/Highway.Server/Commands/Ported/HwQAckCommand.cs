@@ -54,9 +54,12 @@ internal sealed class HwQAckCommand : HighwayCommand
     }
 
     protected override void AfterCommit(CommandContext ctx)
-        => ctx.Recorder.Record(
+    {
+        ctx.Recorder.Record(
             HighwayEventType.QueueAcknowledged, _queue ?? "?",
             nodeId: _nodeId,
             requestId: _messageIdBytes.Length > 0 ? Encoding.UTF8.GetString(_messageIdBytes) : null,
             errorCode: FailureCode);
+        if (!Failed) ctx.Metrics?.RecordAcknowledged();
+    }
 }

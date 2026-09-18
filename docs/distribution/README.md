@@ -104,6 +104,46 @@ All configuration values can be overridden via environment variables using `HIGH
 - `HIGHWAY_SERVER_PORT=6600`
 - `HIGHWAY_DASHBOARD_APIKEY=secret-token`
 
+### Health & Readiness Endpoints (load balancers & orchestrators)
+
+The broker serves three HTTP routes on the dashboard host (same port — no extra listener), **on by
+default** even when the dashboard UI is off (`dashboard.healthEndpoints`, default `true`):
+
+| Route | Purpose | Auth | Meaning |
+|---|---|---|---|
+| `GET /health` | **Liveness** | keyless | `200` whenever the process is up, *regardless of role* — restart a wedged process on failure. A healthy replica is live. |
+| `GET /ready` | **Readiness** | keyless | `200` **only** when this node can serve client writes now (writable primary, not fenced/draining/bootstrapping); otherwise `503` with a one-word reason (`replica`, `fenced`, `draining`, `bootstrapping`, `demoted`). |
+| `GET /replication` | Replication detail (JSON) | API key | role, epoch, per-replica lag, roster and the degraded flags — the `HW.REPL.STATUS` data over HTTP. |
+
+**Point client traffic at `/ready`, not `/health`.** Readiness flips within a probe interval when a
+node is demoted, fenced or drained (GOODBYE), so the load balancer pulls a stepped-down node out of
+rotation automatically — clients never hit a node that would only answer `-NOTPRIMARY`.
+
+Example — NGINX upstream health check against a replica set:
+
+```nginx
+upstream highway {
+    server 10.0.0.1:6500;   # each node's RESP port
+    server 10.0.0.2:6500;
+}
+# Probe /ready on each node's dashboard/health port (default 7500); only the writable
+# primary answers 200, so traffic follows the current master automatically.
+# health_check uri=/ready port=7500 interval=2s;   (NGINX Plus)
+```
+
+Kubernetes:
+
+```yaml
+livenessProbe:  { httpGet: { path: /health, port: 7500 } }
+readinessProbe: { httpGet: { path: /ready,  port: 7500 } }
+```
+
+**Loopback caveat.** Like the dashboard, the health host binds to `dashboard.bindAddress`
+(**`127.0.0.1`** by default), so an external probe cannot reach it until you set
+`dashboard.bindAddress` to `0.0.0.0`. `/health` and `/ready` stay keyless so probes work without a
+secret; set `dashboard.apiKey` to protect `/replication` (and the UI) once exposed. To serve health
+without the dashboard UI, set `dashboard.enabled: false` and keep `dashboard.healthEndpoints: true`.
+
 ---
 
 ## 5. Runbook: Data-Directory Rotation (Drain-Then-Rotate)

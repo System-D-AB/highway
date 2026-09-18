@@ -40,6 +40,7 @@ internal sealed class CommandDispatcher
     private readonly HighwayServerOptions _options;
     private readonly Highway.Server.Storage.Rocks.ReplicationFeeder? _replication;
     private readonly Highway.Server.Storage.Cache.IHighwayCacheStore? _cache;
+    private readonly HighwayMetrics? _metrics;
 
     public CommandDispatcher(
         IHighwayStore store,
@@ -48,7 +49,8 @@ internal sealed class CommandDispatcher
         FlightRecorder recorder,
         HighwayServerOptions options,
         Highway.Server.Storage.Rocks.ReplicationFeeder? replication = null,
-        Highway.Server.Storage.Cache.IHighwayCacheStore? cache = null)
+        Highway.Server.Storage.Cache.IHighwayCacheStore? cache = null,
+        HighwayMetrics? metrics = null)
     {
         _store = store;
         _locks = locks;
@@ -57,6 +59,7 @@ internal sealed class CommandDispatcher
         _options = options;
         _replication = replication;
         _cache = cache;
+        _metrics = metrics;
         _commands = BuildRegistry();
     }
 
@@ -293,8 +296,20 @@ internal sealed class CommandDispatcher
         var args = new byte[frame.Count - 1][];
         for (var i = 1; i < frame.Count; i++) args[i - 1] = frame[i];
 
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics);
         var command = entry.Factory();
+
+        // HW.CALL carries the RPC request/latency instruments (051 R1): time the server-side
+        // handling and tag the outcome. Every other verb is unmeasured here — its delivery
+        // counter is recorded in the command's own AfterCommit, where the outcome is classified.
+        if (_metrics is { } metrics && name == "HW.CALL")
+        {
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
+            var enqueued = command.Execute(ctx, new CommandInput(args), writer);
+            metrics.RecordRpcRequest(enqueued, System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalSeconds);
+            return;
+        }
+
         command.Execute(ctx, new CommandInput(args), writer);
     }
 

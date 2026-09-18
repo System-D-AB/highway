@@ -568,6 +568,35 @@ sustained RPC rate can age replies out within the retention window — raise its
 override to widen that. An RPC row whose reply has aged out shows its outcome as incomplete rather
 than inventing one.
 
+### C7.5 — Metrics are emitted, exporter-agnostic — feature 051
+
+**Status: Met.** The broker exposes a `Highway.Server` meter and the client a `Highway.Client` meter
+through the in-box `System.Diagnostics.Metrics` API — the same posture as its `Activity` emission:
+Highway defines the instruments (replication role/epoch/lag and promotions/demotions/fences, queue
+depth/bytes and dead-letters, RPC throughput/latency/errors, connections, recorder drops; client RPC
+latency and a `failovers` counter) and takes **no OpenTelemetry dependency**. The hosting
+application adds whatever exporter it runs and subscribes with `.AddMeter("Highway.Server")`.
+Instruments are always defined and **cost nothing when unobserved** (C7.1 holds: the observable
+gauges sample the live feeder/store only when a listener collects, never on the delivery path). The
+instrument names, units and labels are the documented contract in
+[`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) § "Metric emission". Health/readiness endpoints
+are the sibling machine channel (C7.6).
+
+### C7.6 — Readiness is role-driven, so infrastructure routes around a failover — feature 052
+
+**Status: Met.** The broker serves `GET /health` (liveness — `200` whenever the process answers,
+regardless of role), `GET /ready` (readiness — `200` **only** on a writable, un-fenced,
+non-draining, fully-bootstrapped primary, else `503` with a one-word reason), and `GET /replication`
+(the `HW.REPL.STATUS` JSON, behind the API key) on the dashboard host. Readiness is the feeder's own
+`repl.ready` computed **fresh per probe**, so it flips within a probe interval on a
+promotion/demotion/GOODBYE — which is what lets a load balancer pull a stepped-down node out of
+rotation automatically, closing several silent-availability holes at the infrastructure layer. A
+replica is deliberately *live but not ready*: liveness answers "is this process ok?", readiness
+answers "route clients here?". `/health` and `/ready` are keyless (a probe leaks nothing beyond
+up/down and a role word); `/replication` is gated. Loopback by default; bind `0.0.0.0` + an API key
+to expose. The endpoints are on by default even when the dashboard UI is off, so a headless broker
+still answers probes.
+
 ---
 
 ## C8 — Recurring jobs (feature 028)
@@ -705,6 +734,8 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C24 | Deletion is logical until compaction | ✅ Met as stated (041) |
 | C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
 | C7.2 | Diagnostic detail obeys the payload capture switch | ✅ Met (015) |
+| C7.5 | Metrics emitted, no exporter dependency | ✅ Met (051) |
+| C7.6 | Readiness is role-driven for LB routing | ✅ Met (052) |
 | C6.1 | Cannot reach the network unauthenticated by accident | ✅ Met |
 | C6.2 | Credentials never logged | ✅ Met |
 | C6.3 | Auth failures permanent and legible | ✅ Met |

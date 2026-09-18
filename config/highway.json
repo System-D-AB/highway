@@ -9,7 +9,7 @@
     "maxQueueBytes": "1g",                 // per-queue cap
     "lease": "00:05:00",                   // RPC processing lease
     "replySlotTtl": "00:05:00",
-    "maxPayloadBytes": 1048576,
+    "maxPayloadBytes": 5242880,            // 5 MiB default; max 15 MiB (15728640) — feature 057
     "maxIdentifierBytes": 256,
     "nodeExpiry": "00:00:30",
     "pruningEnabled": true,
@@ -57,6 +57,7 @@
   // ── Dashboard ────────────────────────────────────────────────────────
   "dashboard": {
     "enabled": true,
+    "healthEndpoints": true,               // /health, /ready, /replication (052); on even if the UI is off
     "port": 7500,
     "bindAddress": "127.0.0.1",
     "pathBase": "",

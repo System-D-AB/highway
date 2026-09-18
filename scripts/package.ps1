@@ -18,15 +18,18 @@ if (-not [System.IO.Path]::IsPathRooted($OutputDir)) {
     $OutputDir = Join-Path $repoRoot $OutputDir
 }
 
+# Archive format follows the target OS: Windows → .zip, everything else → .tar.gz
+# (the format each platform's operators actually expect).
+$winTarget = $Rid -like 'win*'
 $packageName = "highway-$Version-$Rid"
 $stageDir = Join-Path $repoRoot "artifacts\temp-$packageName"
-$zipPath = Join-Path $OutputDir "$packageName.zip"
+$archivePath = Join-Path $OutputDir ($packageName + $(if ($winTarget) { ".zip" } else { ".tar.gz" }))
 
 Write-Host "=========================================="
 Write-Host " Packaging Highway Distribution"
 Write-Host " Version : $Version"
 Write-Host " RID     : $Rid"
-Write-Host " Target  : $zipPath"
+Write-Host " Target  : $archivePath"
 Write-Host "=========================================="
 
 if (Test-Path $stageDir) {
@@ -70,8 +73,13 @@ foreach ($cfg in @("highway.json")) {
     }
 }
 
-# 3. Copy scripts
-$scriptsToCopy = @("run.bat", "run.ps1", "install-service.bat", "install-service.ps1", "uninstall-service.ps1")
+# 3. Copy scripts — the operator's OS-native set (Windows service .ps1/.bat, or the
+# Linux run.sh + systemd unit + install/uninstall .sh).
+$scriptsToCopy = if ($winTarget) {
+    @("run.bat", "run.ps1", "install-service.bat", "install-service.ps1", "uninstall-service.ps1")
+} else {
+    @("run.sh", "install-service.sh", "uninstall-service.sh", "highway.service")
+}
 foreach ($s in $scriptsToCopy) {
     $srcScript = Join-Path $repoRoot "scripts\$s"
     if (Test-Path $srcScript) {
@@ -97,50 +105,64 @@ if (Test-Path $noticesFile) {
     Copy-Item -Path $noticesFile -Destination (Join-Path $stageDir "THIRD-PARTY-NOTICES.md") -Force
 }
 
-# 5. Create Zip archive
-if (Test-Path $zipPath) {
-    Remove-Item -Path $zipPath -Force
+# 5. Create the archive
+if (Test-Path $archivePath) {
+    Remove-Item -Path $archivePath -Force
 }
 
-Write-Host "Compressing archive to $zipPath..."
-Add-Type -AssemblyName System.IO.Compression          # ZipArchive, ZipArchiveMode
-Add-Type -AssemblyName System.IO.Compression.FileSystem   # ZipFile, ZipFileExtensions
+Write-Host "Compressing archive to $archivePath..."
 
-# Entries are written one at a time with forward-slash names on purpose.
-# ZipFile::CreateFromDirectory under Windows PowerShell 5.1 resolves to the .NET
-# Framework implementation, which names entries with Path.DirectorySeparatorChar —
-# backslashes. That violates the ZIP specification (APPNOTE 4.4.17: forward slash
-# only). Windows opens such an archive, but `unzip` on Linux warns and macOS's
-# Archive Utility can produce files literally named "bin\highways.exe" instead of a
-# bin directory. This is a published release artifact, so it has to unpack anywhere.
-$zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
-try {
-    $stageFull = (Resolve-Path $stageDir).Path.TrimEnd('\')
-    foreach ($file in Get-ChildItem -Path $stageDir -Recurse -File) {
-        $entryName = $file.FullName.Substring($stageFull.Length + 1).Replace('\', '/')
-        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-            $zip, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
-    }
+if ($winTarget) {
+    Add-Type -AssemblyName System.IO.Compression          # ZipArchive, ZipArchiveMode
+    Add-Type -AssemblyName System.IO.Compression.FileSystem   # ZipFile, ZipFileExtensions
 
-    # Empty directories need an explicit trailing-slash entry — writing files alone
-    # would silently drop data/ and logs/. R3.1 ships both: data/ is the default
-    # dataDir target, and logs/ is where the broker writes its rolling daily log files
-    # (feature 045) — a missing logs/ would just be recreated, but shipping it keeps the
-    # documented layout intact.
-    foreach ($dir in Get-ChildItem -Path $stageDir -Recurse -Directory) {
-        if (-not (Get-ChildItem -Path $dir.FullName -Recurse -File)) {
-            $dirEntry = $dir.FullName.Substring($stageFull.Length + 1).Replace('\', '/') + '/'
-            $zip.CreateEntry($dirEntry) | Out-Null
+    # Entries are written one at a time with forward-slash names on purpose.
+    # ZipFile::CreateFromDirectory under Windows PowerShell 5.1 resolves to the .NET
+    # Framework implementation, which names entries with Path.DirectorySeparatorChar —
+    # backslashes. That violates the ZIP specification (APPNOTE 4.4.17: forward slash
+    # only). Windows opens such an archive, but `unzip` on Linux warns and macOS's
+    # Archive Utility can produce files literally named "bin\highways.exe" instead of a
+    # bin directory. This is a published release artifact, so it has to unpack anywhere.
+    $zip = [System.IO.Compression.ZipFile]::Open($archivePath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $stageFull = (Resolve-Path $stageDir).Path.TrimEnd('\')
+        foreach ($file in Get-ChildItem -Path $stageDir -Recurse -File) {
+            $entryName = $file.FullName.Substring($stageFull.Length + 1).Replace('\', '/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip, $file.FullName, $entryName, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+
+        # Empty directories need an explicit trailing-slash entry — writing files alone
+        # would silently drop data/ and logs/. R3.1 ships both: data/ is the default
+        # dataDir target, and logs/ is where the broker writes its rolling daily log files
+        # (feature 045) — a missing logs/ would just be recreated, but shipping it keeps the
+        # documented layout intact.
+        foreach ($dir in Get-ChildItem -Path $stageDir -Recurse -Directory) {
+            if (-not (Get-ChildItem -Path $dir.FullName -Recurse -File)) {
+                $dirEntry = $dir.FullName.Substring($stageFull.Length + 1).Replace('\', '/') + '/'
+                $zip.CreateEntry($dirEntry) | Out-Null
+            }
         }
     }
+    finally {
+        $zip.Dispose()
+    }
 }
-finally {
-    $zip.Dispose()
+else {
+    # Linux/macOS: a gzip-compressed tar. `tar` on Windows 10+ is bsdtar and writes
+    # POSIX entries with forward slashes, so the archive unpacks cleanly on the target.
+    # bsdtar on Windows cannot stamp the Unix execute bit, so the shipped run.sh /
+    # install-service.sh chmod +x the `highways` binary on first use, and the scripts
+    # are invoked as `bash <script>` (documented) — no execute bit required to install.
+    & tar -czf $archivePath -C $stageDir .
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar failed with exit code $LASTEXITCODE"
+    }
 }
 
 # 6. Cleanup
 Remove-Item -Path $stageDir -Recurse -Force
 
-$zipItem = Get-Item $zipPath
-$zipSizeMb = [Math]::Round($zipItem.Length / 1MB, 2)
-Write-Host "Successfully generated $packageName.zip ($zipSizeMb MB)"
+$archiveItem = Get-Item $archivePath
+$archiveSizeMb = [Math]::Round($archiveItem.Length / 1MB, 2)
+Write-Host "Successfully generated $($archiveItem.Name) ($archiveSizeMb MB)"

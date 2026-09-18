@@ -26,6 +26,16 @@ internal sealed class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
+        // Liveness and readiness probes are keyless (052): an orchestrator must reach them without a
+        // secret, and they leak nothing beyond up/down and a role word. The detailed /replication
+        // route, which exposes topology, is NOT exempt and stays behind the key.
+        var path = context.Request.Path;
+        if (path.StartsWithSegments("/health") || path.StartsWithSegments("/ready"))
+        {
+            await _next(context);
+            return;
+        }
+
         // Check cookie first (set on previous successful auth)
         if (context.Request.Cookies.TryGetValue(CookieName, out var cookieValue)
             && IsValid(cookieValue))

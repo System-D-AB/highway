@@ -84,10 +84,13 @@ internal sealed class HwFailCommand : HighwayCommand
     }
 
     protected override void AfterCommit(CommandContext ctx)
-        => ctx.Recorder.Record(
+    {
+        ctx.Recorder.Record(
             HighwayEventType.DeliveryFailed, _name ?? "?",
             nodeId: _scope, requestId: _id,
             errorCode: FailureCode ?? (_typeBytes.Length > 0 ? Encoding.UTF8.GetString(_typeBytes) : null));
+        if (!Failed) ctx.Metrics?.RecordFailed();
+    }
 
     private bool Matches(ReadOnlySpan<byte> entry)
     {

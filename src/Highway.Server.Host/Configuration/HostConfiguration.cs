@@ -118,7 +118,7 @@ public sealed class ServerSection
 
     public TimeSpan Lease { get; set; } = TimeSpan.FromMinutes(5);
     public TimeSpan ReplySlotTtl { get; set; } = TimeSpan.FromMinutes(5);
-    public int MaxPayloadBytes { get; set; } = 1 * 1024 * 1024;
+    public int MaxPayloadBytes { get; set; } = Highway.Abstractions.HighwayLimits.DefaultMaxPayloadBytes; // 5 MiB (057)
     public int MaxIdentifierBytes { get; set; } = 256;
     public TimeSpan NodeExpiry { get; set; } = TimeSpan.FromSeconds(30);
     public bool PruningEnabled { get; set; } = true;
@@ -230,6 +230,10 @@ public sealed class TlsSection
 public sealed class DashboardSection
 {
     public bool Enabled { get; set; }
+
+    /// <summary>Serve the machine-facing health endpoints (052). Default on.</summary>
+    public bool HealthEndpoints { get; set; } = true;
+
     public int Port { get; set; } = 7500;
     public string BindAddress { get; set; } = "127.0.0.1";
     public string PathBase { get; set; } = "";

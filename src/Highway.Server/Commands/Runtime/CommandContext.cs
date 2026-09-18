@@ -46,6 +46,13 @@ internal sealed class CommandContext
     /// </summary>
     public ReplicationFeeder? Replication { get; }
 
+    /// <summary>
+    /// Operational metrics (feature 051), or null when metrics are not wired (e.g. an in-process
+    /// command test). A command records a delivery outcome next to its recorder write; the call is
+    /// null-conditional and never affects the command's result.
+    /// </summary>
+    public HighwayMetrics? Metrics { get; }
+
     public CommandContext(
         IHighwayStore store,
         StripedLock locks,
@@ -53,7 +60,8 @@ internal sealed class CommandContext
         FlightRecorder recorder,
         HighwayServerOptions options,
         long nowTicks,
-        ReplicationFeeder? replication = null)
+        ReplicationFeeder? replication = null,
+        HighwayMetrics? metrics = null)
     {
         Store = store;
         Locks = locks;
@@ -62,5 +70,6 @@ internal sealed class CommandContext
         Options = options;
         NowTicks = nowTicks;
         Replication = replication;
+        Metrics = metrics;
     }
 }

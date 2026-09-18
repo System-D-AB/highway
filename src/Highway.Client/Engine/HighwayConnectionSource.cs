@@ -240,6 +240,7 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
         if (string.Equals(previousHost, newHost, StringComparison.OrdinalIgnoreCase)) return;
         var epoch = Volatile.Read(ref _lastSeenEpoch);
         _logger.LogInformation("Highway master changed to {Master} (epoch {Epoch})", newHost, epoch);
+        Observability.HighwayClientMetrics.RecordFailover();   // 051 R2: the caller-side view of a cluster event
         MasterChanged?.Invoke(new MasterChange(newHost, epoch));
     }
 

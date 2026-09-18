@@ -7,8 +7,17 @@ namespace Highway.Server.Dashboard;
 /// </summary>
 public sealed class DashboardOptions
 {
-    /// <summary>Whether the dashboard is active. Default: false (explicitly opt-in).</summary>
+    /// <summary>Whether the dashboard UI/API is active. Default: false (explicitly opt-in).</summary>
     public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Whether the machine-facing health endpoints (<c>/health</c>, <c>/ready</c>,
+    /// <c>/replication</c>) are served (feature 052). Default: true — they are cheap, and a deployed
+    /// broker is expected to answer an orchestrator's probes. They bind on the same host/port as the
+    /// dashboard; when the dashboard UI is disabled but this is on, the host still binds to serve
+    /// only these routes (a headless broker still needs probes).
+    /// </summary>
+    public bool HealthEndpoints { get; set; } = true;
 
     /// <summary>HTTP port for the dashboard. Default: 7500.</summary>
     public int Port { get; set; } = 7500;

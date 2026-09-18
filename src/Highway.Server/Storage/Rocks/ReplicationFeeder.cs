@@ -191,6 +191,16 @@ internal sealed class ReplicationFeeder : IDisposable
     /// </summary>
     public event Action? OnEpochChanged;
 
+    /// <summary>
+    /// Role-transition notifications for metrics (feature 051): fired once per promotion, demotion,
+    /// and self-fence. The host subscribes <c>HighwayMetrics</c> counters here — the feeder stays
+    /// oblivious to metrics, exactly as it does to logging (an optional <see cref="Logger"/>).
+    /// Fired outside the role lock.
+    /// </summary>
+    public event Action? OnPromoted;
+    public event Action? OnDemoted;
+    public event Action? OnFenced;
+
     /// <summary>The master promised to leave (GOODBYE, 042-1) — a standby is immediately willing.</summary>
     public bool GoodbyeSeen { get; private set; }
 
@@ -478,6 +488,7 @@ internal sealed class ReplicationFeeder : IDisposable
         RegisterSelfInRoster?.Invoke();
 
         OnEpochChanged?.Invoke();   // 044: promotion bumped the epoch → wipe the local cache
+        OnPromoted?.Invoke();       // 051: count the promotion
         return true;
     }
 
@@ -520,6 +531,7 @@ internal sealed class ReplicationFeeder : IDisposable
             Role = ReplicaRole.Fenced;
             Note($"fence epoch={Epoch} reason={reason} at={Options.Clock.GetUtcNow():o}", LogLevel.Warning);
         }
+        OnFenced?.Invoke();   // 051: count the self-fence
     }
 
     public void UnfenceIfContact()
@@ -543,6 +555,7 @@ internal sealed class ReplicationFeeder : IDisposable
     {
         var epochChanged = false;
         var rejoinRequested = false;
+        var demoted = false;
         lock (_roleLock)
         {
             if (observedEpoch < Epoch) return;
@@ -570,6 +583,7 @@ internal sealed class ReplicationFeeder : IDisposable
                 {
                     var from = Role;
                     Role = ReplicaRole.Demoted;
+                    demoted = true;
                     _slots.Clear();   // 050 T4 (F3): a demoted node holds no replicas — drop phantom slots now
                     LastReconciliationPath = WriteReconciliationReport();
                     Note($"demote from={from} observedEpoch={observedEpoch} reason={reason} file={LastReconciliationPath}", LogLevel.Warning);
@@ -592,6 +606,8 @@ internal sealed class ReplicationFeeder : IDisposable
 
         if (epochChanged)
             OnEpochChanged?.Invoke();   // 044: adopted a higher epoch → wipe the local cache
+        if (demoted)
+            OnDemoted?.Invoke();        // 051: count the demotion
         if (rejoinRequested)
             RejoinRequested?.Invoke();  // 050: ask the host to restart so Open re-syncs us as a replica
     }
@@ -706,9 +722,27 @@ internal sealed class ReplicationFeeder : IDisposable
         TickGoodbye();
     }
 
+    /// <summary>
+    /// Whether this node should receive client traffic now (052 R2): a writable, un-fenced,
+    /// non-draining, fully-bootstrapped primary is ready; everything else names why it is not. The
+    /// health endpoint's <c>/ready</c> serves this, and it also rides <see cref="StatsFields"/> so
+    /// readiness is visible on every replication channel (the "loud on every channel" doctrine).
+    /// </summary>
+    public (bool Ready, string Reason) Readiness()
+    {
+        if (Role == ReplicaRole.Fenced) return (false, "fenced");
+        if (IsDraining) return (false, "draining");
+        if (ResyncRequired) return (false, "bootstrapping");
+        if (Role == ReplicaRole.Demoted) return (false, "demoted");
+        if (Role == ReplicaRole.Replica) return (false, "replica");
+        if (Role == ReplicaRole.Primary) return (true, "primary");
+        return (false, "unknown");
+    }
+
     public IReadOnlyList<(string Name, string Value)> StatsFields()
     {
         EnforceCap();   // 050 T4: refresh slot staleness so a read never shows a phantom Active replica
+        var (ready, readyReason) = Readiness();
         var fields = new List<(string, string)>
         {
             ("repl.role", Role.ToString()),
@@ -729,6 +763,8 @@ internal sealed class ReplicationFeeder : IDisposable
             ("repl.draining", IsDraining.ToString()),
             ("repl.leadershipSince", _leadershipSince?.ToString("o") ?? ""),
             ("repl.redundancy", ComputeRedundancy()),
+            ("repl.ready", ready.ToString()),
+            ("repl.readyReason", readyReason),
         };
 
         // 050 T5: a short, bounded timeline of recent role/topology transitions for the dashboard.

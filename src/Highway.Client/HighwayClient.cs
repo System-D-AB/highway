@@ -123,6 +123,7 @@ internal sealed class HighwayClient : IHighwayClient
         var responseTask = pending.Register(requestId, responseType, _options.CallTimeout, ct,
             serviceName, envelope);   // replay data: re-driven same-id after a failover (042-1b)
 
+        var rpcStart = System.Diagnostics.Stopwatch.GetTimestamp();   // 051 R2: caller-side RPC latency
         try
         {
             await connection.CallAsync(serviceName, requestId, envelope, ct).ConfigureAwait(false);
@@ -140,6 +141,7 @@ internal sealed class HighwayClient : IHighwayClient
                 "SERVER_UNAVAILABLE",
                 $"The server rejected or could not receive the call: {ex.Message}");
             pending.TryFail(requestId, failure);
+            HighwayClientMetrics.RecordRpc(ok: false, System.Diagnostics.Stopwatch.GetElapsedTime(rpcStart).TotalSeconds);
             return Cast<TResponse>(failure);
         }
         // OperationCanceledException propagates: the registry's linked token also
@@ -147,6 +149,7 @@ internal sealed class HighwayClient : IHighwayClient
 
         var response = await responseTask.ConfigureAwait(false);
         HighwayActivity.SetOutcome(activity, response.StatusCode, response.Error?.Code);
+        HighwayClientMetrics.RecordRpc(response.StatusCode < 400, System.Diagnostics.Stopwatch.GetElapsedTime(rpcStart).TotalSeconds);
         return Cast<TResponse>(response);
     }
 

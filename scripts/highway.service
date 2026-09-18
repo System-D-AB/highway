@@ -1,0 +1,29 @@
+[Unit]
+Description=Highway broker (RESP + RocksDB)
+Documentation=https://github.com/systemdab/highway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The host integrates with systemd (sd_notify), so Type=notify gives accurate
+# "started" state and lets `systemctl start` block until the broker is ready.
+Type=notify
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/bin/highways --config __ROOT__/config/highway.json
+# `systemctl stop` sends SIGTERM and the host shuts down gracefully.
+# For a ZERO-DOWNTIME rolling upgrade of the PRIMARY, hand off first, then stop:
+#     __ROOT__/bin/highways --drain-and-stop   # GOODBYE, wait for the herd to move
+#     systemctl stop highway                   # then stop this unit
+# (feature 050 — the successor takes over and the old node auto-rejoins on restart)
+Restart=on-failure
+RestartSec=2
+# Secrets belong in an environment file, never in this unit or in highway.json.
+# Create config/highway.env with e.g.  HIGHWAY_PASSWORD=...  and uncomment:
+# EnvironmentFile=__ROOT__/config/highway.env
+
+# Hardening (adjust to taste):
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

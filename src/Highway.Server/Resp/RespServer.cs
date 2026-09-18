@@ -32,6 +32,7 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
     private readonly ObservedAddressRegistry _observed = new();
     private readonly Storage.Cache.IHighwayCacheStore? _cache;
     private readonly Storage.Cache.CacheSweeper? _cacheSweeper;
+    private readonly HighwayMetrics _metrics;
 
     public CommandDispatcher Dispatcher { get; }
     public IConnectionAuthenticator Authenticator { get; }
@@ -77,11 +78,28 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
                 _cache, options.Cache.MaxSizeBytes, options.Cache.SweepInterval);
         }
 
-        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication, _cache);
+        // 051: operational metrics. Owns a Highway.Server Meter; the queue gauges read broker state
+        // on demand (only when a listener collects), and the transition counters ride the feeder's
+        // role-change events. Null feeder (ephemeral broker) → the replication gauges report nothing.
+        var brokerState = new StoreBrokerState(store, options);
+        _metrics = new HighwayMetrics(
+            replication,
+            () => brokerState.QueuesAsync().GetAwaiter().GetResult().Value ?? [],
+            Recorder);
+
+        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication, _cache, _metrics);
 
         // 044 R6: wipe the cache on every epoch change (mastership moved → cached data may be stale).
         if (replication is not null && _cache is not null)
             replication.OnEpochChanged += _cache.Clear;
+
+        // 051: count role transitions where they happen — the feeder stays metrics-oblivious.
+        if (replication is not null)
+        {
+            replication.OnPromoted += _metrics.RecordPromotion;
+            replication.OnDemoted += _metrics.RecordDemotion;
+            replication.OnFenced += _metrics.RecordFence;
+        }
 
         if (replication is not null)
         {
@@ -193,5 +211,6 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
         await _app.DisposeAsync();
         _cacheSweeper?.Dispose();
         _cache?.Dispose();
+        _metrics.Dispose();
     }
 }

@@ -120,6 +120,7 @@ internal sealed class HwQClaimCommand : HighwayCommand
                 HighwayEventType.QueueDeadLettered, _queue,
                 nodeId: _nodeId, requestId: id, count: attempts, errorCode: DeadLetter.MaxAttempts);
         }
+        ctx.Metrics?.RecordDeadLettered(_deadLettered.Count);
 
         foreach (var (job, messageId) in _firedJobs)
             ctx.Recorder.Record(HighwayEventType.JobFired, _queue, requestId: messageId, errorCode: job);
@@ -137,6 +138,7 @@ internal sealed class HwQClaimCommand : HighwayCommand
             nodeId: _nodeId,
             requestId: _claimedId,
             errorCode: FailureCode);
+        if (_claimedId is not null) ctx.Metrics?.RecordDelivered();
     }
 
     /// <summary>

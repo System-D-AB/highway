@@ -77,6 +77,7 @@ public class SchemaCompletenessTests
     private static readonly Dictionary<string, string> DashboardLeaves = new()
     {
         ["Enabled"] = "dashboard.enabled",
+        ["HealthEndpoints"] = "dashboard.healthEndpoints",
         ["Port"] = "dashboard.port",
         ["Bind"] = "dashboard.bindAddress",
         ["PathBase"] = "dashboard.pathBase",

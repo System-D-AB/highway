@@ -40,7 +40,10 @@ internal abstract class HighwayCommand
     /// <paramref name="input"/> and writing the reply to <paramref name="writer"/>. This is
     /// the one entry point the dispatcher (and 039's tests) call — no transport involved.
     /// </summary>
-    public void Execute(CommandContext ctx, CommandInput input, RespWriter writer)
+    /// <returns>True when the command ran to a successful commit; false when validation rejected it
+    /// or <see cref="Run"/> threw. The dispatcher uses this to tag the RPC outcome (051); the value
+    /// is otherwise ignorable, as a statement call.</returns>
+    public bool Execute(CommandContext ctx, CommandInput input, RespWriter writer)
     {
         _error = null;
         _errorCode = null;
@@ -54,7 +57,7 @@ internal abstract class HighwayCommand
         {
             writer.Error(_error!);
             AfterCommit(ctx);
-            return;
+            return false;
         }
 
         // 3: the work — lock, snapshot, batch, commit — is the command's own Run.
@@ -65,16 +68,17 @@ internal abstract class HighwayCommand
         catch (StorageFormatException ex)
         {
             writer.Error(HighwayErrors.StorageFormatError(ex.Message));
-            return;
+            return false;
         }
         catch (Exception ex)
         {
             writer.Error(HighwayErrors.InternalError(ex.Message));
-            return;
+            return false;
         }
 
         // 4: post-commit side effects (recorder + doorbell), guarded by the command.
         AfterCommit(ctx);
+        return true;
     }
 
     /// <summary>

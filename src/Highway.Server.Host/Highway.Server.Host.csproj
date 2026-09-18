@@ -5,6 +5,12 @@
     <AssemblyName>highways</AssemblyName>
     <RootNamespace>Highway.Server.Host</RootNamespace>
     <IsPackable>false</IsPackable>
+
+    <!-- Globalization-invariant: the broker parses/compares with InvariantCulture throughout
+         (RESP, ASCII identifiers, invariant number/size/cron parsing), so it needs no ICU. This
+         makes the self-contained Linux build a true zero-dependency drop — no `apt install libicu`
+         on the target, where .NET would otherwise FailFast on first culture use. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>

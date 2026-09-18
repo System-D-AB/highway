@@ -79,6 +79,7 @@ internal static class EffectiveConfigurationPrinter
         writer.WriteLine();
         writer.WriteLine("  dashboard");
         writer.WriteLine($"    enabled                          : {c.Dashboard.Enabled}");
+        writer.WriteLine($"    healthEndpoints                  : {c.Dashboard.HealthEndpoints}");
         writer.WriteLine($"    port                             : {c.Dashboard.Port}");
         writer.WriteLine($"    bindAddress                      : {c.Dashboard.BindAddress}");
         writer.WriteLine($"    pathBase                         : {(c.Dashboard.PathBase.Length == 0 ? "(root)" : c.Dashboard.PathBase)}");

@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 4.9** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
+**Protocol version 4.11** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
 
 ## About
 
@@ -48,6 +48,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.11 | 052 | **Readiness field.** The `HW.STATS` server form and `HW.REPL.STATUS` append `repl.ready` (bool) and `repl.readyReason` (`primary`/`replica`/`fenced`/`draining`/`bootstrapping`/`demoted`) — the same decision the new HTTP `GET /ready` endpoint serves, so readiness is legible on every channel. The health endpoints (`/health`, `/ready`, `/replication`) are HTTP, not RESP, and carry no wire command. Additive. |
 | 4.10 | 057 | **Message size.** The default `MaxPayloadBytes` is raised from 1 MiB to **5 MiB**, configurable up to a **15 MiB** ceiling (above which the server refuses at build). The `HW.STATS` server form appends a `maxPayloadBytes` field so a client learns the server's configured limit at connect and does not falsely reject below a raised server limit. Additive. |
 | 4.9 | 044 | **Broker-local cache.** Adds a third raw-key family, `hw:cache:*`, routed on the existing stock `GET`/`SET`/`DEL`/`UNLINK`/`SETEX`/`PSETEX`/`TTL`/`PTTL` — **no new `HW.*` command**. It is served **only when `server.cache.enabled`** (off by default); the family answers exactly as the idempotency family does on the wire, but is backed by a **separate, never-replicated** store (its own RocksDB at `dataDir/cache`, or in-memory on an ephemeral broker). A cache `SET` on a non-master is refused `-NOTPRIMARY` like any write; a cache `GET` on a non-master returns a miss (null). TTL comes from `PX`/`EX`, defaults to the broker's `defaultTtl` when absent, and is clamped to `maxTtl`. Additive and opt-in. |
 | 4.8 | 042-1a | **The herd contract.** `HW.REPL.HELLO` grows two additive forms: an optional 4th argument on the replica form (the caller's endpoint — a promoting node announces itself so a demoted primary's `-NOTPRIMARY` redirects correctly) and the **client handshake** `HW.REPL.HELLO CLIENT <clientId> <lastSeenEpoch>` answering `["master"\|"willing", epoch, rosterVersion]` or `["standby", masterEndpoint, masterEpoch]`. Adds `HW.REPL.JOIN` (roster admission; `ERR HW_PRIORITY_TAKEN` on a held priority), `HW.REPL.GOODBYE` (graceful drain + stand-down, parent R12), and the `roster.*` fields on `HW.REPL.STATUS`. Adds `ERR HW_REPL_GAP` on `HW.REPL.PULL` (a cursor behind the retained WAL is refused, never served a gapped stream — the replica re-syncs via SNAPSHOT). Adds the `hw:door:topology` narration channel (TOPOLOGY / GOODBYE / ROSTER-UPDATE, advisory). **Withdraws** the never-released `HW.REPL.WITNESS <nodeId> <role>` sketch — WITNESS is the bare `+OK` probe; failover is client-herd-driven (feature 042-1), not witness-gated. Additive. |
@@ -768,6 +769,55 @@ Attributes follow OpenTelemetry messaging semantic conventions:
 
 With no listener attached, `StartActivity` returns null and nothing is materialised, so emission costs essentially nothing when unobserved.
 
+### Metric emission
+
+Highway also emits `System.Diagnostics.Metrics` and takes **no OpenTelemetry dependency** — the same posture as its `Activity` emission (feature 051). Highway defines the instruments; the application adds `OpenTelemetry.Metrics` plus whatever exporter it runs and subscribes to the meters:
+
+| Meter | Emits |
+|---|---|
+| `Highway.Server` | broker operational metrics — replication, queue/pub-sub, RPC, connections, recorder |
+| `Highway.Client` | caller-side metrics — RPC outcome/latency and followed failovers |
+
+Instruments are **always defined** (no config gate) and cost nothing when no listener is attached — counters do a cheap `Add`, and the observable gauges sample the live feeder / store / recorder **only** when a listener collects. Every label is drawn from a bounded name set (queues, replicas, the four roles, an `ok|error` result) — never a per-request id.
+
+**`Highway.Server` instruments**
+
+| Instrument | Type | Unit | Labels |
+|---|---|---|---|
+| `highway.rpc.requests` | Counter | `{request}` | `result` |
+| `highway.rpc.latency` | Histogram | `s` | `result` |
+| `highway.messages.published` | Counter | `{message}` | — |
+| `highway.messages.delivered` | Counter | `{message}` | — |
+| `highway.messages.acknowledged` | Counter | `{message}` | — |
+| `highway.messages.failed` | Counter | `{message}` | — |
+| `highway.messages.refused` | Counter | `{message}` | — |
+| `highway.messages.deadlettered` | Counter | `{message}` | — |
+| `highway.replication.promotions` | Counter | `{event}` | — |
+| `highway.replication.demotions` | Counter | `{event}` | — |
+| `highway.replication.fences` | Counter | `{event}` | — |
+| `highway.replication.role` | ObservableGauge | `{role}` | `role` (1 for the current role, 0 for the others) |
+| `highway.replication.epoch` | ObservableGauge | `{epoch}` | — |
+| `highway.replication.slots` | ObservableGauge | `{slot}` | — |
+| `highway.replication.lag_sequences` | ObservableGauge | `{sequence}` | `replica` |
+| `highway.replication.rpo_seconds` | ObservableGauge | `s` | — |
+| `highway.queue.depth` | ObservableGauge | `{message}` | `queue` |
+| `highway.queue.bytes` | ObservableGauge | `By` | `queue` |
+| `highway.deadletters` | ObservableGauge | `{message}` | `queue` |
+| `highway.connections` | ObservableGauge | `{connection}` | — |
+| `highway.recorder.dropped` | ObservableGauge | `{event}` | — |
+
+The replication instruments are present only on a durable (RocksDB) broker; an in-memory broker has no feeder, so they report nothing.
+
+**`Highway.Client` instruments**
+
+| Instrument | Type | Unit | Labels |
+|---|---|---|---|
+| `highway.client.rpc.requests` | Counter | `{request}` | `result` |
+| `highway.client.rpc.latency` | Histogram | `s` | `result` |
+| `highway.client.failovers` | Counter | `{failover}` | — |
+
+Metrics add no command, reply or error to the wire, so they carry **no protocol version**. The instrument names, types, units and labels above are the stable contract.
+
 ---
 
 ## Dead Letter Commands
@@ -980,7 +1030,7 @@ A node that is not writable (role `Replica`, `Fenced`, or `Demoted`) refuses mut
 
 **During a GOODBYE drain** (042-1) the quiescing master serves the **completion** verbs — `HW.REPLY`, `HW.ACK`, `HW.QACK`, `HW.FAIL`, `HW.TOUCH` — plus reads, the raw reply-slot/idempotency surface, and WAL shipping, while refusing new work (`HW.CALL`, `HW.QSEND`, `HW.PUBLISH`, claims, subscriptions, job admin) with `-NOTPRIMARY`, so in-flight drains and the herd converges.
 
-The server-wide `HW.STATS` form appends `repl.role`, `repl.epoch`, `repl.endpoint`, `repl.priority`, `repl.fenced`, `repl.slots`, `repl.minAcked`, `repl.latestSeq`, `repl.lastPromotion`, `repl.lastPromotionReason`, `repl.reconciliation`, `repl.drops`, and per-slot `repl.slot.N.{id,acked,state,lag}` fields.
+The server-wide `HW.STATS` form appends `repl.role`, `repl.epoch`, `repl.endpoint`, `repl.priority`, `repl.fenced`, `repl.slots`, `repl.minAcked`, `repl.latestSeq`, `repl.lastPromotion`, `repl.lastPromotionReason`, `repl.reconciliation`, `repl.drops`, `repl.ready`, `repl.readyReason` (052), and per-slot `repl.slot.N.{id,acked,state,lag}` fields. (Self-describing and append-only — a reader ignores fields it does not know, and 050/052 added others: `repl.redundancy`, `repl.leadershipSince`, `repl.clients`, `repl.draining`, `repl.resyncRequired`.)
 
 ### HW.REPL.HELLO
 

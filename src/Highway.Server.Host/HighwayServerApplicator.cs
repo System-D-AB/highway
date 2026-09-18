@@ -48,7 +48,8 @@ internal static class HighwayServerApplicator
             });
         }
 
-        // Dashboard: opt-in, exactly as WithDashboard is today.
+        // Dashboard: opt-in, exactly as WithDashboard is today. The health endpoints (052) ride the
+        // same host; when the UI is off but health is on, a health-only host still binds.
         if (c.Dashboard.Enabled)
         {
             builder.WithDashboard(d =>
@@ -57,9 +58,20 @@ internal static class HighwayServerApplicator
                 d.Bind = IPAddress.Parse(c.Dashboard.BindAddress);
                 d.PathBase = c.Dashboard.PathBase;
                 d.ApiKey = c.Dashboard.ApiKey;
+                d.HealthEndpoints = c.Dashboard.HealthEndpoints;
                 d.MaxConcurrentStreams = c.Dashboard.MaxConcurrentStreams;
                 d.StreamBufferCapacity = c.Dashboard.StreamBufferCapacity;
                 d.KeepAliveInterval = c.Dashboard.KeepAliveInterval;
+            });
+        }
+        else if (c.Dashboard.HealthEndpoints)
+        {
+            builder.WithHealthEndpoints(d =>
+            {
+                d.Port = c.Dashboard.Port;
+                d.Bind = IPAddress.Parse(c.Dashboard.BindAddress);
+                d.PathBase = c.Dashboard.PathBase;
+                d.ApiKey = c.Dashboard.ApiKey;
             });
         }
 

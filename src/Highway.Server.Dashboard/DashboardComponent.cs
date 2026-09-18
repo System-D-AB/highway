@@ -29,9 +29,11 @@ internal sealed class DashboardComponent : IHighwayServerComponent
     {
         var logger = _context.LoggerFactory.CreateLogger<DashboardComponent>();
 
-        if (!_options.Enabled)
+        // The host binds when either the UI or the health endpoints (052) are wanted. With neither,
+        // there is nothing to serve.
+        if (!_options.Enabled && !_options.HealthEndpoints)
         {
-            logger.LogDebug("Dashboard is disabled.");
+            logger.LogDebug("Dashboard and health endpoints are disabled.");
             return;
         }
 
@@ -60,28 +62,35 @@ internal sealed class DashboardComponent : IHighwayServerComponent
             if (!string.IsNullOrEmpty(_options.PathBase))
                 _app.UsePathBase(_options.PathBase);
 
-            // API key middleware
+            // API key middleware. It exempts /health and /ready (052) so keyless probes work; the
+            // dashboard UI/API and /replication stay behind the key.
             if (_options.ApiKey is not null)
                 _app.UseMiddleware<ApiKeyMiddleware>();
 
-            // Map endpoints
-            DashboardEndpoints.Map(_app);
+            // Health endpoints (052) bind whenever enabled — including in a health-only host.
+            if (_options.HealthEndpoints)
+                DashboardEndpoints.MapHealth(_app);
+
+            // The dashboard UI/API only when the UI itself is enabled.
+            if (_options.Enabled)
+                DashboardEndpoints.Map(_app);
 
             _app.StartAsync().GetAwaiter().GetResult();
 
             var url = $"http://{(_options.Bind.Equals(IPAddress.Loopback) ? "127.0.0.1" : _options.Bind)}:{_options.Port}{_options.PathBase}/";
             var keyNote = _options.ApiKey is not null ? " (API key required)" : "";
+            var surface = _options.Enabled ? "dashboard" : "health endpoints";
 
             if (!_options.Bind.Equals(IPAddress.Loopback) && _options.ApiKey is null)
             {
                 logger.LogWarning(
-                    "Highway dashboard listening on {Url} — bound beyond loopback WITHOUT an API key. " +
+                    "Highway {Surface} listening on {Url} — bound beyond loopback WITHOUT an API key. " +
                     "Payload content may be served to any host on this network.",
-                    url);
+                    surface, url);
             }
             else
             {
-                logger.LogInformation("Highway dashboard listening on {Url}{KeyNote}", url, keyNote);
+                logger.LogInformation("Highway {Surface} listening on {Url}{KeyNote}", surface, url, keyNote);
             }
         }
         catch (Exception ex)

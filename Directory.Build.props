@@ -6,7 +6,7 @@
     <LangVersion>latest</LangVersion>
 
     <!-- Central Versioning (Feature 035 / D5) -->
-    <VersionPrefix>2.2.0</VersionPrefix>
+    <VersionPrefix>2.5.0</VersionPrefix>
     <VersionSuffix></VersionSuffix>
 
     <!-- Central Package Metadata (R1.2 / R3.1) -->

@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Text;
 using FluentAssertions;
 using Highway.Server;
@@ -85,6 +86,38 @@ public class CommandDispatcherTests
             "HW.REPL.SNAPSHOT", "HW.REPL.PROMOTE", "HW.REPL.FENCE", "HW.REPL.STATUS", "HW.REPL.WITNESS",
             "HW.REPL.JOIN", "HW.REPL.GOODBYE",
         });
+    }
+
+    [Fact]
+    public void Dispatch_MovesTheMetrics_ForSendClaimAndCall()
+    {
+        // 051 T2: the delivery counters ride the real command AfterCommit sites, and HW.CALL's
+        // request counter rides the dispatcher — proven end to end through Dispatch, isolated on a
+        // unique meter name so a parallel embedded server's Highway.Server meter cannot leak in.
+        var meterName = "Highway.Server.Test." + Guid.NewGuid().ToString("N");
+        var store = new InMemoryStore();
+        var options = new HighwayServerOptions();
+        var recorder = new FlightRecorder(options.Observability);
+        using var metrics = new HighwayMetrics(replication: null, () => [], recorder, meterName);
+        var dispatcher = new CommandDispatcher(
+            store, new StripedLock(), new NullDoorbell(), recorder, options, replication: null, cache: null, metrics: metrics);
+
+        var totals = new Dictionary<string, long>();
+        using var listener = new MeterListener
+        {
+            InstrumentPublished = (inst, l) => { if (inst.Meter.Name == meterName) l.EnableMeasurementEvents(inst); },
+        };
+        listener.SetMeasurementEventCallback<long>((inst, m, _, _) =>
+            totals[inst.Name] = totals.GetValueOrDefault(inst.Name) + m);
+        listener.Start();
+
+        dispatcher.Dispatch(Frame("HW.QSEND", "invoices", "m1", "body"), new RespWriter());
+        dispatcher.Dispatch(Frame("HW.QCLAIM", "invoices", "worker1"), new RespWriter());
+        dispatcher.Dispatch(Frame("HW.CALL", "orders.get", "r1", "body"), new RespWriter());
+
+        totals.GetValueOrDefault("highway.messages.published").Should().Be(1);
+        totals.GetValueOrDefault("highway.messages.delivered").Should().Be(1);
+        totals.GetValueOrDefault("highway.rpc.requests").Should().Be(1);
     }
 
     private sealed class NullDoorbell : IDoorbell

@@ -110,11 +110,13 @@ internal sealed class HwQSendCommand : HighwayCommand
         if (_refusedReason is not null)
         {
             ctx.Recorder.Record(HighwayEventType.SendRefused, _queue, requestId: _messageId, errorCode: _refusedReason);
+            ctx.Metrics?.RecordRefused();
             // A refused send wrote nothing — no QueueSent record, no doorbell.
             return;
         }
 
         ctx.Recorder.Record(HighwayEventType.QueueSent, _queue, requestId: _messageId, payload: _payloadBytes, errorCode: FailureCode);
+        if (!Failed) ctx.Metrics?.RecordPublished();
 
         if (Failed) return;
 
