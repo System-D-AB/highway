@@ -15,15 +15,15 @@
 
 ---
 
-Highway gives you **durable queues**, **publish/subscribe** and **RPC** — all over one
+Highway gives you **durable queues**, **publish/subscribe** and **RPC**, **Recurring jobs** — all over one
 broker you run yourself, in one process.
 
-No AWS concepts. No Azure. No RabbitMQ, no Service Bus, no gRPC, no Kafka, no Redis. No connection
+No AWS concepts. No Azure. No RabbitMQ, no Service Bus, no gRPC, no Kafka, no Redis, No Hangfire, no Quartz, no cron container. No connection
 strings to a managed service, no SDK-shaped abstractions leaking into your domain. You write plain C#
 POCOs — a class per message — and Highway builds the system around them: service discovery,
 load balancing, durable delivery, retries, timeouts and serialization.
 
-The broker is a high-performance, low-footprint .NET 10 server (and an embedded in-process
+The broker Highway Server is a high-performance, low-footprint, distributed .NET 10 server (and an embedded in-process
 server for development and tests), so every call is a round trip through a local store rather than a hop into
 somebody else's cloud. It needs the **.NET 10 SDK** and nothing else — no Docker, no external
 infrastructure, not even for the integration tests.
@@ -160,8 +160,8 @@ The RPO is the async-replication lag window — bounded and reported, never sile
 
 ## Also included
 
-- **Recurring jobs** — a schedule that sends a queue message. No Hangfire, no Quartz, no
-  cron container. `o.Jobs.Daily<GenerateStatements>(new TimeOnly(2, 0))`,
+- **Recurring jobs** — a schedule that sends a queue message. 
+  `o.Jobs.Daily<GenerateStatements>(new TimeOnly(2, 0))`,
   `o.Jobs.Every<ReconcileLedger>(TimeSpan.FromMinutes(15))`, or a five-field cron expression.
   Schedules survive restarts; missed occurrences collapse to one catch-up fire.
 - **Distributed cache** — opt in with `AddHighwayCache()` and Highway provides an
