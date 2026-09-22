@@ -10,6 +10,10 @@ Wants=network-online.target
 Type=notify
 WorkingDirectory=__ROOT__
 ExecStart=__ROOT__/bin/highways --config __ROOT__/config/highway.json
+# A blank replica waits for its primary before it can open its store and signal READY=1
+# (feature 058). That wait is bounded only by the primary coming up, so the start must not
+# time out — the process stays up and retries instead of being killed and crash-looped.
+TimeoutStartSec=infinity
 # `systemctl stop` sends SIGTERM and the host shuts down gracefully.
 # For a ZERO-DOWNTIME rolling upgrade of the PRIMARY, hand off first, then stop:
 #     __ROOT__/bin/highways --drain-and-stop   # GOODBYE, wait for the herd to move

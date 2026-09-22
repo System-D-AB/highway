@@ -62,7 +62,14 @@ public sealed class RespHighwayServer : IHighwayServer
     internal FlightRecorder? Recorder => _server?.Recorder;
 
     /// <inheritdoc/>
-    public void Start()
+    public void Start() => Start(CancellationToken.None);
+
+    /// <summary>
+    /// Starts the broker, honouring <paramref name="cancellationToken"/> while it waits for a primary
+    /// during a blank-replica snapshot bootstrap (058 R3) — a shutdown during that wait is clean. The
+    /// host passes its start token; the parameterless <see cref="Start()"/> uses none.
+    /// </summary>
+    public void Start(CancellationToken cancellationToken)
     {
         if (_started) return;
 
@@ -80,7 +87,7 @@ public sealed class RespHighwayServer : IHighwayServer
 
         // Store: RocksDB when a data directory is configured (durable), in-memory otherwise.
         _store = _opts.DataDir is { } dir
-            ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, _opts.Replication, replLogger)
+            ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, _opts.Replication, replLogger, cancellationToken)
             : new InMemoryStore();
 
         if (_store is Storage.Rocks.RocksDbStore durable)

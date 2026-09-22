@@ -284,6 +284,10 @@ public class ReplicationPairTests : IDisposable
 
         after.Should().NotBeNullOrWhiteSpace();
         replica.Replication!.IsWritable.Should().BeTrue();
+        // The departed node stands down cleanly — via the GOODBYE drain deadline or the new
+        // primary's higher-epoch announce, both asynchronous, so this is an eventual condition
+        // (the standby can become writable a moment before the old primary observes it).
+        await WaitForAsync(() => primary.Replication!.Role == ReplicaRole.Demoted, timeoutMs: 5_000);
         primary.Replication!.Role.Should().Be(ReplicaRole.Demoted, "the departed node stood down cleanly");
     }
 

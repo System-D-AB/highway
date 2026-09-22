@@ -314,7 +314,16 @@ internal sealed class ReplicationFeeder : IDisposable
         {
             try
             {
-                // The first batch must actually follow the cursor. GetUpdatesSince on a
+                // 058 R2: GetUpdatesSince starts at the batch that CONTAINS fromSeq, so the first
+                // batch is always one the replica already has. Skip any batch whose last sequence
+                // is at or below the watermark — otherwise a caught-up replica is served its own
+                // last batch on every pull and busy-loops (058 bug 1). The pooled buffer is still
+                // returned by the finally below.
+                var lastSeq = pooled.SequenceNumber + WriteBatchCount(pooled.PooledData, pooled.Length) - 1;
+                if (lastSeq <= fromSeq)
+                    continue;
+
+                // The first batch KEPT must actually follow the cursor. GetUpdatesSince on a
                 // trimmed WAL starts at what still exists — detected here, refused loudly.
                 if (batches.Count == 0 && pooled.SequenceNumber > fromSeq + 1)
                     throw new ReplicationGapException(fromSeq, pooled.SequenceNumber);
@@ -346,6 +355,19 @@ internal sealed class ReplicationFeeder : IDisposable
             throw new ReplicationGapException(fromSeq, latestAtStart + 1);
 
         return new ReplicationPage(Epoch, batches, nextSeq);
+    }
+
+    /// <summary>
+    /// The number of entries in a RocksDB <c>WriteBatch</c>, read from its 12-byte header
+    /// (<c>[8B LE sequence][4B LE count]</c>, the format <see cref="WalTailSummary"/> decodes). A
+    /// batch's sequence range is <c>[SequenceNumber, SequenceNumber + Count - 1]</c>. A short or
+    /// absent buffer counts as 1, so a malformed batch is never skipped in error (058 R2).
+    /// </summary>
+    private static uint WriteBatchCount(byte[]? data, int length)
+    {
+        if (data is null || length < 12) return 1;
+        var count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(8, 4));
+        return count == 0 ? 1u : count;
     }
 
     public SnapshotBeginResult BeginSnapshot()

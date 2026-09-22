@@ -24,6 +24,13 @@ internal sealed class ReplicaPuller : IAsyncDisposable
     internal const string ResyncMarkerFileName = "resync-required";
 
     /// <summary>
+    /// How long a caught-up replica waits between pulls once a pull applied nothing (058 R1). At
+    /// 50 ms an idle replica issues ~20 pull cycles/s — negligible CPU on it and the primary —
+    /// while catch-up (any applied batch) still pulls back-to-back with no delay (R1.4).
+    /// </summary>
+    internal const int IdlePullDelayMs = 50;
+
+    /// <summary>
     /// Marker written by a demoting ex-primary (050 T2): names the new primary it learned at
     /// runtime and the epoch it demoted to. <see cref="RocksDbStore.Open"/> honours it — wipe,
     /// re-bootstrap from that primary, come up as its replica — then consumes it. Distinct from
@@ -259,15 +266,23 @@ internal sealed class ReplicaPuller : IAsyncDisposable
                 feeder.ObserveHigherEpoch(pageEpoch, "PULL page carried a higher epoch",
                     ReplicationFeeder.HostOf(_options.PrimaryServer));
 
-            if (applied.Applied + applied.Skipped > 0 || batches.Count > 0)
-            {
-                await db.ExecuteAsync("HW.REPL.ACK", id,
-                    _applier.Watermark.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
-            }
+            // ACK every cycle: it refreshes this replica's slot on the primary (050 T4 —
+            // LastContact), which keeps the slot Active and failover-eligible. Once idle pages
+            // are empty (058 R2) a conditional ACK would stop firing on an idle replica and the
+            // slot would go stale, so it is sent unconditionally. At the idle cadence below it
+            // costs nothing.
+            await db.ExecuteAsync("HW.REPL.ACK", id,
+                _applier.Watermark.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
 
             feeder.NotePeerContact();
-            if (batches.Count == 0)
-                await Task.Delay(50, ct).ConfigureAwait(false);
+
+            // 058 R1: pause only when this pull APPLIED nothing — not merely when the page was
+            // empty. A caught-up replica used to busy-loop because the primary re-served the batch
+            // that contains its watermark (a non-empty page that applies nothing). With R2 that
+            // page is now empty; either way "applied nothing" is the correct idle test, and while
+            // there is anything to apply the loop runs with no delay (R1.4).
+            if (applied.Applied == 0)
+                await Task.Delay(IdlePullDelayMs, ct).ConfigureAwait(false);
         }
     }
 

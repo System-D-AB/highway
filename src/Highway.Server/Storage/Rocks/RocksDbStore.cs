@@ -81,7 +81,7 @@ public sealed class RocksDbStore : IHighwayStore
     /// Opens (or creates) a store at <paramref name="path"/>. The column families are
     /// created if absent and their order is asserted (physical-layout.md §6).
     /// </summary>
-    public static RocksDbStore Open(string path, bool ownsDirectory = false, HighwayReplicationOptions? replication = null, ILogger? logger = null)
+    public static RocksDbStore Open(string path, bool ownsDirectory = false, HighwayReplicationOptions? replication = null, ILogger? logger = null, CancellationToken cancellationToken = default)
     {
         replication?.Validate();
         Directory.CreateDirectory(path);
@@ -125,10 +125,7 @@ public sealed class RocksDbStore : IHighwayStore
             !string.IsNullOrWhiteSpace(replication.PrimaryServer) &&
             !File.Exists(Path.Combine(path, "CURRENT")))
         {
-            var primaryHost = ReplicationFeeder.HostOf(replication.PrimaryServer) ?? "(primary)";
-            logger?.LogInformation("[replication] replica data directory is blank; bootstrapping snapshot from {Primary}", primaryHost);
-            var elapsed = ReplicaPuller.DownloadSnapshot(replication.PrimaryServer, path);
-            logger?.LogInformation("[replication] snapshot bootstrap complete in {Ms} ms", (long)elapsed.TotalMilliseconds);
+            BootstrapSnapshotWithRetry(replication.PrimaryServer!, path, logger, cancellationToken);
         }
         var options = new DbOptions()
             .SetCreateIfMissing(true)
@@ -186,6 +183,91 @@ public sealed class RocksDbStore : IHighwayStore
             else File.Delete(entry);
         }
     }
+
+    /// <summary>Node-local files a snapshot bootstrap must never delete (058 R3.4 / the WipeForResync rule):
+    /// the persisted epoch (a re-sync must not lose it), the bootstrap log, and the rejoin marker.</summary>
+    private static readonly HashSet<string> NodeLocalFiles = new(StringComparer.Ordinal)
+    {
+        "repl-epoch.txt", "snapshot-bootstrap.log", ReplicaPuller.RejoinMarkerFileName,
+    };
+
+    /// <summary>
+    /// Bootstraps a blank replica from the primary's snapshot, waiting for an unreachable primary
+    /// instead of crashing (058 R3). Retries on a connection failure with backoff (1, 2, 5, 10, 30 s
+    /// capped), logs each wait as host:port only (never the credentials on the connection string),
+    /// and honours <paramref name="cancellationToken"/> so a shutdown during the wait is clean.
+    /// </summary>
+    private static void BootstrapSnapshotWithRetry(string primaryServer, string path, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var primaryHost = ReplicationFeeder.HostOf(primaryServer) ?? "(primary)";
+        logger?.LogInformation("[replication] replica data directory is blank; bootstrapping snapshot from {Primary}", primaryHost);
+
+        int[] backoffSeconds = [1, 2, 5, 10, 30];
+        var attempt = 0;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                BootstrapSnapshotAtomic(primaryServer, path, logger);
+                return;
+            }
+            catch (Exception ex) when (IsTransientBootstrapFailure(ex))
+            {
+                var delay = TimeSpan.FromSeconds(backoffSeconds[Math.Min(attempt, backoffSeconds.Length - 1)]);
+                attempt++;
+                logger?.LogWarning(
+                    "[replication] primary {Primary} not reachable for snapshot bootstrap ({Error}); retrying in {Delay}",
+                    primaryHost, ex.Message, delay);
+                Task.Delay(delay, cancellationToken).GetAwaiter().GetResult();   // throws OperationCanceledException on shutdown
+            }
+        }
+    }
+
+    /// <summary>
+    /// Downloads the primary's snapshot into a sibling temporary directory and moves it into place
+    /// only when complete (058 R3.4). A failure mid-download leaves the data directory untouched — never
+    /// a partial database with a <c>CURRENT</c> that a later start would open. Node-local replication
+    /// files already in the data directory (the epoch) are preserved.
+    /// </summary>
+    private static void BootstrapSnapshotAtomic(string primaryServer, string path, ILogger? logger)
+    {
+        var tempDir = path + ".bootstrap-" + Guid.NewGuid().ToString("N");   // same parent → same filesystem → atomic renames
+        try
+        {
+            var elapsed = ReplicaPuller.DownloadSnapshot(primaryServer, tempDir);
+
+            // Download succeeded. Clear the data directory of any stale DB files (keeping node-local
+            // files) and move the fresh snapshot in. Only reached after a complete download.
+            foreach (var entry in Directory.EnumerateFileSystemEntries(path))
+            {
+                if (NodeLocalFiles.Contains(Path.GetFileName(entry))) continue;
+                if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+                else File.Delete(entry);
+            }
+            foreach (var entry in Directory.EnumerateFileSystemEntries(tempDir))
+            {
+                var name = Path.GetFileName(entry);
+                if (NodeLocalFiles.Contains(name)) continue;   // never overwrite the node's own epoch
+                var dest = Path.Combine(path, name);
+                if (Directory.Exists(entry)) Directory.Move(entry, dest);
+                else File.Move(entry, dest, overwrite: true);
+            }
+            logger?.LogInformation("[replication] snapshot bootstrap complete in {Ms} ms", (long)elapsed.TotalMilliseconds);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                try { Directory.Delete(tempDir, recursive: true); } catch (IOException) { /* best effort */ }
+        }
+    }
+
+    private static bool IsTransientBootstrapFailure(Exception ex)
+        => ex is StackExchange.Redis.RedisConnectionException
+              or StackExchange.Redis.RedisTimeoutException
+              or System.Net.Sockets.SocketException
+              or IOException
+           || (ex.InnerException is { } inner && IsTransientBootstrapFailure(inner));
 
     private static void AssertColumnFamilyOrder(RocksDb db)
     {

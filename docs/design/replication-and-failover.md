@@ -22,7 +22,16 @@ no vote, and no plan to add one.
 **WAL shipping, pull-based.** A standby registers a slot and pulls paged WAL batches (`HW.REPL.PULL`)
 from a sequence, applies them, and acks a watermark (`HW.REPL.ACK`); every reply is stamped with the
 primary's **epoch**. A standby too far behind the retained WAL re-bootstraps from a chunked,
-resumable checkpoint (`HW.REPL.SNAPSHOT`) rather than being served a gapped stream.
+resumable checkpoint (`HW.REPL.SNAPSHOT`) rather than being served a gapped stream. A **caught-up**
+standby pulls at a low idle cadence (≈20/s) and applies nothing — the primary returns an empty page
+for a pull at the watermark, so an idle replica set costs negligible CPU on both sides (feature 058;
+the ack keeps refreshing the slot so liveness is unaffected).
+
+**Start order does not matter.** A blank standby whose primary is not yet listening **waits** for it —
+retrying the snapshot bootstrap with backoff and logging each wait — instead of exiting; the snapshot
+downloads into a temporary directory and is moved into place only when complete, so an interrupted
+bootstrap never leaves a partial database (feature 058). The shipped systemd unit sets
+`TimeoutStartSec=infinity` for exactly this wait.
 
 **Mastership is client-defined — the herd, not a timer.** The master is *the node the client herd is
 connected to*; a node with no clients is not a master and performs no master-only side effects.

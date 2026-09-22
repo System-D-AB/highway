@@ -559,6 +559,78 @@ public class ReplicationFeederTests
         }
     }
 
+    [Fact]
+    public void Pull_SkipsBatchesWhollyAtOrBelowTheWatermark()   // 058 R2 — the busy-loop fix
+    {
+        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        try
+        {
+            using var store = RocksDbStore.Open(dir);
+            var before = store.Replication.Engine.GetLatestSequenceNumber();
+
+            // One WriteBatch with two entries → the batch spans two consecutive sequences.
+            using (var batch = store.NewBatch())
+            {
+                store.Set(batch, "k1"u8.ToArray(), "1"u8.ToArray());
+                store.Set(batch, "k2"u8.ToArray(), "2"u8.ToArray());
+                batch.Commit();
+            }
+            var last = store.Replication.Engine.GetLatestSequenceNumber();
+            last.Should().BeGreaterThan(before + 1, "a two-entry batch spans at least two sequences");
+
+            // Caught up: a pull AT the watermark is now EMPTY — before the fix the primary
+            // re-served the batch containing `last`, so the replica busy-looped (058 bug 1).
+            store.Replication.Pull(last, maxBytes: 1_000_000).Batches
+                .Should().BeEmpty("a caught-up replica's pull returns nothing, so it can idle (058 R2)");
+
+            // fromSeq inside the batch (its last-but-one sequence): the batch is still served,
+            // because it contains a sequence above fromSeq.
+            store.Replication.Pull(last - 1, maxBytes: 1_000_000).Batches
+                .Should().ContainSingle("the batch holds a sequence above fromSeq, so it is sent");
+
+            // fromSeq below the batch: the whole batch is above the watermark and is served.
+            store.Replication.Pull(before, maxBytes: 1_000_000).Batches
+                .Should().ContainSingle("the batch is wholly above the watermark");
+        }
+        finally
+        {
+            ReplicationToolkitSurfaceTests.TryDelete(dir);
+        }
+    }
+
+    [Fact]
+    public void Open_BlankReplica_UnreachablePrimary_WaitsAndHonoursCancellation_NoPartialDb()   // 058 R3 / R3.4
+    {
+        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+            var repl = new HighwayReplicationOptions
+            {
+                StartAsReplica = true,
+                ReplicaId = "r",
+                Priority = 100,
+                // Nothing listens on port 1; fail the connect fast so the retry/cancel path is exercised.
+                PrimaryServer = "127.0.0.1:1,connectTimeout=200,connectRetry=0,abortConnect=true",
+            };
+
+            Action act = () => RocksDbStore.Open(dir, replication: repl, cancellationToken: cts.Token);
+
+            // R3: a blank replica whose primary is down retries and exits cleanly on cancellation —
+            // it must NOT crash with a connection error (the production bug).
+            act.Should().Throw<OperationCanceledException>(
+                "an unreachable primary is waited on, not fatal, and the wait is cancellable");
+
+            // R3.4: a failed bootstrap leaves no database a later start could open.
+            File.Exists(Path.Combine(dir, "CURRENT")).Should().BeFalse(
+                "nothing partial is written into the data directory on a failed bootstrap");
+        }
+        finally
+        {
+            ReplicationToolkitSurfaceTests.TryDelete(dir);
+        }
+    }
+
     private static void Put(RocksDbStore store, string key, string value)
     {
         using var batch = store.NewBatch();

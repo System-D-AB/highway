@@ -34,7 +34,12 @@ internal sealed class HighwayBrokerService(
             lifetime.StopApplication();
         };
 
-        _server.Start();
+        // Pass the start token so a blank replica waiting for its primary (058 R3) can be shut down
+        // cleanly mid-wait; the RESP host's overload honours it, the interface default does not.
+        if (_server is RespHighwayServer resp)
+            resp.Start(cancellationToken);
+        else
+            _server.Start();
         _logger.LogInformation("Highway broker listening on {Endpoint}", _server.Endpoint);
         return Task.CompletedTask;
     }
