@@ -141,21 +141,54 @@ public class MembershipTests
     }
 
     [Fact]
-    public void Heartbeat_Liveness_RefreshesTimestamp_PreservesCatalog()
+    public void Heartbeat_Liveness_RefreshesTimestamp_WithoutRewritingTheRecord()   // 060
     {
         using var h = new CommandHarness();
         var t0 = 1_000_000_000_000L;
         SeedRegistration(h.Store, "node-1", t0, "orders");
+        var recordKey = HighwayKeyspace.Kv(HighwayNames.RegistrationNode("node-1"));
+
+        byte[] before;
+        using (var s0 = h.Store.Snapshot()) before = h.Store.Get(s0, recordKey)!;
 
         var t1 = t0 + 5_000_000_000L;
         var reply = h.Run(new HwHeartbeatCommand(), t1, "node-1");
         CommandHarness.AsText(reply).Should().Be("+OK\r\n");
 
         using var snap = h.Store.Snapshot();
-        var record = h.Store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationNode("node-1")));
-        NodeRegistration.Decode(record!, out var seen, out var catalog);
-        seen.Should().Be(t1, "liveness refreshes the timestamp");
-        Encoding.UTF8.GetString(catalog).Should().Contain("orders", "the catalog is preserved byte-for-byte");
+        var record = h.Store.Get(snap, recordKey)!;
+        record.Should().Equal(before,
+            "a beat must not rewrite the registration record — the catalogue is written once, at registration");
+        RegistrySupport.SeenTicks(h.Store, snap, "node-1", record)
+            .Should().Be(t1, "liveness refreshes the node's effective last-seen time");
+        h.Store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationSeen("node-1")))
+            .Should().HaveCount(8, "the beat writes only an 8-byte liveness key");
+    }
+
+    [Fact]
+    public void SeenTicks_RecordWithoutLivenessKey_FallsBackToTheHeader()   // 060 — records written before 060
+    {
+        using var h = new CommandHarness();
+        var t0 = 1_000_000_000_000L;
+        SeedRegistration(h.Store, "node-1", t0, "orders");   // header only, as a pre-060 broker left it
+
+        using var snap = h.Store.Snapshot();
+        var record = h.Store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationNode("node-1")))!;
+        RegistrySupport.SeenTicks(h.Store, snap, "node-1", record).Should().Be(t0);
+    }
+
+    [Fact]
+    public void Heartbeat_Departure_RemovesTheLivenessKey()   // 060 — no orphaned key after BYE
+    {
+        using var h = new CommandHarness();
+        var now = DateTime.UtcNow.Ticks;
+        h.Run(new HwHeartbeatCommand(), now, "node-1", Encoding.UTF8.GetString(BuildCatalog("orders")));
+        h.Run(new HwHeartbeatCommand(), now + 1, "node-1");
+
+        h.Run(new HwHeartbeatCommand(), now + 2, "node-1", "BYE");
+
+        using var snap = h.Store.Snapshot();
+        h.Store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationSeen("node-1"))).Should().BeNull();
     }
 
     [Fact]

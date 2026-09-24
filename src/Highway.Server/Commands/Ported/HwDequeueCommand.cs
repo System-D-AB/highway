@@ -153,7 +153,7 @@ internal sealed class HwDequeueCommand : HighwayCommand
             if (record is null || record.Length < NodeRegistration.HeaderSize)
                 continue; // not registered — leave it to the lease sweep
 
-            if (!NodeRegistration.IsStale(record, ctx.NowTicks, ctx.Options.NodeExpiry))
+            if (!NodeRegistration.IsStale(RegistrySupport.SeenTicks(store, snap, node, record), ctx.NowTicks, ctx.Options.NodeExpiry))
                 continue;
 
             // Order matters: recover the work before dropping the ownership record.

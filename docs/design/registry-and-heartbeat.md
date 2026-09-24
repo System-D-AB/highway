@@ -25,6 +25,13 @@ recurring beat, or departs — and departure has two distinct meanings that must
 - **`BYE PURGE`** — "I am never coming back." It retires the node's subscriber groups, destroying
   their queues, and reports the groups, messages and bytes removed.
 
+**The catalog travels once; a beat is 8 bytes.** A node's catalog cannot change while it runs, so the
+client sends it once at registration and every later beat is a bare `HW.HEARTBEAT <node>`. The server
+mirrors that: the catalog record is written once, and each beat refreshes a separate 8-byte liveness
+key (`hw:reg:seen:{node}`) — so a beat costs a tiny write on the primary and ships 8 bytes to each
+standby, regardless of catalog size (feature 060). The broker only asks for the catalog again
+(`+REGISTER`) if it has no record for the node — after a prune, or if the registry was lost.
+
 **Discovery and load balancing.** `HW.DISCOVER` returns the live nodes currently hosting a service,
 which is what lets RPC and queue work spread across competing consumers without any client-side
 routing table. `HW.STATS` exposes server, service, channel and recorder counters (and appends

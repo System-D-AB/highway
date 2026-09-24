@@ -144,7 +144,8 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
         {
             var record = StoreInspection.RegistrationRecord(store, snap, id);
             if (record is null) continue;
-            var dto = Observability.Catalogue.ReadNode(id, record, options.NodeExpiry);
+            var seen = Commands.Ported.RegistrySupport.SeenTicks(store, snap, id, record);   // 060
+            var dto = Observability.Catalogue.ReadNode(id, record, options.NodeExpiry, seen);
             // 048: attach the observed peer address (from CLIENT SETNAME), or leave null → "not connected".
             nodes.Add(observed is null ? dto : dto with { SeenFrom = observed.AddressOf(dto.Name) });
         }

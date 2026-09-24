@@ -151,12 +151,15 @@ internal static class Catalogue
     /// a record that cannot be parsed yields empty lists rather than being dropped, because a
     /// node with an unreadable catalog is a misconfiguration worth seeing (022 error handling).
     /// </summary>
-    public static NodeDto ReadNode(string nodeId, ReadOnlySpan<byte> record, TimeSpan expiry)
+    /// <param name="seenTicksOverride">The node's effective last-seen time when the caller has it (060:
+    /// the beat lives in its own key, so the record header alone is only the registration time).</param>
+    public static NodeDto ReadNode(string nodeId, ReadOnlySpan<byte> record, TimeSpan expiry, long? seenTicksOverride = null)
     {
         if (record.Length < NodeRegistration.HeaderSize)
             return new NodeDto(nodeId, TimeSpan.MaxValue, false, [], [], []);
 
-        NodeRegistration.Decode(record, out var seenTicks, out var catalog);
+        NodeRegistration.Decode(record, out var headerSeen, out var catalog);
+        var seenTicks = seenTicksOverride ?? headerSeen;
 
         var since = TimeSpan.FromTicks(Math.Max(0, DateTime.UtcNow.Ticks - seenTicks));
         var services = new List<string>();

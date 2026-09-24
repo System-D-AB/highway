@@ -476,6 +476,15 @@ public sealed class RocksDbStore : IHighwayStore
 
     internal void Commit(RocksDbBatch batch)
     {
+        // An empty batch changes nothing, so skip the write. Idle consumers poll with HW.QCLAIM /
+        // HW.DEQUEUE, and an empty claim still commits (promotion + sweep may stage nothing). A synced
+        // write of an empty batch still appends a WAL record and fsyncs — ~1 ms each — so an idle
+        // client polling a few dozen queues twice a second kept the primary's CPU and disk busy with
+        // no traffic at all (feature 059). Skipping it loses nothing: every write is synced, so there
+        // is no earlier unsynced write this one would have flushed.
+        if (batch.Overlay.Count == 0 && batch.RangeDeletes.Count == 0)
+            return;
+
         using var wb = new WriteBatch();
 
         // Physical range tombstones first (cheap bulk purge of already-committed keys).

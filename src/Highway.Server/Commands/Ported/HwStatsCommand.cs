@@ -175,7 +175,8 @@ internal sealed class HwStatsCommand : HighwayCommand
             var record = ctx.Store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationNode(node)));
             if (record is null || record.Length < NodeRegistration.HeaderSize) continue;
 
-            NodeRegistration.Decode(record, out var seen, out var catalog);
+            NodeRegistration.Decode(record, out _, out var catalog);
+            var seen = RegistrySupport.SeenTicks(ctx.Store, snap, node, record);   // 060: beat lives apart from the record
             if (NodeRegistration.IsStale(seen, ctx.NowTicks, ctx.Options.NodeExpiry)) continue;
 
             live++;

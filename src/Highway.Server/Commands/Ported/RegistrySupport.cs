@@ -86,11 +86,37 @@ internal static class RegistrySupport
     public static void RemoveNodeFromService(IHighwayStore store, IStoreBatch batch, string service, string nodeId)
         => SetRemove(store, batch, HighwayNames.ServiceNodes(service), nodeId);
 
-    /// <summary>Deletes a node's registration record and drops it from the registry node set.</summary>
+    /// <summary>Deletes a node's registration record, its liveness key, and drops it from the registry node set.</summary>
     public static void RemoveRegistration(IHighwayStore store, IStoreBatch batch, string nodeId)
     {
         store.Delete(batch, HighwayKeyspace.Kv(HighwayNames.RegistrationNode(nodeId)));
+        store.Delete(batch, HighwayKeyspace.Kv(HighwayNames.RegistrationSeen(nodeId)));
         SetRemove(store, batch, HighwayNames.RegistrationNodeList, nodeId);
+    }
+
+    /// <summary>
+    /// Stages a liveness beat (feature 060): 8 bytes under <c>reg:seen:{node}</c>. The registration
+    /// record — and the catalogue inside it — is not rewritten.
+    /// </summary>
+    public static void TouchSeen(IHighwayStore store, IStoreBatch batch, string nodeId, long nowTicks)
+    {
+        var value = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64BigEndian(value, nowTicks);
+        store.Set(batch, HighwayKeyspace.Kv(HighwayNames.RegistrationSeen(nodeId)), value);
+    }
+
+    /// <summary>
+    /// A node's effective last-seen time (feature 060): the newer of the registration record's header
+    /// (set when the node registered) and its liveness key (refreshed by every beat). Taking the newer of
+    /// the two keeps records written before 060 — header only, no liveness key — reading correctly.
+    /// </summary>
+    public static long SeenTicks(IHighwayStore store, IStoreSnapshot snap, string nodeId, ReadOnlySpan<byte> record)
+    {
+        NodeRegistration.Decode(record, out var seen, out _);
+        var beat = store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationSeen(nodeId)));
+        if (beat is { Length: 8 })
+            seen = Math.Max(seen, System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(beat));
+        return seen;
     }
 
     /// <summary>Removes a node from one service's discovery index set. Bounded and self-healing (006).</summary>

@@ -43,7 +43,7 @@ internal sealed class HwDiscoverCommand : HighwayCommand
             if (record is null || record.Length < NodeRegistration.HeaderSize)
                 continue; // pruned already, or index entry outlived its record
 
-            NodeRegistration.Decode(record, out var seen, out _);
+            var seen = RegistrySupport.SeenTicks(store, snap, node, record);   // 060: beat lives apart from the record
             if (NodeRegistration.IsStale(seen, ctx.NowTicks, ctx.Options.NodeExpiry))
                 continue;
 

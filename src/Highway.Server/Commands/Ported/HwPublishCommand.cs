@@ -191,8 +191,9 @@ internal sealed class HwPublishCommand : HighwayCommand
                     continue; // never registered — not evidence of death
 
                 anyRecord = true;
-                if (!NodeRegistration.IsStale(record, ctx.NowTicks, threshold)) allStale = false;
-                if (!NodeRegistration.IsStale(record, ctx.NowTicks, halfThreshold)) allPastHalf = false;
+                var seen = RegistrySupport.SeenTicks(store, snap, member, record);   // 060: beat lives apart from the record
+                if (!NodeRegistration.IsStale(seen, ctx.NowTicks, threshold)) allStale = false;
+                if (!NodeRegistration.IsStale(seen, ctx.NowTicks, halfThreshold)) allPastHalf = false;
             }
 
             if (anyRecord && allStale) dead.Add(group);

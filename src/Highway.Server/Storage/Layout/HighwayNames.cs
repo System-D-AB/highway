@@ -81,6 +81,13 @@ internal static class HighwayNames
     /// <summary>Node registration record (binary header + catalog). Garnet: <c>hw:reg:node:{node}</c>.</summary>
     public static string RegistrationNode(string nodeId) => $"reg:node:{nodeId}";
 
+    /// <summary>
+    /// A node's liveness timestamp (feature 060): 8 bytes, i64 BE ticks, refreshed by every
+    /// <c>HW.HEARTBEAT</c> beat. Kept apart from the registration record so a beat rewrites 8 bytes
+    /// instead of the whole catalogue (and ships 8 bytes, not the catalogue, to every standby).
+    /// </summary>
+    public static string RegistrationSeen(string nodeId) => $"reg:seen:{nodeId}";
+
     // --- Counters (family n) ---------------------------------------------------
 
     /// <summary>Per-channel message-ID sequence. Garnet: <c>Increment(hw:ch:{channel}:seq)</c>.</summary>

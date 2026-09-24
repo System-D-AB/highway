@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 4.11** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
+**Protocol version 4.12** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
 
 ## About
 
@@ -48,6 +48,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.12 | 059, 060 | **Idle write load.** Adds the key `hw:reg:seen:{nodeId}` (8-byte liveness timestamp). The `HW.HEARTBEAT` liveness form now writes only that key and **no longer rewrites** `hw:reg:node:{nodeId}` — the catalog is written once, at registration, instead of on every beat (and is no longer re-shipped to standbys per beat). Effective last-seen is the newer of the record header and the new key, so pre-4.12 records read correctly. Server-side: a commit that stages nothing (e.g. an empty `HW.QCLAIM`/`HW.DEQUEUE`) no longer issues a synced write. No command, argument or reply changes. Additive. |
 | 4.11 | 052 | **Readiness field.** The `HW.STATS` server form and `HW.REPL.STATUS` append `repl.ready` (bool) and `repl.readyReason` (`primary`/`replica`/`fenced`/`draining`/`bootstrapping`/`demoted`) — the same decision the new HTTP `GET /ready` endpoint serves, so readiness is legible on every channel. The health endpoints (`/health`, `/ready`, `/replication`) are HTTP, not RESP, and carry no wire command. Additive. |
 | 4.10 | 057 | **Message size.** The default `MaxPayloadBytes` is raised from 1 MiB to **5 MiB**, configurable up to a **15 MiB** ceiling (above which the server refuses at build). The `HW.STATS` server form appends a `maxPayloadBytes` field so a client learns the server's configured limit at connect and does not falsely reject below a raised server limit. Additive. |
 | 4.9 | 044 | **Broker-local cache.** Adds a third raw-key family, `hw:cache:*`, routed on the existing stock `GET`/`SET`/`DEL`/`UNLINK`/`SETEX`/`PSETEX`/`TTL`/`PTTL` — **no new `HW.*` command**. It is served **only when `server.cache.enabled`** (off by default); the family answers exactly as the idempotency family does on the wire, but is backed by a **separate, never-replicated** store (its own RocksDB at `dataDir/cache`, or in-memory on an ephemeral broker). A cache `SET` on a non-master is refused `-NOTPRIMARY` like any write; a cache `GET` on a non-master returns a miss (null). TTL comes from `PX`/`EX`, defaults to the broker's `defaultTtl` when absent, and is clamped to `maxTtl`. Additive and opt-in. |
@@ -507,7 +508,7 @@ Stores the catalog, rebuilds the node's entries in the discovery index, and refr
 |---|---|
 | **Arguments** | `nodeId` — identifier. `catalogJson` — up to `MaxCatalogBytes` (default 256 KiB). |
 | **Reply** | `+OK` |
-| **Keys written** | `hw:reg:node:{nodeId}`, `hw:reg:nodes`, `hw:reg:svc:{service}` per service |
+| **Keys written** | `hw:reg:node:{nodeId}`, `hw:reg:seen:{nodeId}`, `hw:reg:nodes`, `hw:reg:svc:{service}` per service |
 | **Idempotency** | **Idempotent.** Re-registering an unchanged catalog does not duplicate or grow state. |
 
 The catalog is stored **verbatim**. The server parses it only to derive service names for the index, and rejects an unparseable catalog with `HW_INVALID_ARG` — a catalog the server cannot read would leave the node permanently undiscoverable, so failing loudly is better than indexing nothing.
@@ -537,16 +538,16 @@ Re-registering a **changed** catalog removes index entries for services no longe
 HW.HEARTBEAT <nodeId>   →   +OK   |   +REGISTER
 ```
 
-Refreshes the timestamp and nothing else. This is the steady-state beat.
+Refreshes the node's liveness timestamp and nothing else. This is the steady-state beat.
 
 | | |
 |---|---|
 | **Arguments** | `nodeId` — identifier. |
 | **Reply** | `+OK` when refreshed. `+REGISTER` when the server holds no record for this node. |
-| **Keys** | Reads and writes only `hw:reg:node:{nodeId}` |
+| **Keys** | Reads `hw:reg:node:{nodeId}` (to answer `+REGISTER`); writes only `hw:reg:seen:{nodeId}` (8 bytes) |
 | **Idempotency** | Idempotent. |
 
-No catalog parse, no index write, and the stored catalog is preserved byte-for-byte. Cost is one small read and one small write, independent of catalog size.
+No catalog parse, no index write, and the registration record is **not rewritten** — the catalog is written once, at registration (4.12). Cost is one small read and one 8-byte write, independent of catalog size; a standby receives 8 bytes per beat, not the catalog. A node's effective last-seen time is the newer of the record header's timestamp and `hw:reg:seen:{nodeId}`, so a record written before 4.12 (header only) reads correctly.
 
 **`+REGISTER` is correctness, not politeness.** Pruning deletes a node's registration record *and* its index entries. A beat that simply recreated the timestamp would leave the node alive but **undiscoverable** — serving a queue nobody is told about, with nothing to surface the fault. Replying `+REGISTER` when the record is absent makes a wiped registry self-healing.
 
@@ -1304,7 +1305,8 @@ A subscriber group's queue, processing list, dead letters and delayed set all li
 
 | Key | Store | Type | Purpose |
 |---|---|---|---|
-| `hw:reg:node:{nodeId}` | Main | String | Registration record: last-seen timestamp + catalog |
+| `hw:reg:node:{nodeId}` | Main | String | Registration record: registration timestamp + catalog. Written at registration only |
+| `hw:reg:seen:{nodeId}` | Main | String | Liveness timestamp (i64 BE ticks), refreshed by every beat (4.12). Deleted with the record |
 | `hw:reg:nodes` | Main | String | Newline-delimited list of registered node IDs |
 | `hw:reg:svc:{service}` | Main | String | Newline-delimited node IDs hosting the service |
 | `hw:reg:node:{nodeId}:subs` | Main | String | Newline-delimited `{channel}@{group}` entries the node subscribes through (025) — the index `BYE PURGE` walks |
@@ -1352,7 +1354,7 @@ Timestamps are .NET UTC tick counts (100-nanosecond intervals since 0001-01-01).
 
 The processing variants are the queue entry with a timestamp inserted after the version byte — that timestamp is what the lease sweeps compare against.
 
-The registration record is framed in binary rather than JSON so the liveness form can rewrite the timestamp while leaving the catalog byte-for-byte untouched: with a fixed 8-byte header that is a copy of the tail, whereas a JSON envelope would mean parsing and re-emitting the catalog on every beat.
+The registration record is framed in binary rather than JSON: `[i64 BE timestamp][catalog]`. Since 4.12 the liveness form does not touch it at all — beats go to the separate 8-byte `hw:reg:seen:{nodeId}` key — so the catalog is written once per registration rather than once per beat, and is not re-shipped to standbys every few seconds. The header timestamp remains the registration time and the fallback for records written before 4.12.
 
 ---
 

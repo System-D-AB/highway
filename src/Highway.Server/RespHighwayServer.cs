@@ -22,7 +22,7 @@ namespace Highway.Server;
 /// <see cref="IBrokerState"/> so they read the engine directly rather than over a self-connection
 /// (the RESP server serves no raw <c>SCAN</c>/<c>GET</c>).</para>
 ///
-/// <para>The RESP server starts asynchronously; <see cref="Start"/> bridges that for the
+/// <para>The RESP server starts asynchronously; <see cref="Start()"/> bridges that for the
 /// synchronous host lifecycle, exactly as the test server does.</para>
 /// </summary>
 public sealed class RespHighwayServer : IHighwayServer

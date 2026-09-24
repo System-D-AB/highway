@@ -114,7 +114,10 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
             return;
         }
 
-        store.Set(batch, key, NodeRegistration.Touch(record, ctx.NowTicks));
+        // 060: a beat refreshes an 8-byte liveness key; the registration record (and its catalogue) is
+        // left untouched. Before this, every beat re-encoded and re-wrote the whole catalogue — a synced
+        // write, replicated to every standby — to change 8 bytes of it.
+        RegistrySupport.TouchSeen(store, batch, _nodeId, ctx.NowTicks);
         batch.Commit();
         writer.SimpleString("OK");
     }
@@ -140,6 +143,7 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
         }
 
         store.Set(batch, key, NodeRegistration.Encode(ctx.NowTicks, _catalog));
+        RegistrySupport.TouchSeen(store, batch, _nodeId, ctx.NowTicks);   // 060: liveness key agrees with the record
         RegistrySupport.SetAdd(store, batch, HighwayNames.RegistrationNodeList, _nodeId);
 
         foreach (var service in _catalogServices)

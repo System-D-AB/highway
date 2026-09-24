@@ -631,6 +631,34 @@ public class ReplicationFeederTests
         }
     }
 
+    [Fact]
+    public void Commit_OfAnEmptyBatch_WritesNothingToTheWal()   // 059 — idle polls must not fsync
+    {
+        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        try
+        {
+            using var store = RocksDbStore.Open(dir);
+            Put(store, "seed", "1");   // a non-empty WAL, so growth is measurable
+            long WalBytes() => Directory.GetFiles(dir, "*.log").Sum(f => new FileInfo(f).Length);
+
+            var walBefore = WalBytes();
+            var seqBefore = store.Replication.Engine.GetLatestSequenceNumber();
+
+            for (var i = 0; i < 200; i++)
+            {
+                using var batch = store.NewBatch();
+                batch.Commit();   // what an empty HW.QCLAIM / HW.DEQUEUE does on every idle poll
+            }
+
+            WalBytes().Should().Be(walBefore, "an empty batch changes nothing, so it must not append (and fsync) a WAL record");
+            store.Replication.Engine.GetLatestSequenceNumber().Should().Be(seqBefore);
+        }
+        finally
+        {
+            ReplicationToolkitSurfaceTests.TryDelete(dir);
+        }
+    }
+
     private static void Put(RocksDbStore store, string key, string value)
     {
         using var batch = store.NewBatch();
