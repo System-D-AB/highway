@@ -93,14 +93,45 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
         _opts.Authentication.Password = $"test-{Guid.NewGuid():N}";
 
         configure?.Invoke(_opts);
-        _opts.Port = Port;    // the delegate cannot change the probed port
-        _opts.Replication.AdvertiseEndpoint ??= $"127.0.0.1:{Port}";
+        var advertiseOwnPort = _opts.Replication.AdvertiseEndpoint is null;
 
-        (_server, _store, _puller) = StartServer(_opts, reuseStore: null);
+        // The probed port can be taken by another process between the probe and the bind (the probe
+        // must release it for the server to bind it). Retry the whole start on a fresh port — retrying
+        // only the probe, as EphemeralPort does, cannot cover that window (063).
+        for (var attempt = 1; ; attempt++)
+        {
+            _opts.Port = Port;    // the delegate cannot change the probed port
+            if (advertiseOwnPort) _opts.Replication.AdvertiseEndpoint = $"127.0.0.1:{Port}";
+            try
+            {
+                (_server, _store, _puller) = StartServer(_opts, reuseStore: null);
+                break;
+            }
+            catch (Exception e) when (attempt < MaxStartAttempts && IsAddressInUse(e))
+            {
+                Port = Internal.EphemeralPort.Probe();
+            }
+        }
 
+        // The address the server actually binds (IPv4 loopback), not "localhost": on a host where
+        // localhost resolves to ::1 first, every connect paid a ~2 s failed IPv6 attempt before falling
+        // back, and under thread-pool load the fallback timed out (063).
         ConnectionString = _opts.Authentication.IsConfigured
-            ? $"localhost:{Port},password={_opts.Authentication.Password}"
-            : $"localhost:{Port}";
+            ? $"127.0.0.1:{Port},password={_opts.Authentication.Password}"
+            : $"127.0.0.1:{Port}";
+    }
+
+    private const int MaxStartAttempts = 5;
+
+    private static bool IsAddressInUse(Exception e)
+    {
+        for (var x = e; x is not null; x = x.InnerException)
+        {
+            if (x is System.Net.Sockets.SocketException { SocketErrorCode: System.Net.Sockets.SocketError.AddressAlreadyInUse }
+                || x.GetType().Name == "AddressInUseException")
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -151,12 +182,23 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
                 .LoadPkcs12FromFile(certFile, opts.Tls.CertPassword);
         }
 
-        var server = RespServer
-            .StartAsync(
-                store, opts, authenticator, opts.BindAddress, opts.Port,
-                serverCertificate: cert,
-                clientCertificateRequired: opts.Tls.ClientCertificateRequired)
-            .GetAwaiter().GetResult();
+        RespServer server;
+        try
+        {
+            server = RespServer
+                .StartAsync(
+                    store, opts, authenticator, opts.BindAddress, opts.Port,
+                    serverCertificate: cert,
+                    clientCertificateRequired: opts.Tls.ClientCertificateRequired)
+                .GetAwaiter().GetResult();
+        }
+        catch when (reuseStore is null)
+        {
+            // A store opened here must not outlive a failed start: a durable one holds its
+            // directory's LOCK, which would fail the retry on a fresh port.
+            (store as IDisposable)?.Dispose();
+            throw;
+        }
 
         ReplicaPuller? puller = null;
         if (store is Storage.Rocks.RocksDbStore rocks &&

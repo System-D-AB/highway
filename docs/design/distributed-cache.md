@@ -64,3 +64,7 @@ routing, TTL handling and non-master behaviour are in
   size cap it clears wholesale (no per-key LRU in v1).
 - **Best-effort** (C10.4): a miss — including mid-failover — costs one trip to the system of record;
   it is never data loss.
+- **`HybridCache` writes L2 in the background.** `GetOrCreateAsync` returns the value *before* its L2
+  write reaches Highway (Microsoft.Extensions.Caching.Hybrid's design), so an immediate L2-only read
+  from another caller — or the same one with the local cache disabled — can still miss and run its
+  factory once more. The L2 is eventually warm, not read-your-write.

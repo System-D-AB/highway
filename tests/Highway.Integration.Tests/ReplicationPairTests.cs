@@ -81,8 +81,12 @@ public class ReplicationPairTests : IDisposable
         using var redis = ConnectionMultiplexer.Connect(primary.ConnectionString);
         redis.GetDatabase().Execute("HW.QSEND", "repl.notes", "m-ack", "payload");
 
+        // Caught up with EVERYTHING the primary holds — not merely "applied something": the replica's
+        // own HELLO/JOIN writes replicate first, so "> 0" could pass before the QSEND batch arrived.
+        // That race was hidden while every test connect paid a ~2 s failed IPv6 attempt (063).
+        var primaryLatest = primary.Replication!.Engine.GetLatestSequenceNumber();
         await WaitForAsync(() =>
-            replica.Replication is { } f && f.Engine.GetLatestSequenceNumber() > 0);
+            replica.Replication is { } f && f.Engine.GetLatestSequenceNumber() >= primaryLatest);
 
         replica.Replication!.IsWritable.Should().BeFalse();
         var qsendOnReplica = () =>

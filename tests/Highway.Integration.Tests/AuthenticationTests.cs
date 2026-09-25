@@ -32,7 +32,7 @@ public class AuthenticationTests : IDisposable
     /// The bare endpoint, without the password <c>HighwayTestServer.ConnectionString</c>
     /// now carries by default (feature 012 T11).
     /// </summary>
-    private string EndpointOnly => $"localhost:{_server.Port}";
+    private string EndpointOnly => $"127.0.0.1:{_server.Port}";
 
     [Fact]
     public async Task NoCredentials_AreRefused_Legibly()

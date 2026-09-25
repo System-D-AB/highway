@@ -126,6 +126,17 @@ public class CacheAdapterTests
         first.Should().Be("from-source");
         factoryRuns.Should().Be(1, "the first miss runs the factory and writes L2");
 
+        // HybridCache releases the caller BEFORE it writes L2 (the write is background by design), so the
+        // entry may not be in Highway yet. Wait until it is — otherwise the second call can race it to the
+        // broker, miss, and re-run the factory. Order-dependent under thread-pool load (063).
+        var l2 = provider.GetRequiredService<IDistributedCache>();
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (await l2.GetAsync(key) is null)
+        {
+            DateTime.UtcNow.Should().BeBefore(deadline, "HybridCache writes L2 in the background after returning");
+            await Task.Delay(10);
+        }
+
         var second = await hybrid.GetOrCreateAsync(key,
             _ => { Interlocked.Increment(ref factoryRuns); return ValueTask.FromResult("SHOULD-NOT-RUN"); },
             l2Only);

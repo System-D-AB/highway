@@ -62,7 +62,7 @@ public class TestServerTests
 
         // The connection string also carries the generated password since feature 012, so
         // assert the endpoint rather than the whole string.
-        server.ConnectionString.Should().StartWith($"localhost:{server.Port}");
+        server.ConnectionString.Should().StartWith($"127.0.0.1:{server.Port}");
 
         // The connection string still works — the probed port is the live one
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
