@@ -22,6 +22,15 @@ and both ways out — rather than degrading to memory silently.
 Highway originally ran on Garnet's append-only log; the engine was replaced by the current
 log-structured store, and the change fixed a structural problem rather than tuning one (below).
 
+**The engine is RocksDB 11.8.1** through the `RocksDB` NuGet binding (RocksDbSharp) 11.8.1.5032 —
+the version the sibling Crystal store runs (feature 064; 2.5.x shipped 11.1.2). Both versions write
+SST `format_version` 7 and open each other's data directories, and their WAL batch bytes are identical,
+so a replica pair can briefly run one of each and a node can be rolled back across the bump. Highway
+keeps the engine's on-disk defaults so that stays true; raising the SST format or enabling
+version-specific on-disk features would end it. The few engine settings the binding does not wrap
+(the compact-on-deletion collector, the memtable scan-flush trigger) are set through its native entry
+points.
+
 ## How it works
 
 **Writes are durable at commit.** A queue send, an `HW.ACK`, a claim — each commits to the engine's

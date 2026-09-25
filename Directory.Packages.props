@@ -23,9 +23,10 @@
 
 
     <!-- RocksDB (feature 037/038): the Curiosity/Warren Falk RocksDbSharp binding.
-         Pinned to 11.1.2.3412 — the exact version the sibling stow-rocksdb bake-off
-         (spec v2-001-engine-bakeoff) measured and chose. -->
-    <PackageVersion Include="RocksDB" Version="11.1.2.3412" />
+         11.8.1.5032 since feature 064 (was 11.1.2.3412, the stow-rocksdb bake-off pick) — the
+         version Crystal runs. Verified: same wrapped surface, 11.1 <-> 11.8 open each other's data
+         (SST format_version 7 both), identical WAL batch bytes. A bump must re-run 042 T2v. -->
+    <PackageVersion Include="RocksDB" Version="11.8.1.5032" />
     <PackageVersion Include="Serilog.Extensions.Hosting" Version="9.0.0" />
     <PackageVersion Include="Serilog.Sinks.File" Version="7.0.0" />
     <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />

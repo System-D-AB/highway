@@ -8,7 +8,7 @@ using Xunit;
 namespace Highway.Server.Tests.Storage;
 
 /// <summary>
-/// 042 T2v.1 — re-assert the pinned <c>RocksDB 11.1.2.3412</c> replication toolkit so a
+/// 042 T2v.1 — re-assert the pinned <c>RocksDB 11.8.1.5032</c> replication toolkit (064; was 11.1.2.3412) so a
 /// package bump cannot silently drop the surface the feeder/applier/snapshot adapters wrap.
 /// Compile-time references are the real guard; the reflection checks name the members the
 /// 2026-08-29 addendum listed.
@@ -16,7 +16,7 @@ namespace Highway.Server.Tests.Storage;
 public class ReplicationToolkitSurfaceTests
 {
     [Fact]
-    public void PinnedAssembly_IsCuriosityRocksDbSharp_11_1_2_3412()
+    public void PinnedAssembly_IsCuriosityRocksDbSharp_11_8_1_5032()
     {
         var assembly = typeof(ReplicationSource).Assembly;
         var name = assembly.GetName();
@@ -24,8 +24,8 @@ public class ReplicationToolkitSurfaceTests
 
         var info = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                    ?? name.Version?.ToString();
-        info.Should().StartWith("11.1.2",
-            "Directory.Packages.props pins RocksDB 11.1.2.3412; a bump must re-run T2v");
+        info.Should().StartWith("11.8.1",
+            "Directory.Packages.props pins RocksDB 11.8.1.5032; a bump must re-run T2v");
     }
 
     [Fact]

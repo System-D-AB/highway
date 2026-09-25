@@ -10,7 +10,7 @@ namespace Highway.Server.Storage.Rocks;
 /// broker database may never come. Queue pops, acks and lease sweeps are exactly such ranges.
 ///
 /// <para><b>Not wrapped by the binding.</b> Verified against the assembly for the <c>RocksDB</c> package
-/// 11.1.2.3412 (and 11.8.1.5032): <c>ColumnFamilyOptions</c> has no method for it, but the public
+/// 11.8.1.5032 (and the earlier 11.1.2.3412): <c>ColumnFamilyOptions</c> has no method for it, but the public
 /// <c>Native</c> class declares <c>rocksdb_options_add_compact_on_deletion_collector_factory</c> and its
 /// <c>_del_ratio</c> / <c>_min_file_size</c> variants. This calls the C entry point directly — the same
 /// pattern as Crystal's <c>NativeApproximateSizes</c>. Recorded as a finding, not a fork.</para>
