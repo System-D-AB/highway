@@ -59,6 +59,9 @@ internal sealed class CommandContext
     /// </summary>
     public SweepThrottle? Sweeps { get; }
 
+    /// <summary>The box runtime (065). A context built without one (unit tests) gets a private one: always correct, never cached.</summary>
+    public Storage.Boxes.BoxRuntime Boxes { get; }
+
     public CommandContext(
         IHighwayStore store,
         StripedLock locks,
@@ -68,7 +71,8 @@ internal sealed class CommandContext
         long nowTicks,
         ReplicationFeeder? replication = null,
         HighwayMetrics? metrics = null,
-        SweepThrottle? sweeps = null)
+        SweepThrottle? sweeps = null,
+        Storage.Boxes.BoxRuntime? boxes = null)
     {
         Store = store;
         Locks = locks;
@@ -79,5 +83,6 @@ internal sealed class CommandContext
         Replication = replication;
         Metrics = metrics;
         Sweeps = sweeps;
+        Boxes = boxes ?? new Storage.Boxes.BoxRuntime();
     }
 }

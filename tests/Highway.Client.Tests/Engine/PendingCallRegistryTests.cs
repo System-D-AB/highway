@@ -28,7 +28,7 @@ public class PendingCallRegistryTests
     [Fact]
     public async Task TryCompleteFromSlot_WithReply_CompletesWithTypedResponse()
     {
-        _connection.GetReplySlotAsync("r1", Arg.Any<CancellationToken>())
+        _connection.TakeReplyAsync("r1", Arg.Any<CancellationToken>())
             .Returns(ReplyEnvelope("hello"));
 
         var task = _registry.Register("r1", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
@@ -41,15 +41,16 @@ public class PendingCallRegistryTests
     }
 
     [Fact]
-    public async Task TryCompleteFromSlot_AfterCompleting_DeletesTheSlot()
+    public async Task TryCompleteFromSlot_TakesTheReply_InOneCommand()
     {
-        _connection.GetReplySlotAsync("r1", Arg.Any<CancellationToken>()).Returns(ReplyEnvelope("x"));
+        _connection.TakeReplyAsync("r1", Arg.Any<CancellationToken>()).Returns(ReplyEnvelope("x"));
 
         var task = _registry.Register("r1", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
         await _registry.TryCompleteFromSlotAsync("r1");
         await task;
 
-        await _connection.Received(1).DeleteReplySlotAsync("r1", Arg.Any<CancellationToken>());
+        // 5.0: HW.RESULT reads and removes in one command — there is no separate delete to issue.
+        await _connection.Received(1).TakeReplyAsync("r1", Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -63,14 +64,13 @@ public class PendingCallRegistryTests
     {
         await _registry.TryCompleteFromSlotAsync("someone-elses-request");
 
-        await _connection.DidNotReceive().GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
-        await _connection.DidNotReceive().DeleteReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _connection.DidNotReceive().TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task TryCompleteFromSlot_SlotNotYetWritten_LeavesCallPendingForTheSweep()
     {
-        _connection.GetReplySlotAsync("r1", Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync("r1", Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         var task = _registry.Register("r1", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
         await _registry.TryCompleteFromSlotAsync("r1");
@@ -105,7 +105,7 @@ public class PendingCallRegistryTests
     [Fact]
     public async Task TryCompleteFromSlot_AfterTimeout_CleansTheSlotWithoutThrowing()
     {
-        _connection.GetReplySlotAsync("r1", Arg.Any<CancellationToken>()).Returns(ReplyEnvelope("late"));
+        _connection.TakeReplyAsync("r1", Arg.Any<CancellationToken>()).Returns(ReplyEnvelope("late"));
 
         var task = _registry.Register("r1", typeof(TestResponse), TimeSpan.FromMilliseconds(50), CancellationToken.None);
         (await task).StatusCode.Should().Be(StatusCodes.Status504GatewayTimeout);
@@ -118,7 +118,7 @@ public class PendingCallRegistryTests
     [Fact]
     public async Task TryCompleteFromSlot_MalformedEnvelope_CompletesWith502Data()
     {
-        _connection.GetReplySlotAsync("r1", Arg.Any<CancellationToken>()).Returns("not json"u8.ToArray());
+        _connection.TakeReplyAsync("r1", Arg.Any<CancellationToken>()).Returns("not json"u8.ToArray());
 
         var task = _registry.Register("r1", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
         await _registry.TryCompleteFromSlotAsync("r1");
@@ -131,7 +131,7 @@ public class PendingCallRegistryTests
     [Fact]
     public async Task TryCompleteFromSlot_TransportFailure_LeavesCallPending()
     {
-        _connection.GetReplySlotAsync("r1", Arg.Any<CancellationToken>())
+        _connection.TakeReplyAsync("r1", Arg.Any<CancellationToken>())
             .Returns<byte[]?>(_ => throw new HighwayTransportException("boom"));
 
         var task = _registry.Register("r1", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
@@ -169,24 +169,24 @@ public class PendingCallRegistryTests
     [Fact]
     public async Task Sweep_OnlyReadsSlotsOlderThanTheGraceWindow()
     {
-        _connection.GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
         _ = _registry.Register("fresh", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
 
         await _registry.SweepAsync(TimeSpan.FromMinutes(1));
 
-        await _connection.DidNotReceive().GetReplySlotAsync("fresh", Arg.Any<CancellationToken>());
+        await _connection.DidNotReceive().TakeReplyAsync("fresh", Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task Sweep_AgedCall_ReadsTheSlot()
     {
-        _connection.GetReplySlotAsync("aged", Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync("aged", Arg.Any<CancellationToken>()).Returns((byte[]?)null);
         _ = _registry.Register("aged", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
 
         await Task.Delay(60);
         await _registry.SweepAsync(TimeSpan.FromMilliseconds(20));
 
-        await _connection.Received().GetReplySlotAsync("aged", Arg.Any<CancellationToken>());
+        await _connection.Received().TakeReplyAsync("aged", Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public class PendingCallRegistryTests
     {
         await _registry.SweepAsync(TimeSpan.Zero);
 
-        await _connection.DidNotReceive().GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _connection.DidNotReceive().TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -204,7 +204,7 @@ public class PendingCallRegistryTests
         for (var i = 0; i < count; i++)
         {
             var id = $"r{i}";
-            _connection.GetReplySlotAsync(id, Arg.Any<CancellationToken>()).Returns(ReplyEnvelope($"v{i}"));
+            _connection.TakeReplyAsync(id, Arg.Any<CancellationToken>()).Returns(ReplyEnvelope($"v{i}"));
         }
 
         var tasks = Enumerable.Range(0, count)

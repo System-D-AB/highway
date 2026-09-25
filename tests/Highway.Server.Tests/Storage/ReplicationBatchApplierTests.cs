@@ -51,6 +51,83 @@ public class ReplicationBatchApplierTests
         }
     }
 
+    /// <summary>
+    /// 066 C2: a page of many commits is applied with one synced write, and the replica ends at the
+    /// primary's sequence holding the same bytes, page after page.
+    /// </summary>
+    [Fact]
+    public void ApplyPage_ContiguousPage_IsOneSyncedWrite_AndKeepsTheSequenceAligned()
+    {
+        var primaryDir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var replicaDir = ReplicationToolkitSurfaceTests.NewTempDir();
+        try
+        {
+            using var primary = RocksDbStore.Open(primaryDir);
+            using var replicaStore = RocksDbStore.Open(replicaDir);
+            var applier = new BatchApplier(replicaStore.Replication.Engine);
+
+            void Commits(int from, int to)
+            {
+                for (var i = from; i < to; i++)
+                {
+                    using var batch = primary.NewBatch();
+                    primary.Set(batch, Encoding.UTF8.GetBytes($"key-{i:D3}"), Encoding.UTF8.GetBytes($"v{i}"));
+                    if (i % 3 == 0) primary.Delete(batch, Encoding.UTF8.GetBytes($"key-{i - 1:D3}"));
+                    if (i % 7 == 0) primary.DeleteRange(batch, Encoding.UTF8.GetBytes($"key-{i - 2:D3}"));
+                    batch.Commit();
+                }
+            }
+
+            // Written before the first pull, so served from the WAL: one chunk, already one batch.
+            Commits(1, 40);
+            var page = primary.Replication.Pull(0, 1_000_000);
+            var first = applier.ApplyPage(page.Epoch, page.Batches);
+            first.Applied.Should().Be(page.Batches.Count);
+            applier.SyncedWrites.Should().Be(1, "the whole page is one write");
+            applier.Watermark.Should().Be(primary.Replication.Engine.GetLatestSequenceNumber());
+
+            // Written after it, so served from the in-memory tail one commit per batch: concatenated.
+            Commits(40, 80);
+            var next = primary.Replication.Pull(applier.Watermark, 1_000_000);
+            next.Batches.Count.Should().BeGreaterThan(1, "the tail serves each commit as its own batch");
+            applier.ApplyPage(next.Epoch, next.Batches);
+            applier.SyncedWrites.Should().Be(2, "still one write for the whole page");
+            applier.Watermark.Should().Be(primary.Replication.Engine.GetLatestSequenceNumber());
+
+            using var ps = primary.Snapshot();
+            using var rs = replicaStore.Snapshot();
+            for (var i = 0; i < 80; i++)
+            {
+                var key = Encoding.UTF8.GetBytes($"key-{i:D3}");
+                replicaStore.Get(rs, key).Should().Equal(primary.Get(ps, key), $"key-{i:D3}");
+            }
+        }
+        finally
+        {
+            ReplicationToolkitSurfaceTests.TryDelete(primaryDir);
+            ReplicationToolkitSurfaceTests.TryDelete(replicaDir);
+        }
+    }
+
+    [Fact]
+    public void TryConcat_RefusesANonContiguousRun()
+    {
+        static byte[] Batch(ulong seq, uint count)
+        {
+            var b = new byte[12];
+            BinaryPrimitives.WriteUInt64LittleEndian(b, seq);
+            BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(8), count);
+            return b;
+        }
+
+        BatchApplier.TryConcat([Batch(10, 2), Batch(12, 3)], out var merged).Should().BeTrue();
+        BinaryPrimitives.ReadUInt64LittleEndian(merged).Should().Be(10);
+        BinaryPrimitives.ReadUInt32LittleEndian(merged.AsSpan(8)).Should().Be(5);
+
+        BatchApplier.TryConcat([Batch(10, 2), Batch(13, 1)], out _).Should().BeFalse("a gap");
+        BatchApplier.TryConcat([Batch(10, 2), Batch(11, 1)], out _).Should().BeFalse("an overlap");
+    }
+
     [Fact]
     public void ApplyPage_RePull_IsIdempotent()
     {

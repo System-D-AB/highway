@@ -72,6 +72,7 @@ internal sealed class ReplicaPuller : IAsyncDisposable
     private readonly Task _loop;
     private readonly string _dataDir;
     private readonly ILogger? _logger;   // 047: optional log sink (null in tests)
+    private bool _formatRefused;          // 065: log a format-mismatched primary once, not every retry
 
     public ReplicaPuller(RocksDbStore store, HighwayReplicationOptions options, ILogger? logger = null)
     {
@@ -81,6 +82,18 @@ internal sealed class ReplicaPuller : IAsyncDisposable
         _dataDir = store.DataDir;
         _applier = new BatchApplier(store.Replication.Engine, store.Replication.Epoch);
         _loop = Task.Run(() => RunAsync(_cts.Token));
+    }
+
+    /// <summary>
+    /// 065: the primary's storage format as its <c>HW.REPL.HELLO</c> reply states it, when it is not
+    /// this build's — or null when they match. A 2.x primary answers <c>[epoch, minSeq]</c> (no format).
+    /// </summary>
+    internal static string? PrimaryFormatMismatch(RedisResult[] hello)
+    {
+        if (hello.Length < 3)
+            return "3 (Highway 2.x)";
+        var theirs = (long)hello[2];
+        return theirs == HighwayServerBuilder.StorageFormatVersion ? null : theirs.ToString(CultureInfo.InvariantCulture);
     }
 
     /// <summary>True once a WAL gap forced this replica into resync-required state (G4).</summary>
@@ -230,7 +243,28 @@ internal sealed class ReplicaPuller : IAsyncDisposable
         {
             var hello = (RedisResult[])(await db.ExecuteAsync("HW.REPL.HELLO", id,
                 _applier.Watermark.ToString(CultureInfo.InvariantCulture),
-                feeder.Epoch.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false))!;
+                feeder.Epoch.ToString(CultureInfo.InvariantCulture),
+                "FORMAT", HighwayServerBuilder.StorageFormatVersion.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false))!;
+
+            // 065: a 3.0 primary echoes its storage format; a 2.x primary ignores FORMAT and answers
+            // [epoch, minSeq]. Its batches are format 3 — applying them would corrupt this store — so
+            // refuse loudly and stay a warm, empty-handed replica until the primary is upgraded.
+            if (PrimaryFormatMismatch(hello) is { } theirs)
+            {
+                if (!_formatRefused)
+                {
+                    _formatRefused = true;
+                    var detail = $"primary {ReplicationFeeder.HostOf(_options.PrimaryServer)} stores format {theirs}; " +
+                                 $"this node stores format {HighwayServerBuilder.StorageFormatVersion}. Not replicating: " +
+                                 "a replica must run the same major version as its primary.";
+                    _logger?.LogError("[replication] {Detail}", detail);
+                    feeder.NoteJoinRefused(detail);
+                }
+                await Task.Delay(5_000, ct).ConfigureAwait(false);
+                return;
+            }
+            _formatRefused = false;
+
             var primaryEpoch = (ulong)(long)hello[0];
             if (primaryEpoch > feeder.Epoch)
             {

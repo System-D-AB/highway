@@ -22,7 +22,7 @@ internal static class ExpiryFraming
     private const int HeaderLen = 1 + 8; // marker + ticks
 
     /// <summary>The KV family prefix (<c>k</c>) a sweep scans for expiring keys.</summary>
-    public static readonly byte[] KvFamilyPrefix = [(byte)'k'];
+    public static readonly byte[] KvFamilyPrefix = [0, 0, 0, 0, 0x10, (byte)'k'];   // 065: under the system box
 
     /// <summary>Wraps a value with its absolute expiry.</summary>
     public static byte[] Wrap(byte[] value, long expiresAtTicks)

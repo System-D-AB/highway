@@ -46,13 +46,12 @@ public class RespServerHandshakeTests
         mux.IsConnected.Should().BeTrue("the pinned SE.Redis client must complete its handshake against our server");
 
         var db = mux.GetDatabase();
-        var reply = await db.ExecuteAsync("HW.QSEND", "invoices", "m1", "the-body");
+        var reply = await db.ExecuteAsync("HW.SEND", "invoices", "m1", "the-body");
         reply.ToString().Should().Be("OK");
 
         // The command really ran against the store.
         using var snap = server.Store.Snapshot();
-        server.Store.ListLength(snap, Highway.Server.Storage.Layout.HighwayKeyspace.ListPrefix(
-            Highway.Server.Storage.Layout.HighwayNames.Queue("invoices"))).Should().Be(1);
+        new StoreInspector(server.Store).ListLength("hw:q:invoices:q").Should().Be(1);
     }
 
     [Fact]
@@ -62,13 +61,16 @@ public class RespServerHandshakeTests
         using var mux = await ConnectionMultiplexer.ConnectAsync(ClientConfig(server.Port));
         var db = mux.GetDatabase();
 
-        await db.ExecuteAsync("HW.QSEND", "orders", "m-7", "payload-7");
-        var claim = await db.ExecuteAsync("HW.QCLAIM", "orders", "worker-1");
+        await db.ExecuteAsync("HW.SEND", "orders", "m-7", "payload-7");
+        var claim = await db.ExecuteAsync("HW.CLAIM", "Q", "orders", "worker-1");
 
-        var arr = (RedisResult[])claim!;
-        arr.Should().HaveCount(2);
-        arr[0].ToString().Should().Be("m-7");
-        arr[1].ToString().Should().Be("payload-7");
+        var rows = (RedisResult[])claim!;
+        rows.Should().HaveCount(1);
+        var row = (RedisResult[])rows[0]!;
+        row.Should().HaveCount(3, "a claim row is [token, id, payload] (5.0)");
+        row[1].ToString().Should().Be("m-7");
+        row[2].ToString().Should().Be("payload-7");
+        (await db.ExecuteAsync("HW.ACK", row[0].ToString())).ToString().Should().Be("1");
     }
 
     [Fact]
@@ -78,8 +80,8 @@ public class RespServerHandshakeTests
         using var mux = await ConnectionMultiplexer.ConnectAsync(ClientConfig(server.Port));
         var db = mux.GetDatabase();
 
-        var claim = await db.ExecuteAsync("HW.QCLAIM", "empty-queue", "worker-1");
-        claim.IsNull.Should().BeTrue("an empty claim is the RESP null array");
+        var claim = await db.ExecuteAsync("HW.CLAIM", "Q", "empty-queue", "worker-1");
+        ((RedisResult[])claim!).Should().BeEmpty("nothing due is an empty array (5.0; was the null array)");
     }
 
     [Fact]
@@ -123,12 +125,11 @@ public class RespServerHandshakeTests
         using var mux = await ConnectionMultiplexer.ConnectAsync(ClientConfig(server.Port));
         var db = mux.GetDatabase();
 
-        var t1 = db.ExecuteAsync("HW.QSEND", "q", "a", "1");
-        var t2 = db.ExecuteAsync("HW.QSEND", "q", "b", "2");
+        var t1 = db.ExecuteAsync("HW.SEND", "q", "a", "1");
+        var t2 = db.ExecuteAsync("HW.SEND", "q", "b", "2");
         await Task.WhenAll(t1, t2);
 
         using var snap = server.Store.Snapshot();
-        server.Store.ListLength(snap, Highway.Server.Storage.Layout.HighwayKeyspace.ListPrefix(
-            Highway.Server.Storage.Layout.HighwayNames.Queue("q"))).Should().Be(2);
+        new StoreInspector(server.Store).ListLength("hw:q:q:q").Should().Be(2);
     }
 }

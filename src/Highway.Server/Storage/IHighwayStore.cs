@@ -103,6 +103,23 @@ public interface IHighwayStore : IDisposable
     IStoreBatch NewBatch();
 
     // =========================================================================
+    // ORDERED PRIMITIVES (065) — what the box layout is built on. A point read and a bounded,
+    // ordered range read, both read-your-own-writes through the batch. Everything else here is the
+    // pre-065 family API, retired as commands move onto boxes.
+    // =========================================================================
+
+    /// <summary>The value of <paramref name="key"/> as <paramref name="batch"/> sees it (staged first), or null.</summary>
+    byte[]? Read(IStoreBatch batch, byte[] key);
+
+    /// <summary>
+    /// Live entries whose key starts with <paramref name="prefix"/> and is <c>&gt;=</c>
+    /// <paramref name="from"/>, in key order, at most <paramref name="limit"/> — staged writes merged
+    /// over committed ones. The scan never leaves <paramref name="prefix"/>'s range and starts at
+    /// <paramref name="from"/>, so it never steps over deleted keys below it.
+    /// </summary>
+    IReadOnlyList<(byte[] Key, byte[] Value)> Scan(IStoreBatch batch, byte[] prefix, byte[] from, int limit);
+
+    // =========================================================================
     // FAMILY 1 — KV
     //   reply slot (SETEX), channel seq (Increment), registration record,
     //   mirror lists (now plain sets — see the class remarks), byte counters.

@@ -150,7 +150,7 @@ suppressed for one replica is suppressed for its siblings too.
 
 **Status: Met.**
 
-A message leaves a group's queue when that group acknowledges it via `HW.QACK`. Storage tracks
+A message leaves a group's queue when that group acknowledges its claim token via `HW.ACK`. Storage tracks
 **undelivered** work, which in a healthy system is near zero.
 
 ### C2.3 — A subscriber that is down receives what it missed, **until its node is declared gone**
@@ -197,6 +197,18 @@ no dependence on subscription timing.
 A subscriber joining an active channel does not receive prior traffic. Highway does not
 retain delivered messages or track consumer offsets. If you need history, you need a log, and
 Highway is not one.
+
+### C2.6 — A node's subscriptions and jobs follow it to whichever broker serves it
+
+**Status: Met** — features 067/068 (3.0).
+
+**Before (2.x):** a node's group memberships and job schedules were registered once, at startup. A
+broker that had not seen that registration (a standby promoted inside the replication lag window, or a
+node with a fresh data directory) served the node without them, and publishes to its groups reached
+nobody until the client restarted. **Now:** a node declares its whole session — catalog, subscriptions,
+jobs — in one `HW.SESSION`. A heartbeat to a broker that does not know the node answers `+SESSION`,
+and the client re-declares, single-flight, both then and after every failover it follows. Queue
+doorbells are tracked and re-subscribed after a failover as well, so idle workers keep waking.
 
 ---
 
@@ -468,7 +480,7 @@ distinction — but a point-in-time measurement is an upper bound, not the live-
 > is the same, the reclamation mechanism (compaction vs. never, on Garnet) is what differs — and that
 > difference is what moved C4.6 from unmet to met.
 
-### C4.9 — Per-message cost does not grow with uptime
+### C4.9 — Per-message cost does not grow with uptime (or, since 3.0, with in-flight size)
 
 **Status: Met** — feature 061 (2.5.4).
 
@@ -497,9 +509,46 @@ lightly written broker's memtable flushes only after hours, so reads that start 
 entries (or reads average 16 per step over such a window), handing the tombstones to the collector.
 That bounds what any scan can meet, including scans not yet given a head hint.
 
-**Not yet:** in-flight entries are still located by a bounded scan of the worker's in-flight list
-(O(in-flight), not O(1)). Addressing them by message id — and giving each queue its own key box — is
-the planned storage-layout change (061-b).
+**3.0 — independent of in-flight size, too (feature 065).** 2.5.x still found an in-flight entry by a
+bounded scan of the worker's in-flight list (O(in-flight)). Storage format 4 gives every queue its own
+key box and every claim its own key: `HW.ACK`, `HW.TOUCH` and `HW.FAIL` take the claim token and are
+one point lookup; lease recovery seeks a lease-start index and reads only the claims that expired;
+every count is a maintained counter. A poll, claim or ack costs the same with ten thousand claims in
+flight as with one. Proven by a model-checked layout test (random operations, including a clock that
+steps back, compared against a reference model after every step).
+
+### C4.10 — Expired state is deleted, not only hidden
+
+**Status: Met** — feature 065 (3.0).
+
+**Before (2.x):** reply slots and idempotency claims carried an expiry that reads honoured, but nothing
+deleted them — an expired key stayed on disk (and in every replica) forever, a slow leak proportional
+to RPC and idempotent-send traffic. **Now:** expiring keys are indexed by expiry time and deleted by a
+bounded sweep on the write path once they expire, so they are reclaimed by compaction like any
+consumed message.
+
+### C4.11 — A broker never serves a data directory it cannot read correctly
+
+**Status: Met** — feature 065 (3.0).
+
+The on-disk format is stamped (`highway.format`) and a broker refuses a directory written in another
+format — by stamp, and by recognising pre-format-4 keys even without one — naming the recovery
+(`highways --wipe-data`, which keeps the node's replication identity). It never opens such a directory
+as an empty, healthy-looking store. A replica declares its format in `HW.REPL.HELLO` and the primary
+echoes its own; each side refuses a mismatch (a 2.x primary, which echoes nothing, is refused by a 3.0
+replica), so a replica can never apply a WAL it would misread. **There is no in-place
+migration:** 2.x → 3.0 is a drain and a fresh start per node (see the
+[storage engine](../design/storage-engine.md) upgrade procedure).
+
+### C4.12 — Concurrent verbs on one queue are serialised
+
+**Status: Met** — feature 065 (3.0).
+
+**Before (2.x):** a few verb pairs took different locks for the same keys — a publish and a claim on a
+group's queue, a fail and a touch on one claim, a job update and a job fire — so a narrow interleaving
+could lose a counter update or resurrect a settled claim. **Now:** every operation on a box holds that
+box's lock, and a publish takes every target group's box lock (in a fixed order) plus the channel's,
+so fan-out, claims and settlements on one queue never interleave.
 
 ---
 
@@ -636,7 +685,7 @@ still answers probes.
 
 ### C8.1 — Each due occurrence fires exactly once, however many workers poll
 
-**Status: Met.** The fire is one transaction inside `HW.QCLAIM`'s locks: enqueue one
+**Status: Met.** The fire is one transaction inside `HW.CLAIM`'s box lock: enqueue one
 occurrence, advance `nextFire`, replace the schedule record. Racing pollers cannot double-fire
 for the same reason they cannot double-claim. **Exactly one fire, at-least-once processing** —
 the occurrence is then an ordinary queue message, and the handler keeps queue semantics.
@@ -753,6 +802,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C2.3 | A down subscriber receives what it missed, until its group's last member is declared gone | ✅ Met, bounded (017, group-aware since 025) |
 | C2.4 | Not a store for absent subscribers | ✅ Met |
 | C2.5 | Not a replayable log | ✅ Met |
+| C2.6 | Subscriptions and jobs follow the node across failovers | ✅ Met (067/068, 3.0) |
 | C3.1 | In-flight requests survive departure | ✅ Met |
 | C3.2 | An answer or a timeout, never silence | ✅ Met |
 | C3.3 | Retry budget may outlive the caller | ✅ Met |
@@ -763,7 +813,10 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C4.5 | Durable by default | ✅ **Met** (016) |
 | C4.6 | Bounded over time | ✅ **Met** (041, RocksDB compaction) — Garnet AOF was not; see the 2026-09-15 addendum |
 | C4.7 | Byte budget bounds a queue, not the process | ⚠️ **Deliberately unmet** (016 decision 1) |
-| C4.9 | Per-message cost does not grow with uptime | ✅ **Met** (061) |
+| C4.9 | Per-message cost does not grow with uptime or in-flight size | ✅ **Met** (061, 065) |
+| C4.10 | Expired state is deleted, not only hidden | ✅ **Met** (065, 3.0) |
+| C4.11 | A broker never serves a data directory it cannot read | ✅ **Met** (065, 3.0) |
+| C4.12 | Concurrent verbs on one queue are serialised | ✅ **Met** (065, 3.0) |
 | C23 | No encryption at rest (volume encryption is the answer) | ✅ Met as stated (041) |
 | C24 | Deletion is logical until compaction | ✅ Met as stated (041) |
 | C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
@@ -812,7 +865,7 @@ get stale, and this register is already maintained and cross-linked.
 |---|---|---|
 | **Retry tiers** — immediate, delayed, `[Unrecoverable]` | 015, by engineering review | 015 would have touched 11 files and added retry logic to three near-identical worker loops. Reduced to a structural refactor plus failure context; the reasoning for the tiers is preserved in the feature 015 (recoverability) working notes |
 | **Polly / `Microsoft.Extensions.Resilience`** | 015 | The .NET built-in for retry pipelines and the obvious "does the framework already do this?" answer. Moot until the tiers return. Highway takes no dependency beyond Garnet and StackExchange.Redis, so it is a real trade rather than a free win |
-| **Skip-while-outstanding overlap for jobs** | 028, OD4 | Needs an ack-side completion hook (`HW.QACK` does not know a message was a job occurrence); without it, detection is an O(depth) scan under exclusive locks on the claim path. Ships when the hook is designed |
+| **Skip-while-outstanding overlap for jobs** | 028, OD4 | Needs an ack-side completion hook (`HW.ACK` does not know a message was a job occurrence); without it, detection is an O(depth) scan under exclusive locks on the claim path. Ships when the hook is designed |
 | **Time-zone schedules (DST semantics)** | 028, OD2 | UTC-only shipped; local-time schedules are a real feature with real edge cases, not a parameter |
 | **`[Job]` attribute sugar** | 028, OD1 | Layers onto the composition-root API if demanded; the reverse retreat would break users |
 | **Per-subscriber `SubscriptionGroup` override** | 025, D5 | One node-wide option teaches the model ("this process is one replica of `billing`"); a per-subscriber-class override re-opens the which-identity-am-I confusion 025 exists to close, and no review produced a concrete need. Registered until one does |
@@ -848,6 +901,18 @@ The in-process pair harness (042 T8) asserts zero loss for messages that had bee
 
 The shipped rule (042-1): **the master is the node the client herd is connected to; a node with no clients is not a master and performs no master-only side effects.** There is one master because the clients move as one herd to one node, computed by a **pure successor function** — the highest-priority reachable *willing* node from the live roster — identical on every client, so the herd never splits. A standby answers *willing* only when its own link to the master is dead past `WillingnessThreshold` (or it saw GOODBYE), and a **priority stagger** on that threshold makes the highest-priority successor turn willing first, so several standbys losing the master at once still converge on one. Promotion happens on the herd's **first accepted client verb**, bumping a durable **epoch**; a resurrected lower-epoch node demotes on first contact and writes a reconciliation report, never merges. The 042 deadman survives as a **fence backstop only** (a herd-less, peer-less primary goes read-only) — no timer ever promotes. Proven by the in-process cohesion harness (`HerdCohesionTests`): hard kill, partition matrix, GOODBYE, rejoin, and a doubly-partitioned client all land in the designed state and never mint a second live master with clients.
 
+**Amended 3.0 (feature 069): the stagger is no longer trusted alone.** The no-split argument above
+holds only if every client reaches the highest-priority successor within the stagger. Under load it
+did not: with three nodes and the thread pool saturated, a client's probe of the live, willing
+successor took long enough to be treated as dead, the client walked on to the next standby, which
+answered willing by its timer — and two nodes promoted at the same epoch and never healed (1 in 3 runs
+of the herd test under an artificial pool hog; a two-node pair cannot split this way). 2.x therefore
+did not fully keep C9.2 with two or more standbys. Since 3.0, a standby that has lost its master
+probes its higher-priority roster peers and answers willing only when none could take the herd (a
+peer it has no recent answer from counts as alive), and two primaries at one epoch settle by priority:
+the lower one demotes and rejoins the other. Proven deterministically by `HerdNoSplitTests` (the slow-
+probe scenario replayed, mutation-checked).
+
 ### C9.2a — The ack is the birth: where cluster responsibility begins
 
 **Status: Met** — feature 042-1 (R5), stated as a definition, not a caveat.
@@ -858,7 +923,7 @@ The shipped rule (042-1): **the master is the node the client herd is connected 
 
 **Status: Met** — feature 042, tightened by 042-1.
 
-Mutating `HW.*` on a non-master is `-NOTPRIMARY <endpoint> <epoch>` — and 042-1 extends the gate to the **raw-key write surface** (`SET`/`SETEX`/`DEL` on `hw:idem:*`/`hw:rep:*`), so a client pointed at a standby cannot stage local state either. Reads/stats/admin still run. During a **GOODBYE drain** the quiescing master serves only completion verbs (`HW.REPLY`/`ACK`/`QACK`/`FAIL`/`TOUCH`) plus WAL shipping, refusing new work so the herd converges.
+Mutating `HW.*` on a non-master is `-NOTPRIMARY <endpoint> <epoch>` — and 042-1 extended the gate to the raw-key write surface, so a client pointed at a standby cannot stage local state either (since 3.0 there is no such surface: reply slots and idempotency are reached only through `HW.RESULT` and `HW.IDEM`, which are gated like every mutating verb). Reads/stats/admin still run. During a **GOODBYE drain** the quiescing master serves only completion verbs (`HW.REPLY`/`RESULT`/`ACK`/`FAIL`/`TOUCH`/`IDEM`) plus WAL shipping, refusing new work so the herd converges.
 
 ### C9.4 — A dead replica cannot fill the disk
 
@@ -932,8 +997,11 @@ cannot be split with certainty is refused as a gap (the replica re-syncs, never 
 under 1 ms per pull at 40 000 writes, flat. See
 [replication-and-failover](../design/replication-and-failover.md).
 
-**Not yet:** a replica catching up from further back than the tail still pays the WAL reader's
-read-from-file-start cost once per page.
+**3.0 — catch-up too (feature 066).** A replica further back than the tail used to pay the WAL
+reader's read-from-file-start cost on every page. The primary now holds a WAL tailer between pulls, so a
+catch-up pays that read once and every later page is a chunk read (300 000 batches: 1.5 s → 0.2 s), and
+the replica applies each page with one synced write. The one remaining from-the-start read is the first
+page after the primary restarts or the replica jumps.
 
 ## C10 — Broker-local cache (feature 044)
 

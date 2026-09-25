@@ -168,6 +168,17 @@ removes is the scan cost of the tombstones. The metric
 `highway.storage.memtable_deletes` shows the engine's pending deletes if you want to watch it; on 2.5.5
 it rises and falls rather than climbing for hours.
 
+### Emptying the Data Directory (`--wipe-data`)
+
+Deletes everything the broker stores — every queued, in-flight, delayed and dead-lettered message, the
+registry and the job schedules — and keeps only the node's replication identity (its epoch file). It is
+the step between draining on Highway 2.x and starting 3.0 (see runbook 7). Like `--compact`, it needs
+the broker stopped, and refuses while a running broker holds the directory.
+
+```cmd
+bin\highways.exe --wipe-data --config config\highway.json
+```
+
 ---
 
 ## 5. Runbook: Data-Directory Rotation (Drain-Then-Rotate)
@@ -175,7 +186,8 @@ it rises and falls rather than climbing for hours.
 When upgrading across incompatible storage format versions or performing store maintenance, use the **Drain-Then-Rotate** procedure to ensure zero data loss.
 
 ### When to Use
-- Startup fails with: `Highway's data directory was written in storage format X, but this build reads format Y`.
+- Startup fails with: `Highway's data directory was written in storage format X, but this build reads format Y`
+  (for 2.x → 3.0, follow runbook 7 instead).
 - Performing scheduled log rotation / storage compaction.
 
 ### Step-by-Step Procedure
@@ -255,3 +267,58 @@ The herd converges back onto the higher-priority node.
 - Zero client errors: clients follow each `-NOTPRIMARY` redirect automatically. **List every broker
   endpoint in the client connection string** — a single-endpoint client has no failover, and the
   client warns at startup when it detects this.
+
+---
+
+## 7. Runbook: Upgrading from 2.x to 3.0 (Fresh Start)
+
+Highway 3.0 changes both the wire protocol (5.0) and the storage format (4), and **does not migrate data
+in place**. A 3.0 broker refuses a 2.x data directory rather than serving it as empty, a 2.x client
+cannot talk to a 3.0 broker, and a 3.0 node never replicates from a 2.x one (or the reverse). So the
+upgrade is a planned short stop: empty the broker on 2.x, start 3.0 on an empty directory, and bring
+the applications back on the 3.0 client.
+
+### 1. Drain on 2.x
+1. Stop or pause everything that **sends** (queue sends, publishes, RPC callers).
+2. Keep the workers and subscribers running until the dashboard (or `HW.STATS`) shows every queue,
+   group queue and service at **0 waiting, 0 in flight and 0 delayed**. Delayed messages wait for their
+   due time — decide whether to wait or accept losing them.
+3. Dead letters are **not** carried over. Re-drive or export anything in a dead-letter queue you want
+   to keep.
+4. Stop the Highway applications. Recurring jobs and subscriptions need no action — every 3.0 client
+   re-declares its own at start.
+
+### 2. Upgrade the broker(s) — standby first
+In a replica set, do the standby, then the primary. Each node keeps its role and configuration.
+
+On the **standby**:
+```cmd
+bin\highways.exe --stop
+:: swap the bin\ files for 3.0
+bin\highways.exe --wipe-data --config config\highway.json
+```
+Leave it stopped.
+
+On the **primary** (or the single broker):
+```cmd
+bin\highways.exe --stop
+:: swap the bin\ files for 3.0
+bin\highways.exe --wipe-data --config config\highway.json
+bin\highways.exe --start
+```
+
+Then start the standby: `bin\highways.exe --start`. Its data directory is empty, so it bootstraps
+from the primary's snapshot and follows it; the primary's **Replication** tab shows it **Active**.
+
+### 3. Bring the applications back
+Deploy the applications built against the 3.0 client packages and start them, then resume the
+senders. Each node establishes its session (services, subscriptions, jobs) on connect.
+
+### What can go wrong, and what you will see
+- **A 3.0 broker started on an undrained 2.x directory** refuses to start and names the directory and
+  the `--wipe-data` step. Nothing is lost: start 2.x on it again to drain it.
+- **Mixed versions in a replica set** do not replicate: a 3.0 primary refuses a 2.x standby with
+  `HW_STORAGE_FORMAT`, and a 3.0 standby logs that its primary stores format 3 and does not pull. Finish
+  upgrading the other node.
+- **A 2.x application against a 3.0 broker** gets `HW_INVALID_ARG unknown command` errors for the
+  renamed 4.x verbs. Upgrade the application's Highway packages.

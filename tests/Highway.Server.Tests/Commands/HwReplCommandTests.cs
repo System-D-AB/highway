@@ -14,7 +14,7 @@ public class HwReplCommandTests
     public void Hello_OnEphemeralStore_Refuses()
     {
         using var h = new CommandHarness();
-        var reply = CommandHarness.AsText(h.Run(new HwReplHelloCommand(), "replica-1", "0", "1"));
+        var reply = CommandHarness.AsText(h.Run(new HwReplHelloCommand(), "replica-1", "0", "1", "FORMAT", "4"));
         reply.Should().StartWith("-ERR HW_INVALID_ARG");
         reply.Should().Contain("ephemeral");
     }
@@ -34,8 +34,8 @@ public class HwReplCommandTests
                 batch.Commit();
             }
 
-            var hello = CommandHarness.AsText(h.Run(new HwReplHelloCommand(), "r1", "0", "1"));
-            hello.Should().StartWith("*2\r\n");
+            var hello = CommandHarness.AsText(h.Run(new HwReplHelloCommand(), "r1", "0", "1", "FORMAT", "4"));
+            hello.Should().StartWith("*3\r\n").And.EndWith(":4\r\n", "the primary echoes its storage format");
 
             var pull = CommandHarness.AsText(h.Run(new HwReplPullCommand(), "0", "1000000"));
             pull.Should().StartWith("*3\r\n");
@@ -149,10 +149,15 @@ public class HwReplCommandTests
             using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
             var db = redis.GetDatabase();
 
-            db.Execute("HW.QSEND", "q", "m1", "payload");
+            db.Execute("HW.SEND", "q", "m1", "payload");
 
-            var hello = db.Execute("HW.REPL.HELLO", "replica-a", "0", "1");
-            ((RedisResult[])hello!).Should().HaveCount(2);
+            // 065 T6: a replica declares its storage format; one that does not (a 2.x node) is refused.
+            var legacy = () => db.Execute("HW.REPL.HELLO", "replica-old", "0", "1");
+            legacy.Should().Throw<RedisServerException>().WithMessage("*HW_STORAGE_FORMAT*Highway 2.x*--wipe-data*");
+
+            var hello = db.Execute("HW.REPL.HELLO", "replica-a", "0", "1", "FORMAT", "4");
+            ((RedisResult[])hello!).Should().HaveCount(3);
+            ((int)((RedisResult[])hello!)[2]).Should().Be(4, "the primary echoes its storage format");
 
             var pull = db.Execute("HW.REPL.PULL", "0", "1000000");
             var pullRows = (RedisResult[])pull!;

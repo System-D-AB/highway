@@ -34,6 +34,27 @@ internal static class KeyEncoding
         writer.WriteByte(0x00);
     }
 
+    /// <summary>
+    /// Reads a component written by <see cref="WriteString"/> from the start of <paramref name="encoded"/>;
+    /// <paramref name="consumed"/> is its length including the terminator (065).
+    /// </summary>
+    public static string ReadString(ReadOnlySpan<byte> encoded, out int consumed)
+    {
+        var raw = new List<byte>(encoded.Length);
+        for (var i = 0; i + 1 < encoded.Length; i++)
+        {
+            if (encoded[i] != 0x00) { raw.Add(encoded[i]); continue; }
+            if (encoded[i + 1] == 0x00)
+            {
+                consumed = i + 2;
+                return Encoding.UTF8.GetString([.. raw]);
+            }
+            raw.Add(0x00);   // 0x00 0xFF escape
+            i++;
+        }
+        throw new FormatException("Unterminated key string component.");
+    }
+
     private static void WriteEscaped(ReadOnlySpan<byte> raw, ref KeyWriter writer)
     {
         foreach (var b in raw)

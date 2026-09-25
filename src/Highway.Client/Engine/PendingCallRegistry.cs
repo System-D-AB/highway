@@ -82,7 +82,9 @@ internal sealed class PendingCallRegistry
         byte[]? payload;
         try
         {
-            payload = await _connection.GetReplySlotAsync(requestId, ct).ConfigureAwait(false);
+            // HW.RESULT takes the reply: read and removed in one command (5.0), so there is no
+            // separate delete to forget and no window where two readers both collect it.
+            payload = await _connection.TakeReplyAsync(requestId, ct).ConfigureAwait(false);
         }
         catch (HighwayTransportException)
         {
@@ -94,9 +96,8 @@ internal sealed class PendingCallRegistry
 
         if (!_pending.TryRemove(requestId, out var call))
         {
-            // Our own call timed out / was cancelled between the guard above and
-            // here. The slot is still ours, so clean it up (005 Req 3 AC6).
-            await SafeDeleteSlotAsync(requestId).ConfigureAwait(false);
+            // Our own call timed out / was cancelled between the guard above and here. The
+            // take already removed the slot (005 Req 3 AC6), so there is nothing to clean up.
             return;
         }
 
@@ -128,7 +129,6 @@ internal sealed class PendingCallRegistry
         finally
         {
             call.Dispose();
-            await SafeDeleteSlotAsync(requestId).ConfigureAwait(false);
         }
     }
 
@@ -226,18 +226,6 @@ internal sealed class PendingCallRegistry
         response.StatusCode = statusCode;
         response.Error = new ErrorDetail { Code = code, Message = message };
         return response;
-    }
-
-    private async Task SafeDeleteSlotAsync(string requestId)
-    {
-        try
-        {
-            await _connection.DeleteReplySlotAsync(requestId).ConfigureAwait(false);
-        }
-        catch (HighwayTransportException)
-        {
-            // Slot leaks are bounded by the server-side TTL.
-        }
     }
 
     private sealed class PendingCall : IDisposable

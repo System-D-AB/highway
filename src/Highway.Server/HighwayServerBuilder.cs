@@ -406,12 +406,13 @@ public sealed class HighwayServerBuilder
     /// or an <b>entry framing</b> changes, because both are encoded in the AOF.
     ///
     /// <para>1 = pre-013. 2 = 013's versioned entry framings. 3 = 018, which removed
-    /// <c>HW.RECEIVE</c> and <c>HW.RACK</c> and thereby shifted every stored-procedure id.</para>
+    /// <c>HW.RECEIVE</c> and <c>HW.RACK</c> and thereby shifted every stored-procedure id.
+    /// 4 = 065 (Highway 3.0): every key lives in a box — the per-queue layout. No in-place migration.</para>
     ///
     /// <para>Public so the highways host's <c>--version</c> can print it (feature 031): an
     /// operator upgrading in place can compare formats before touching a data directory.</para>
     /// </summary>
-    public static readonly int StorageFormatVersion = 3;
+    public static readonly int StorageFormatVersion = 4;
 
     private const string StorageFormatFile = "highway.format";
 
@@ -450,6 +451,9 @@ public sealed class HighwayServerBuilder
 
             if (int.TryParse(text, out var found) && found == StorageFormatVersion)
                 return;
+
+            if (int.TryParse(text, out var older) && older == 3)
+                throw new InvalidOperationException(Storage.Rocks.RocksDbStore.StorageLayoutMessage(dir));
 
             throw new InvalidOperationException(
                 $"Highway's data directory '{dir}' was written in storage format '{text}', but this " +

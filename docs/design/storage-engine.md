@@ -52,6 +52,35 @@ disk until compaction merges the SST files holding it. So a point-in-time direct
 set *plus* not-yet-compacted tombstones and overwritten versions — it fluctuates above the logical
 size between compactions, but does not grow without bound.
 
+**Every structure lives in its own box** (storage format 4, feature 065). A key is
+`[box:4][space:1][rest]`. Each service, queue and subscriber group's queue is one box, allocated on
+first use and found by name through the **catalog** in the system box (box 0); box ids are never
+reused. Inside a box, separate sub-ranges hold waiting work (by sequence), claims (by sequence — the
+claim token), a lease index (by lease start), deferred work (by due time), dead letters, job schedules
+and their due-time index, the workers that have claimed, and the box's counters (head, next sequence,
+depth, in flight, deferred, dead, bytes). So:
+
+- a claim reads from the stored head, recovery and promotion seek their time indexes from a known
+  floor, and an ack is a point lookup — nothing walks deleted history or a list of in-flight work;
+- every count the broker reports is a counter, never a scan, and listing every queue reads only the
+  catalog (before 3.0 the dashboard and metrics dumped the whole keyspace to find queue names);
+- retiring a subscriber group is one range delete of its box;
+- time-ordered indexes use process-local floors that are lowered on every insert below them and
+  raised only after a committed scan, so a clock that steps back (another node after a failover, an
+  NTP correction) can never hide an entry.
+
+Registry, membership, reply slots and idempotency state keep their family encoding inside the system
+box. Expiring keys (reply slots, idempotency claims) are indexed by expiry and **deleted** when they
+expire — before 3.0 they were filtered on read but stayed on disk forever.
+
+**No in-place migration.** A 3.0 broker refuses a 2.x (format 3) data directory — by its
+`highway.format` stamp and, even without one, by recognising 2.x keys — rather than serving it as an
+empty, healthy-looking store. The upgrade is a fresh start per node: drain on 2.x, `highways
+--wipe-data` (which keeps the node's replication identity), start 3.0; a standby re-syncs from the
+upgraded primary. A replica declares its storage format when it connects and the primary answers
+with its own; either side refuses a mismatch, so a 2.x node and a 3.0 node never replicate from each
+other in either direction.
+
 **Tombstones are also a read cost, so they are bounded in time, not just in space** (features 061,
 062). A range scan steps over every deleted key in its range until compaction removes it — in the
 memtable as well as in SST files. Three engine settings keep that bounded on a lightly written broker,

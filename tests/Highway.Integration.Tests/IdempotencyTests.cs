@@ -149,9 +149,27 @@ public class IdempotencyTests : IDisposable
         await db.ExecuteAsync("HW.CALL", "idem.count", requestId, envelope);
         await WaitForAsync(() => CountedService.Invocations == 1);
 
-        var ttl = await db.KeyTimeToLiveAsync($"hw:idem:idem.count:{requestId}");
-        ttl.Should().NotBeNull("the marker must expire rather than accumulate forever");
-        ttl!.Value.Should().BeLessThanOrEqualTo(TimeSpan.FromSeconds(30),
+        // 5.0: the marker is reached through HW.IDEM, not stock keys. The handler already holds (or has
+        // settled) the marker, so BEGIN cannot claim it — it answers BUSY until END lands, then DONE.
+        RedisResult begin = RedisResult.Create(RedisValue.Null);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            begin = await db.ExecuteAsync("HW.IDEM", "BEGIN", "idem.count", requestId, "30");
+            if (begin.Resp2Type == ResultType.Array) break;
+            await Task.Delay(25);
+        }
+        begin.Resp2Type.Should().Be(ResultType.Array, "the completed run's marker holds its result: [DONE, bytes]");
+        ((string)((RedisResult[])begin!)[0]!).Should().Be("DONE");
+
+        // Its expiry is the idempotency window (read through the test inspector; no wire TTL read in 5.0).
+        var framed = _server.Inspect.KvGet($"hw:idem:idem.count:{requestId}");
+        framed.Should().NotBeNull();
+        var expiresAt = Highway.Server.Storage.ExpiryFraming.TryReadExpiry(framed!);
+        expiresAt.Should().NotBeNull("the marker must expire rather than accumulate forever");
+        var ttl = TimeSpan.FromTicks(expiresAt!.Value - DateTime.UtcNow.Ticks);
+        ttl.Should().BeGreaterThan(TimeSpan.Zero);
+        ttl.Should().BeLessThanOrEqualTo(TimeSpan.FromSeconds(30),
             "the window comes from [Idempotent(WindowSeconds = 30)]");
     }
 

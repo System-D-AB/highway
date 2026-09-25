@@ -54,9 +54,9 @@ public class NodeDecommissioningTests : IDisposable
             "{\"v\":1,\"src\":\"t\",\"ts\":\"2026-08-09T00:00:00Z\",\"body\":{\"Blob\":\""
             + new string('x', bytes) + "\"}}");
 
-    /// <summary>Registers a node so it has a heartbeat record that can then go stale.</summary>
+    /// <summary>Registers a node (HW.SESSION with a catalog) so it has a heartbeat record that can then go stale.</summary>
     private static void Register(IDatabase db, string node, string service = "svc.x")
-        => db.Execute("HW.HEARTBEAT", node,
+        => db.Register(node,
             // The catalog's services are OBJECTS with a name, not bare strings — a plain
             // string array parses as "a pure caller with no services" and silently registers
             // nothing, which is how the first version of these tests failed.
@@ -76,7 +76,7 @@ public class NodeDecommissioningTests : IDisposable
         const string channel = "dc.blocked";
 
         Register(db, "dead-node");
-        db.Execute("HW.SUBSCRIBE", channel, "dead-node");
+        db.Subscribe(channel, "dead-node");
 
         // Fill the dead node's queue until the channel refuses.
         RedisServerException? refusal = null;
@@ -107,14 +107,14 @@ public class NodeDecommissioningTests : IDisposable
         const string channel = "dc.mixed";
 
         Register(db, "dead-one");
-        db.Execute("HW.SUBSCRIBE", channel, "dead-one");
+        db.Subscribe(channel, "dead-one");
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
         await Task.Delay(500);   // dead-one goes stale
 
         // A live subscriber joins and keeps heartbeating.
         Register(db, "live-one");
-        db.Execute("HW.SUBSCRIBE", channel, "live-one");
+        db.Subscribe(channel, "live-one");
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
         (_server.Inspect.ListLength($"hw:q:{channel}@dead-one:q")).Should().Be(0,
@@ -135,7 +135,7 @@ public class NodeDecommissioningTests : IDisposable
         const string channel = "dc.live";
 
         Register(db, "batch-node");
-        db.Execute("HW.SUBSCRIBE", channel, "batch-node");
+        db.Subscribe(channel, "batch-node");
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
         // Nobody ever consumes — like a nightly batch job — but the node keeps heartbeating.
@@ -158,8 +158,8 @@ public class NodeDecommissioningTests : IDisposable
         var db = Db();
         const string channel = "dc.noreg";
 
-        // No HW.HEARTBEAT: this node has no registration record at all.
-        db.Execute("HW.SUBSCRIBE", channel, "anon-node");
+        // A session with no catalog: this node has no registration record at all.
+        db.Subscribe(channel, "anon-node");
         db.Execute("HW.PUBLISH", channel, Payload(64));
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
@@ -177,7 +177,7 @@ public class NodeDecommissioningTests : IDisposable
         const string channel = "dc.purge";
 
         Register(db, "going-node");
-        db.Execute("HW.SUBSCRIBE", channel, "going-node");
+        db.Subscribe(channel, "going-node");
         db.Execute("HW.PUBLISH", channel, Payload(64));
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
@@ -201,7 +201,7 @@ public class NodeDecommissioningTests : IDisposable
         const string channel = "dc.bye";
 
         Register(db, "restarting-node");
-        db.Execute("HW.SUBSCRIBE", channel, "restarting-node");
+        db.Subscribe(channel, "restarting-node");
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
         db.Execute("HW.HEARTBEAT", "restarting-node", "BYE");
@@ -225,7 +225,7 @@ public class NodeDecommissioningTests : IDisposable
     {
         var db = Db();
         Register(db, "twice-node");
-        db.Execute("HW.SUBSCRIBE", "dc.twice", "twice-node");
+        db.Subscribe("dc.twice", "twice-node");
 
         db.Execute("HW.HEARTBEAT", "twice-node", "BYE", "PURGE");
         var second = (RedisResult[])db.Execute("HW.HEARTBEAT", "twice-node", "BYE", "PURGE")!;
@@ -240,13 +240,13 @@ public class NodeDecommissioningTests : IDisposable
         const string channel = "dc.return";
 
         Register(db, "back-node");
-        db.Execute("HW.SUBSCRIBE", channel, "back-node");
+        db.Subscribe(channel, "back-node");
         db.Execute("HW.PUBLISH", channel, Payload(64));
         db.Execute("HW.HEARTBEAT", "back-node", "BYE", "PURGE");
 
         // It comes back and re-subscribes.
         Register(db, "back-node");
-        db.Execute("HW.SUBSCRIBE", channel, "back-node");
+        db.Subscribe(channel, "back-node");
 
         (_server.Inspect.ListLength($"hw:q:{channel}@back-node:q")).Should().Be(0,
             "retirement is irreversible by design - this is C2.4 working as intended, not a bug");
@@ -263,7 +263,7 @@ public class NodeDecommissioningTests : IDisposable
         var db = ConnectionMultiplexer.Connect(never.ConnectionString).GetDatabase();
 
         Register(db, "kept-node");
-        db.Execute("HW.SUBSCRIBE", "dc.off", "kept-node");
+        db.Subscribe("dc.off", "kept-node");
         db.Execute("HW.PUBLISH", "dc.off", Payload(64));
 
         Thread.Sleep(400);
@@ -276,7 +276,8 @@ public class NodeDecommissioningTests : IDisposable
     // ---- CleanAndByeForever (T4) ----------------------------------------------
 
     /// <summary>
-    /// <b>The defect T4 warns about.</b> The heartbeat loop re-registers the node, so a purge
+    /// <b>The defect T4 warns about.</b> The heartbeat loop re-registers the node (its next beat
+    /// answers <c>+SESSION</c> and the client re-declares its session), so a purge
     /// issued while it still runs is undone moments later and the node reappears with an empty
     /// catalog — which looks exactly like a purge that worked and then silently did not.
     ///
@@ -319,7 +320,7 @@ public class NodeDecommissioningTests : IDisposable
         var db = Db();
 
         Register(db, "counted-node");
-        db.Execute("HW.SUBSCRIBE", "dc.counted", "counted-node");
+        db.Subscribe("dc.counted", "counted-node");
         db.Execute("HW.PUBLISH", "dc.counted", Payload(64));
         db.Execute("HW.PUBLISH", "dc.counted", Payload(64));
 
@@ -354,7 +355,7 @@ public class NodeDecommissioningTests : IDisposable
         const string channel = "dc.suspect";
 
         Register(db, "fading-node");
-        db.Execute("HW.SUBSCRIBE", channel, "fading-node");
+        db.Subscribe(channel, "fading-node");
 
         // Past half (2s) but comfortably inside the whole threshold (4s).
         await Task.Delay(2_500);
@@ -391,11 +392,11 @@ public class NodeDecommissioningTests : IDisposable
         const string service = "dc.svc";
 
         Register(db, "both-node", service);
-        db.Execute("HW.SUBSCRIBE", channel, "both-node");
+        db.Subscribe(channel, "both-node");
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
         db.Execute("HW.CALL", service, "req-1", Payload(64));
-        db.Execute("HW.DEQUEUE", service, "both-node");   // claimed, never acknowledged
+        db.ClaimSvc(service, "both-node").Should().NotBeNull();   // claimed, never acknowledged
 
         db.Execute("HW.HEARTBEAT", "both-node", "BYE", "PURGE");
 

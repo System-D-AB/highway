@@ -1,8 +1,8 @@
 # RPC (Request / Reply)
 
 > **Status:** current
-> **Protocol:** the *RPC Commands* section of [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md)
-> is authoritative for `HW.CALL` / `HW.REPLY` / `HW.DEQUEUE` / `HW.ACK`. Guarantees are C3 in
+> **Protocol:** the *Work Commands* section of [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md)
+> is authoritative for `HW.CALL` / `HW.CLAIM` / `HW.REPLY` / `HW.RESULT` / `HW.ACK`. Guarantees are C3 in
 > [`constraints.md`](../product/constraints.md). This doc explains how RPC works and why.
 
 *Highway RPC is request-and-reply over a durable queue: a caller `ExecuteAsync`s a request and waits
@@ -23,12 +23,17 @@ dead-lettering as [durable queues](durable-queues.md), plus a place to put the a
 
 ## How it works
 
-**Call → claim → reply → ack.** A caller issues `HW.CALL`, which enqueues the request and rings the
-service's doorbell so an idle worker wakes. A worker claims the next request with `HW.DEQUEUE` —
-which, before serving, sweeps expired leases *and* prunes dead nodes, requeuing anything a departed
-worker held. The handler runs inside a fresh DI scope; when it finishes, `HW.REPLY` writes the
-answer into the caller's reserved reply slot and rings the reply doorbell so the waiting caller
-returns, and `HW.ACK` clears the request.
+**Call → claim → reply → ack.** A caller issues `HW.CALL`, which enqueues the request in the
+service's box and rings the service's doorbell so an idle worker wakes. A worker claims the next
+request with `HW.CLAIM SVC` — which, before serving, recovers expired leases *and* the claims of dead
+nodes, requeuing anything a departed worker held — and gets back a **token** for the claim. The
+handler runs inside a fresh DI scope; when it finishes, `HW.REPLY` writes the answer into the caller's
+reply slot and rings the reply doorbell, the caller takes it with `HW.RESULT` (read and removed in one
+command), and the worker settles the claim with `HW.ACK <token>`.
+
+**Settling is one lookup** (3.0). The token names the claim directly, so an ack, a lease renewal or a
+failure report never reads a list of in-flight work, however much is in flight; a late ack of a claim
+that was already recovered and redelivered answers `:0` and cannot settle the redelivery.
 
 **Discovery and load balancing.** A worker registers the services it hosts in the registry (see
 [registry-and-heartbeat.md](registry-and-heartbeat.md)); `HW.DISCOVER` reports the live nodes
@@ -51,9 +56,10 @@ is then the only trace. This is why RPC backoff is off by default.
 
 ## Wire surface
 
-`HW.CALL`, `HW.DEQUEUE`, `HW.REPLY`, `HW.ACK`, and the discovery/registry commands that support them
-are defined in [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md). RPC reuses the queue's lease and
-dead-letter machinery documented there.
+`HW.CALL`, `HW.CLAIM SVC`, `HW.REPLY`, `HW.RESULT`, `HW.ACK`, and the discovery/registry commands
+that support them are defined in [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md). RPC shares the
+queue's claim, lease and dead-letter machinery documented there — one work path for services, queues
+and group queues since protocol 5.0.
 
 ## Guarantees & limits
 

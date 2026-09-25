@@ -36,22 +36,20 @@ public class PubSubUnificationTests : IDisposable
     [Fact]
     public void PublishReachesEveryRegisteredGroup_OrNone()
     {
-        _db.Execute("HW.SUBSCRIBE", "orders.placed", "billing");
-        _db.Execute("HW.SUBSCRIBE", "orders.placed", "shipping");
+        _db.Subscribe("orders.placed", "billing");
+        _db.Subscribe("orders.placed", "shipping");
 
         var groups = (int)_db.Execute("HW.PUBLISH", "orders.placed", "payload-abc"u8.ToArray());
         groups.Should().Be(2, "two groups are registered");
 
         // Claim from both derived queues
-        var r1 = _db.Execute("HW.QCLAIM", "orders.placed@billing", "node-1");
-        var r2 = _db.Execute("HW.QCLAIM", "orders.placed@shipping", "node-1");
+        var r1 = _db.ClaimQ("orders.placed@billing", "node-1");
+        var r2 = _db.ClaimQ("orders.placed@shipping", "node-1");
 
-        r1.IsNull.Should().BeFalse("billing group should receive the message");
-        r2.IsNull.Should().BeFalse("shipping group should receive the message");
+        r1.Should().NotBeNull("billing group should receive the message");
+        r2.Should().NotBeNull("shipping group should receive the message");
 
-        var payload1 = (string)((RedisResult[])r1!)[1]!;
-        var payload2 = (string)((RedisResult[])r2!)[1]!;
-        payload1.Should().Be(payload2, "both groups receive identical payloads");
+        r1!.Value.PayloadText.Should().Be(r2!.Value.PayloadText, "both groups receive identical payloads");
     }
 
     // -------------------------------------------------------------------------
@@ -61,25 +59,25 @@ public class PubSubUnificationTests : IDisposable
     [Fact]
     public async Task GroupRegisteredDuringDelay_DoesNotReceive()
     {
-        _db.Execute("HW.SUBSCRIBE", "deferred.ch", "early-group");
+        _db.Subscribe("deferred.ch", "early-group");
 
         var deliveryTime = (DateTime.UtcNow + TimeSpan.FromMilliseconds(500)).Ticks;
         _db.Execute("HW.PUBLISH", "deferred.ch", "deferred-msg"u8.ToArray(),
             "AT", deliveryTime.ToString());
 
         // Subscribe a group DURING the delay
-        _db.Execute("HW.SUBSCRIBE", "deferred.ch", "late-group");
+        _db.Subscribe("deferred.ch", "late-group");
 
         // Wait for delivery time to pass
         await Task.Delay(700);
 
         // Early group should get it after promotion
-        var early = _db.Execute("HW.QCLAIM", "deferred.ch@early-group", "node-1");
-        early.IsNull.Should().BeFalse("group registered before publish receives the delayed message");
+        var early = _db.ClaimQ("deferred.ch@early-group", "node-1");
+        early.Should().NotBeNull("group registered before publish receives the delayed message");
 
         // Late group should NOT get it — R5.3 semantic change
-        var late = _db.Execute("HW.QCLAIM", "deferred.ch@late-group", "node-1");
-        late.IsNull.Should().BeTrue(
+        var late = _db.ClaimQ("deferred.ch@late-group", "node-1");
+        late.Should().BeNull(
             "a group registered during the delay does NOT receive the message (018 R5.3)");
     }
 
@@ -94,7 +92,7 @@ public class PubSubUnificationTests : IDisposable
         const string group = "ordered-grp";
         var derivedQueue = $"{channel}@{group}";
 
-        _db.Execute("HW.SUBSCRIBE", channel, group);
+        _db.Subscribe(channel, group);
 
         // Publish 5 messages
         for (var i = 1; i <= 5; i++)
@@ -104,12 +102,9 @@ public class PubSubUnificationTests : IDisposable
         var payloads = new List<string>();
         for (var i = 0; i < 5; i++)
         {
-            var result = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
-            if (result.IsNull) break;
-            var arr = (RedisResult[])result!;
-            payloads.Add((string)arr[1]!);
-            var msgId = (string)arr[0]!;
-            _db.Execute("HW.QACK", derivedQueue, "node-1", msgId);
+            if (_db.ClaimQ(derivedQueue, "node-1") is not { } claim) break;
+            payloads.Add(claim.PayloadText);
+            _db.Ack(claim.Token);
         }
 
         payloads.Should().Equal(["msg-1", "msg-2", "msg-3", "msg-4", "msg-5"],
@@ -123,8 +118,8 @@ public class PubSubUnificationTests : IDisposable
     [Fact]
     public void QueueNamedLikeAGroup_IsRejected()
     {
-        // HW.QSEND with @ in the name is rejected
-        var act = () => _db.Execute("HW.QSEND", "orders@billing", "m-1", "body"u8.ToArray());
+        // HW.SEND with @ in the name is rejected — group queues are filled only by HW.PUBLISH
+        var act = () => _db.Send("orders@billing", "m-1", "body"u8.ToArray());
         act.Should().Throw<RedisServerException>()
             .WithMessage("*HW_INVALID_ARG*@*");
     }
@@ -201,9 +196,9 @@ public class PubSubUnificationTests : IDisposable
     [Fact]
     public void PublishStillReportsGroupCount()
     {
-        _db.Execute("HW.SUBSCRIBE", "count.ch", "g1");
-        _db.Execute("HW.SUBSCRIBE", "count.ch", "g2");
-        _db.Execute("HW.SUBSCRIBE", "count.ch", "g3");
+        _db.Subscribe("count.ch", "g1");
+        _db.Subscribe("count.ch", "g2");
+        _db.Subscribe("count.ch", "g3");
 
         var count = (int)_db.Execute("HW.PUBLISH", "count.ch", "counted"u8.ToArray());
         count.Should().Be(3, "PublishAsync still reports how many groups received the message");

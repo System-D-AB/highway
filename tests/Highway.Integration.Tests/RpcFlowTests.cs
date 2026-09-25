@@ -6,8 +6,8 @@ using Xunit;
 namespace Highway.Integration.Tests;
 
 /// <summary>
-/// Integration tests for the RPC command flow:
-/// HW.CALL → HW.DEQUEUE → HW.REPLY → GET reply → HW.ACK
+/// Integration tests for the RPC command flow (protocol 5.0):
+/// HW.CALL → HW.CLAIM SVC → HW.REPLY → HW.RESULT → HW.ACK token
 /// </summary>
 public class RpcFlowTests : IDisposable
 {
@@ -35,17 +35,19 @@ public class RpcFlowTests : IDisposable
     }
 
     [Fact]
-    public void HwDequeue_ReturnsEnqueuedRequest()
+    public void HwClaim_ReturnsEnqueuedRequest()
     {
         _db.Execute("HW.CALL", "payments.process", "req-100", "{\"amount\":99.99}");
 
-        var result = _db.Execute("HW.DEQUEUE", "payments.process", "node-1");
+        var result = _db.Execute("HW.CLAIM", "SVC", "payments.process", "node-1");
 
-        result.IsNull.Should().BeFalse();
-        var arr = (RedisResult[])result!;
-        arr.Should().HaveCount(2);
-        ((string)arr[0]!).Should().Be("req-100");
-        ((string)arr[1]!).Should().Be("{\"amount\":99.99}");
+        var rows = (RedisResult[])result!;
+        rows.Should().HaveCount(1);
+        var row = (RedisResult[])rows[0]!;
+        row.Should().HaveCount(3);
+        ((string)row[0]!).Should().NotBeNullOrEmpty("the lease token is the claim's handle");
+        ((string)row[1]!).Should().Be("req-100");
+        ((string)row[2]!).Should().Be("{\"amount\":99.99}");
     }
 
     [Fact]
@@ -53,50 +55,62 @@ public class RpcFlowTests : IDisposable
     {
         _db.Execute("HW.REPLY", "req-200", "{\"status\":\"ok\"}");
 
-        var reply = _db.StringGet("hw:rep:req-200");
-        reply.ToString().Should().Be("{\"status\":\"ok\"}");
+        _server.Inspect.ReplySlotExists("req-200").Should().BeTrue();
+        _db.Result("req-200").ToString().Should().Be("{\"status\":\"ok\"}");
     }
 
     [Fact]
-    public void FullRpcRoundTrip_CallDequeueReplyAck()
+    public void HwResult_TakesTheReply_ASecondTakeIsNil()
+    {
+        _db.Execute("HW.REPLY", "req-201", "{\"status\":\"ok\"}");
+
+        _db.Result("req-201").ToString().Should().Be("{\"status\":\"ok\"}");
+        _db.Result("req-201").IsNull.Should().BeTrue("HW.RESULT reads and removes in one command");
+        _server.Inspect.ReplySlotExists("req-201").Should().BeFalse();
+    }
+
+    [Fact]
+    public void FullRpcRoundTrip_CallClaimReplyResultAck()
     {
         // 1. Caller enqueues
         var callResult = _db.Execute("HW.CALL", "inventory.check", "req-rt-1", "{\"sku\":\"ABC\"}");
         callResult.ToString().Should().Be("OK");
 
-        // 2. Worker dequeues
-        var deqResult = _db.Execute("HW.DEQUEUE", "inventory.check", "worker-1");
-        deqResult.IsNull.Should().BeFalse();
-        var arr = (RedisResult[])deqResult!;
-        ((string)arr[0]!).Should().Be("req-rt-1");
-        ((string)arr[1]!).Should().Be("{\"sku\":\"ABC\"}");
+        // 2. Worker claims
+        var claim = _db.ClaimSvc("inventory.check", "worker-1");
+        claim.Should().NotBeNull();
+        claim!.Value.Id.Should().Be("req-rt-1");
+        claim.Value.PayloadText.Should().Be("{\"sku\":\"ABC\"}");
 
         // 3. Worker replies
         var replyResult = _db.Execute("HW.REPLY", "req-rt-1", "{\"inStock\":true}");
         replyResult.ToString().Should().Be("OK");
 
-        // 4. Caller retrieves reply via stock GET
-        var replyPayload = _db.StringGet("hw:rep:req-rt-1");
+        // 4. Caller takes the reply
+        var replyPayload = _db.Result("req-rt-1");
         replyPayload.ToString().Should().Be("{\"inStock\":true}");
 
-        // 5. Worker acknowledges
-        var ackResult = _db.Execute("HW.ACK", "inventory.check", "worker-1", "req-rt-1");
-        ackResult.ToString().Should().Be("OK");
+        // 5. Worker acknowledges by token
+        _db.Ack(claim.Value.Token).Should().Be(1);
     }
 
     [Fact]
-    public void HwDequeue_EmptyQueue_ReturnsNil()
+    public void HwClaim_EmptyQueue_ReturnsEmptyArray()
     {
-        var result = _db.Execute("HW.DEQUEUE", "nonexistent.service", "node-1");
-        result.IsNull.Should().BeTrue();
+        var result = _db.Execute("HW.CLAIM", "SVC", "nonexistent.service", "node-1");
+        result.IsNull.Should().BeFalse("nothing due is an empty array in 5.0, not nil");
+        ((RedisResult[])result!).Should().BeEmpty();
     }
 
     [Fact]
-    public void HwAck_Idempotent_ReturnsOk()
+    public void HwAck_Idempotent_ASettledTokenAnswersNotHeld()
     {
-        // ACK for unknown requestId still returns OK
-        var result = _db.Execute("HW.ACK", "some.service", "node-1", "never-dequeued");
-        result.ToString().Should().Be("OK");
+        // Acknowledging a token that is no longer held is not an error: it answers :0.
+        _db.Execute("HW.CALL", "some.service", "req-ack-twice", "p");
+        var claim = _db.ClaimSvc("some.service", "node-1")!.Value;
+
+        _db.Ack(claim.Token).Should().Be(1);
+        _db.Ack(claim.Token).Should().Be(0);
     }
 
     [Fact]
@@ -112,34 +126,16 @@ public class RpcFlowTests : IDisposable
             _db.Execute("HW.CALL", service, $"req-{i}", $"payload-{i}");
         }
 
-        // 3 concurrent dequeue loops — retry on transient transaction failure
+        // 3 concurrent claim loops (5.0 has no transient "Transaction failed" to retry)
         var claimed = new System.Collections.Concurrent.ConcurrentBag<string>();
         var tasks = Enumerable.Range(0, consumerCount).Select(nodeIdx => Task.Run(() =>
         {
             using var conn = ConnectionMultiplexer.Connect(_server.ConnectionString);
             var db = conn.GetDatabase();
 
-            while (true)
+            while (db.ClaimSvc(service, $"node-{nodeIdx}") is { } claim)
             {
-                RedisResult? result = null;
-                // Retry on transient transaction failures (per design: client retries on ERR Transaction failed)
-                for (int attempt = 0; attempt < 10; attempt++)
-                {
-                    try
-                    {
-                        result = db.Execute("HW.DEQUEUE", service, $"node-{nodeIdx}");
-                        break;
-                    }
-                    catch (RedisServerException ex) when (ex.Message.Contains("Transaction failed"))
-                    {
-                        Thread.Sleep(10);
-                    }
-                }
-
-                if (result == null || result.IsNull) break;
-
-                var arr = (RedisResult[])result!;
-                claimed.Add((string)arr[0]!);
+                claimed.Add(claim.Id);
             }
         })).ToArray();
 

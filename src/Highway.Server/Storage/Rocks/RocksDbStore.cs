@@ -68,6 +68,7 @@ public sealed class RocksDbStore : IHighwayStore
         // A promotion announces its new epoch to every roster peer (042-1d); the closure
         // reads through this fully-built store, invoked only at promote time.
         Replication.RosterPeers = () => RosterStore.Read(this).Members.Select(m => m.Endpoint).ToArray();
+        Replication.RosterMembers = () => RosterStore.Read(this).Members;   // 069 R1/R2: priorities too
         // 050 T1 (F1): a node that promotes at runtime self-registers into the roster — the same
         // record the startup path writes for a node that starts writable — so the successor order
         // (and the dashboard succession view) survives a failover. Idempotent on the node id, and
@@ -85,7 +86,7 @@ public sealed class RocksDbStore : IHighwayStore
     /// Opens (or creates) a store at <paramref name="path"/>. The column families are
     /// created if absent and their order is asserted (physical-layout.md §6).
     /// </summary>
-    public static RocksDbStore Open(string path, bool ownsDirectory = false, HighwayReplicationOptions? replication = null, ILogger? logger = null, CancellationToken cancellationToken = default)
+    public static RocksDbStore Open(string path, bool ownsDirectory = false, HighwayReplicationOptions? replication = null, ILogger? logger = null, CancellationToken cancellationToken = default, bool allowLegacyLayout = false)
     {
         replication?.Validate();
         Directory.CreateDirectory(path);
@@ -150,8 +151,35 @@ public sealed class RocksDbStore : IHighwayStore
         if (File.Exists(rejoinMarker)) File.Delete(rejoinMarker);
 
         AssertColumnFamilyOrder(db);
+
+        // 065: storage format 4 keeps every key inside a box — [box:4][space][...] — so every key
+        // starts with 0x00 (ids are far below 2^24). A 2.x directory's keys start with a family tag
+        // ('k', 'q', 's', 'z', 'n'). Such data must never be served as if it were empty-but-healthy:
+        // refuse it loudly, whatever the highway.format stamp says (a re-synced 2.x standby has none).
+        if (!allowLegacyLayout && HasPreBoxLayoutKeys(db))
+        {
+            db.Dispose();
+            throw new InvalidOperationException(StorageLayoutMessage(path));
+        }
+
         return new RocksDbStore(db, path, ownsDirectory, replication);
     }
+
+    /// <summary>True when the data family holds any key outside the 065 box layout (i.e. 2.x data).</summary>
+    private static bool HasPreBoxLayoutKeys(RocksDb db)
+    {
+        using var iter = db.NewIterator(db.GetColumnFamily(HighwayColumnFamilies.OrderedNames[HighwayColumnFamilies.Data]));
+        iter.Seek([0x01]);
+        return iter.Valid();
+    }
+
+    /// <summary>The operator-facing explanation for a 2.x data directory under 3.0 (no in-place migration, by design).</summary>
+    internal static string StorageLayoutMessage(string path)
+        => $"Highway's data directory '{path}' holds data written by Highway 2.x (storage format 3). " +
+           "Highway 3.0 stores data in a new layout (format 4) and does not migrate in place. " +
+           "Drain the directory with 2.x, then run 'highways --wipe-data' (keeps the node's replication " +
+           "identity) or delete the directory, and start 3.0 on the empty directory. In a replica set, " +
+           "follow the 3.0 upgrade runbook: the upgraded node starts empty and the other re-syncs from it.";
 
     /// <summary>
     /// Deletes the database files ahead of a snapshot re-bootstrap (G4), preserving the
@@ -194,6 +222,9 @@ public sealed class RocksDbStore : IHighwayStore
     {
         "repl-epoch.txt", "snapshot-bootstrap.log", ReplicaPuller.RejoinMarkerFileName,
     };
+
+    /// <summary>Whether <paramref name="fileName"/> is node-local state a wipe keeps (065 T6 <c>--wipe-data</c>).</summary>
+    internal static bool IsNodeLocalFile(string fileName) => NodeLocalFiles.Contains(fileName);
 
     /// <summary>
     /// Bootstraps a blank replica from the primary's snapshot, waiting for an unreachable primary
@@ -313,6 +344,13 @@ public sealed class RocksDbStore : IHighwayStore
     /// <inheritdoc />
     public byte[]? Get(IStoreSnapshot snapshot, byte[] key)
         => _db.Get(key, _data, Cast(snapshot).ReadOptions);
+
+    /// <inheritdoc />
+    public byte[]? Read(IStoreBatch batch, byte[] key) => Cast(batch).ReadThrough(key);
+
+    /// <inheritdoc />
+    public IReadOnlyList<(byte[] Key, byte[] Value)> Scan(IStoreBatch batch, byte[] prefix, byte[] from, int limit)
+        => Cast(batch).EntriesFrom(prefix, from, limit);
 
     /// <inheritdoc />
     public long ListLength(IStoreSnapshot snapshot, byte[] key)

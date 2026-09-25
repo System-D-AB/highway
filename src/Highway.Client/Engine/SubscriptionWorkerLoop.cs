@@ -72,14 +72,12 @@ internal sealed class SubscriptionWorkerLoop : SingleMessageWorkerLoop
     // for subscribers by design Decision 5 (018).
     protected override string FailureDisposition => "it will be redelivered";
 
-    protected override async Task<(string Id, byte[] Payload)?> ClaimAsync(CancellationToken stopToken)
-    {
-        var claimed = await Connection.QClaimAsync(_derivedQueueName, NodeName, stopToken).ConfigureAwait(false);
-        return claimed is null ? null : (claimed.Value.MessageId, claimed.Value.Payload);
-    }
+    protected override Task<ClaimedWork?> ClaimAsync(CancellationToken stopToken)
+        => Connection.ClaimAsync(WorkKind.Queue, _derivedQueueName, NodeName, stopToken);
 
-    protected override async Task ProcessAsync(string messageId, byte[] payload, CancellationToken ct)
+    protected override async Task ProcessAsync(ClaimedWork work, CancellationToken ct)
     {
+        var (token, messageId, payload) = work;
         object? message;
         try
         {
@@ -121,7 +119,7 @@ internal sealed class SubscriptionWorkerLoop : SingleMessageWorkerLoop
                     Logger.LogDebug(
                         "Suppressed a duplicate delivery of '{MessageId}' on channel '{Channel}' (queue '{Queue}')",
                         messageId, _descriptor.Name, _derivedQueueName);
-                    await Connection.QAckAsync(_derivedQueueName, NodeName, messageId, ct).ConfigureAwait(false);
+                    await Connection.AckAsync(token, ct).ConfigureAwait(false);
                     return;
 
                 case IdempotencyOutcome.InProgress:
@@ -149,6 +147,6 @@ internal sealed class SubscriptionWorkerLoop : SingleMessageWorkerLoop
         }
 
         // All subscribers succeeded — acknowledge.
-        await Connection.QAckAsync(_derivedQueueName, NodeName, messageId, ct).ConfigureAwait(false);
+        await Connection.AckAsync(token, ct).ConfigureAwait(false);
     }
 }

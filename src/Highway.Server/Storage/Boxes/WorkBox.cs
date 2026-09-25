@@ -1,0 +1,537 @@
+using System.Buffers.Binary;
+using System.Text;
+using Highway.Abstractions.Scheduling;
+using Highway.Server.Internal;
+
+namespace Highway.Server.Storage.Boxes;
+
+/// <summary>
+/// One service, queue or group queue in its own box (065) — every per-message operation is a point read,
+/// a point write, or a seek from a known live position; every count is a stored counter.
+///
+/// <para>Spaces (see <see cref="BoxKeys"/>): ready <c>[seq]</c>, in-flight <c>[seq]</c> (the claim token),
+/// lease index <c>[claimTicks][seq]</c>, delayed <c>[due][seq]</c>, dead <c>[seq]</c>, counters, workers,
+/// schedules + schedule index, node index <c>[node][seq]</c>. One allocator (<c>nextSeq</c>) numbers every
+/// entry in the box, so a sequence — and therefore a token — names exactly one claim, forever.</para>
+///
+/// <para>Entries keep the pre-065 framings: ready and delayed hold the queue entry
+/// (<see cref="Envelope.EncodeRpcEntry"/>, attempts and failure block included); dead holds a
+/// <see cref="DeadLetter"/>; in-flight wraps the queue entry with who claimed it and when. So a message
+/// crosses ready → in-flight → ready/dead without re-encoding its payload or losing its failure block.</para>
+///
+/// <para>Callers hold this box's command lock (<see cref="LockName"/>) for the whole operation, which is
+/// what makes the counters' read-modify-write and the process-local floors safe.</para>
+/// </summary>
+internal sealed class WorkBox : IDisposable
+{
+    private const byte CHead = 1, CNextSeq = 2, CReady = 3, CInFlight = 4, CDelayed = 5, CDead = 6, CBytes = 7, CDeadHead = 8;
+    private const int SweepPage = 256;
+
+    private readonly IHighwayStore _store;
+    private readonly BoxRuntime _rt;
+    private readonly bool _ownsBatch;
+    private readonly List<(byte Space, long Ticks)> _raises = [];
+
+    public uint Id { get; }
+
+    /// <summary>Queues and group queues count bytes against <c>MaxQueueBytes</c>; services do not.</summary>
+    public bool TracksBytes { get; }
+
+    public IStoreBatch Batch { get; }
+
+    public WorkBox(IHighwayStore store, BoxRuntime rt, uint id, bool tracksBytes, IStoreBatch? sharedBatch = null)
+    {
+        _store = store;
+        _rt = rt;
+        Id = id;
+        TracksBytes = tracksBytes;
+        _ownsBatch = sharedBatch is null;
+        Batch = sharedBatch ?? store.NewBatch();
+    }
+
+    /// <summary>The command lock that serializes every operation on a box.</summary>
+    public static string LockName(uint box) => "box:" + box.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>Commits this box's own batch, then raises its floors (never before the write succeeded).</summary>
+    public void Commit()
+    {
+        if (!_ownsBatch) throw new InvalidOperationException("A shared-batch box is committed by its owner; call AfterCommit.");
+        Batch.Commit();
+        AfterCommit();
+    }
+
+    /// <summary>For a box sharing another batch: apply floor raises once that batch has committed.</summary>
+    public void AfterCommit()
+    {
+        foreach (var (space, ticks) in _raises) _rt.Raise(Id, space, ticks);
+        _raises.Clear();
+    }
+
+    public void Dispose()
+    {
+        if (_ownsBatch) Batch.Dispose();
+    }
+
+    // =====================================================================================
+    // Counters
+    // =====================================================================================
+
+    public long Ready => Get(CReady);
+    public long InFlight => Get(CInFlight);
+    public long Delayed => Get(CDelayed);
+    public long Dead => Get(CDead);
+    public long Bytes => Get(CBytes);
+
+    private long Get(byte counter) => BoxKeys.ReadI64(_store.Read(Batch, BoxKeys.Counter(Id, counter)));
+
+    private void Add(byte counter, long delta)
+    {
+        if (delta == 0) return;
+        var value = Get(counter) + delta;
+        var key = BoxKeys.Counter(Id, counter);
+        if (value == 0 && counter is not (CHead or CNextSeq or CDeadHead)) _store.Delete(Batch, key);
+        else _store.Set(Batch, key, BoxKeys.I64(value));
+    }
+
+    private ulong NextSeq()
+    {
+        var seq = Get(CNextSeq);
+        _store.Set(Batch, BoxKeys.Counter(Id, CNextSeq), BoxKeys.I64(seq + 1));
+        return (ulong)seq;
+    }
+
+    // =====================================================================================
+    // Enqueue
+    // =====================================================================================
+
+    /// <summary>Appends a queue entry to ready. Returns its sequence.</summary>
+    public ulong Enqueue(byte[] entry)
+    {
+        var seq = NextSeq();
+        _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.Ready, seq), entry);
+        Add(CReady, 1);
+        if (TracksBytes) Add(CBytes, entry.Length);
+        return seq;
+    }
+
+    /// <summary>Holds a queue entry until <paramref name="dueTicks"/> (promoted by <see cref="PromoteDue"/>).</summary>
+    public void EnqueueDelayed(byte[] entry, long dueTicks)
+    {
+        var seq = NextSeq();
+        _store.Set(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Delayed, dueTicks, seq), entry);
+        _rt.Lower(Id, BoxKeys.Delayed, dueTicks);
+        Add(CDelayed, 1);
+        if (TracksBytes) Add(CBytes, entry.Length);
+    }
+
+    /// <summary>Moves delayed entries due at or before <paramref name="nowTicks"/> to ready. Returns how many.</summary>
+    public int PromoteDue(long nowTicks, int limit = 256)
+    {
+        var floor = _rt.Floor(Id, BoxKeys.Delayed);
+        var due = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Delayed), BoxKeys.TicksFloor(Id, BoxKeys.Delayed, floor), limit);
+        var promoted = 0;
+        var exhausted = due.Count < limit;
+        foreach (var (key, entry) in due)
+        {
+            if (BoxKeys.TicksAt(key) > nowTicks) { exhausted = true; break; }
+            _store.Delete(Batch, key);
+            Add(CDelayed, -1);
+            var seq = NextSeq();
+            _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.Ready, seq), entry);   // bytes already counted
+            Add(CReady, 1);
+            promoted++;
+        }
+        if (exhausted) _raises.Add((BoxKeys.Delayed, nowTicks + 1));
+        else if (promoted > 0) _raises.Add((BoxKeys.Delayed, BoxKeys.TicksAt(due[promoted - 1].Key)));
+        return promoted;
+    }
+
+    // =====================================================================================
+    // Claim / settle
+    // =====================================================================================
+
+    internal readonly record struct Claimed(ulong Token, byte[] Id, byte[] Payload, ushort Attempts);
+
+    /// <summary>Moves up to <paramref name="max"/> ready entries in-flight for <paramref name="node"/>.</summary>
+    public List<Claimed> Claim(string node, long nowTicks, int max, string storageName)
+    {
+        var claimed = new List<Claimed>(Math.Min(max, 16));
+        if (max <= 0) return claimed;
+
+        var head = (ulong)Get(CHead);
+        var ready = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Ready), BoxKeys.Seq(Id, BoxKeys.Ready, head), max);
+        foreach (var (key, entry) in ready)
+        {
+            if (Envelope.IsLegacyEntry(entry)) throw new StorageFormatException(storageName);
+            var seq = BoxKeys.TrailingSeq(key);
+            _store.Delete(Batch, key);
+            head = seq + 1;
+            Add(CReady, -1);
+            if (TracksBytes) Add(CBytes, -entry.Length);
+
+            _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, seq), InFlightRecord.Encode(nowTicks, node, entry));
+            _store.Set(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, nowTicks, seq), []);
+            _store.Set(Batch, BoxKeys.NameSeq(Id, BoxKeys.NodeIndex, node, seq), []);
+            _rt.Lower(Id, BoxKeys.Lease, nowTicks);
+            Add(CInFlight, 1);
+
+            Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
+            claimed.Add(new Claimed(seq, id.ToArray(), payload.ToArray(), attempts));
+        }
+
+        if (claimed.Count > 0)
+        {
+            _store.Set(Batch, BoxKeys.Counter(Id, CHead), BoxKeys.I64((long)head));
+            _store.Set(Batch, BoxKeys.Name(Id, BoxKeys.Workers, node), BoxKeys.I64(nowTicks));
+        }
+        return claimed;
+    }
+
+    /// <summary>Settles a claim for good. False when <paramref name="token"/> is not held (acked, swept, never claimed).</summary>
+    public bool Ack(ulong token)
+    {
+        if (ReadInFlight(token) is not { } rec) return false;
+        RemoveInFlight(token, rec);
+        return true;
+    }
+
+    /// <summary>"Still working": the claim's lease restarts now. False when not held.</summary>
+    public bool Touch(ulong token, long nowTicks)
+    {
+        if (ReadInFlight(token) is not { } rec) return false;
+        _store.Delete(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, rec.ClaimTicks, token));
+        _store.Set(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, nowTicks, token), []);
+        _rt.Lower(Id, BoxKeys.Lease, nowTicks);
+        _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, token), InFlightRecord.Encode(nowTicks, rec.Node, rec.Entry));
+        return true;
+    }
+
+    /// <summary>Rewrites the held entry's failure block (<see cref="Envelope.WithFailureBlock"/>). False when not held.</summary>
+    public bool Fail(ulong token, Func<byte[], byte[]> buildBlock)
+    {
+        if (ReadInFlight(token) is not { } rec) return false;
+        var updated = Envelope.WithFailureBlock(rec.Entry, buildBlock(rec.Entry));
+        _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, token), InFlightRecord.Encode(rec.ClaimTicks, rec.Node, updated));
+        return true;
+    }
+
+    /// <summary>The held claim for <paramref name="token"/>, decoded — id and node, for recording.</summary>
+    public InFlightRecord? ReadInFlight(ulong token)
+    {
+        var raw = _store.Read(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, token));
+        return raw is null ? null : InFlightRecord.Decode(raw);
+    }
+
+    private void RemoveInFlight(ulong seq, InFlightRecord rec)
+    {
+        _store.Delete(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, seq));
+        _store.Delete(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, rec.ClaimTicks, seq));
+        _store.Delete(Batch, BoxKeys.NameSeq(Id, BoxKeys.NodeIndex, rec.Node, seq));
+        Add(CInFlight, -1);
+    }
+
+    // =====================================================================================
+    // Recovery
+    // =====================================================================================
+
+    internal readonly record struct DeadLettered(string Id, ushort Attempts);
+
+    /// <summary>
+    /// Recovers claims whose lease started before <paramref name="leaseExpiry"/>: each returns to ready
+    /// with its attempt count incremented, or is dead-lettered past <paramref name="maxAttempts"/>. Reads
+    /// only the lease index from its floor up to the expiry — never a live claim.
+    /// </summary>
+    public List<DeadLettered> SweepLeases(long leaseExpiry, long nowTicks, int maxAttempts, int maxDeadEntries)
+    {
+        var outcomes = new List<DeadLettered>();
+        var floor = _rt.Floor(Id, BoxKeys.Lease);
+        var page = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Lease), BoxKeys.TicksFloor(Id, BoxKeys.Lease, floor), SweepPage);
+        var exhausted = page.Count < SweepPage;
+        var processed = 0;
+        foreach (var (key, _) in page)
+        {
+            var claimTicks = BoxKeys.TicksAt(key);
+            if (claimTicks >= leaseExpiry) { exhausted = true; break; }
+            processed++;
+            var seq = BoxKeys.TrailingSeq(key);
+            _store.Delete(Batch, key);
+            if (ReadInFlight(seq) is not { } rec) continue;   // index entry without a claim: just drop it
+            RemoveInFlight(seq, rec);
+            Redeliver(rec.Entry, nowTicks, maxAttempts, maxDeadEntries, outcomes);
+        }
+        if (exhausted) _raises.Add((BoxKeys.Lease, leaseExpiry));
+        else if (processed > 0) _raises.Add((BoxKeys.Lease, BoxKeys.TicksAt(page[processed - 1].Key)));
+        return outcomes;
+    }
+
+    /// <summary>
+    /// Returns every claim held by <paramref name="node"/> to ready with its attempt count incremented (a
+    /// delivery was made and lost with the node), never dead-lettering — dead-node recovery and departure,
+    /// exactly as <c>RequeueNodeWork</c> did. Returns how many.
+    /// </summary>
+    public int RequeueNode(string node)
+    {
+        var prefix = BoxKeys.Name(Id, BoxKeys.NodeIndex, node);
+        var count = 0;
+        while (true)
+        {
+            var page = _store.Scan(Batch, prefix, prefix, SweepPage);
+            foreach (var (key, _) in page)
+            {
+                var seq = BoxKeys.TrailingSeq(key);
+                if (ReadInFlight(seq) is not { } rec) { _store.Delete(Batch, key); continue; }
+                RemoveInFlight(seq, rec);
+                Envelope.DecodeRpcEntry(rec.Entry, out var id, out var payload, out var attempts);
+                Enqueue(Envelope.CarryFailureBlock(rec.Entry,
+                    Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), Envelope.NextAttempt(attempts))));
+                count++;
+            }
+            if (page.Count < SweepPage) break;
+        }
+        _store.Delete(Batch, BoxKeys.Name(Id, BoxKeys.Workers, node));
+        return count;
+    }
+
+    private void Redeliver(byte[] entry, long nowTicks, int maxAttempts, int maxDeadEntries, List<DeadLettered> outcomes)
+    {
+        Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
+        var next = Envelope.NextAttempt(attempts);
+        var rebuilt = Envelope.CarryFailureBlock(entry, Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), next));
+        if (maxAttempts > 0 && next > maxAttempts)
+        {
+            PushDead(DeadLetter.Encode(nowTicks, next, DeadLetter.MaxAttempts, rebuilt), maxDeadEntries);
+            outcomes.Add(new DeadLettered(Encoding.UTF8.GetString(id), next));
+            return;
+        }
+        Enqueue(rebuilt);
+    }
+
+    private static byte[] Reencode(byte[] entry, bool keepAttempts)
+    {
+        Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
+        return Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), keepAttempts ? attempts : (ushort)0);
+    }
+
+    /// <summary>Distinct nodes with a worker record — the candidates dead-node recovery checks.</summary>
+    public List<string> Workers()
+    {
+        var prefix = BoxKeys.Space(Id, BoxKeys.Workers);
+        var nodes = new List<string>();
+        foreach (var (key, _) in _store.Scan(Batch, prefix, prefix, 4096))
+            nodes.Add(Layout.KeyEncoding.ReadString(key.AsSpan(5), out _));
+        return nodes;
+    }
+
+    // =====================================================================================
+    // Inspection (operators, tests) — bounded reads, never on a hot path
+    // =====================================================================================
+
+    /// <summary>Ready entries in delivery order, up to <paramref name="limit"/>.</summary>
+    public IReadOnlyList<byte[]> ReadyEntries(int limit = 4096)
+        => [.. _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Ready), BoxKeys.Seq(Id, BoxKeys.Ready, (ulong)Get(CHead)), limit).Select(e => e.Value)];
+
+    /// <summary>The claims <paramref name="node"/> holds, oldest first.</summary>
+    public IReadOnlyList<InFlightRecord> InFlightFor(string node, int limit = 4096)
+    {
+        var prefix = BoxKeys.Name(Id, BoxKeys.NodeIndex, node);
+        var held = new List<InFlightRecord>();
+        foreach (var (key, _) in _store.Scan(Batch, prefix, prefix, limit))
+            if (ReadInFlight(BoxKeys.TrailingSeq(key)) is { } rec) held.Add(rec);
+        return held;
+    }
+
+    // =====================================================================================
+    // Dead letters
+    // =====================================================================================
+
+    private void PushDead(byte[] record, int maxEntries)
+    {
+        var seq = NextSeq();
+        _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.Dead, seq), record);
+        Add(CDead, 1);
+        if (maxEntries > 0)
+            while (Get(CDead) > maxEntries)
+                if (TakeDead(1, _ => { }) == 0) break;
+    }
+
+    /// <summary>The oldest dead letters, without removing them.</summary>
+    public IReadOnlyList<(byte[] Key, byte[] Value)> PeekDead(int count)
+        => count <= 0 ? [] : _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Dead), BoxKeys.Seq(Id, BoxKeys.Dead, (ulong)Get(CDeadHead)), count);
+
+    /// <summary>
+    /// Returns the oldest dead letters to ready with attempts reset to zero and the failure block dropped —
+    /// an operator fixed something, so the message starts clean (as <c>HW.DLQ REQUEUE</c> always did).
+    /// </summary>
+    public int RequeueDead(int count)
+        => TakeDead(count, record =>
+        {
+            DeadLetter.Decode(record, out _, out _, out _, out var original);
+            Enqueue(Reencode(original.ToArray(), keepAttempts: false));
+        });
+
+    /// <summary>Deletes the oldest dead letters.</summary>
+    public int PurgeDead(int count) => TakeDead(count, _ => { });
+
+    private int TakeDead(int count, Action<byte[]> each)
+    {
+        var taken = 0;
+        var head = (ulong)Get(CDeadHead);
+        foreach (var (key, record) in PeekDead(count))
+        {
+            _store.Delete(Batch, key);
+            head = BoxKeys.TrailingSeq(key) + 1;
+            Add(CDead, -1);
+            each(record);
+            taken++;
+        }
+        if (taken > 0) _store.Set(Batch, BoxKeys.Counter(Id, CDeadHead), BoxKeys.I64((long)head));
+        return taken;
+    }
+
+    // =====================================================================================
+    // Recurring jobs (queues only)
+    // =====================================================================================
+
+    internal readonly record struct Schedule(string Job, string Expression, long LastFire, long NextFire, byte[] Template);
+
+    /// <summary>
+    /// Registers or replaces a schedule, preserving <c>lastFire</c> (last registration wins). Returns the
+    /// previous expression, or null when the job is new.
+    /// </summary>
+    public string? UpsertSchedule(string job, string expression, JobExpression parsed, byte[] template, long nowTicks)
+    {
+        long lastFire = 0;
+        string? previous = null;
+        if (ReadSchedule(job) is { } existing)
+        {
+            lastFire = existing.LastFire;
+            previous = existing.Expression;
+            _store.Delete(Batch, BoxKeys.TicksName(Id, BoxKeys.ScheduleIndex, existing.NextFire, job));
+        }
+        var next = parsed.NextOccurrence(new DateTime(nowTicks, DateTimeKind.Utc)).Ticks;
+        WriteSchedule(job, expression, lastFire, next, template);
+        return previous;
+    }
+
+    public bool RemoveSchedule(string job)
+    {
+        if (ReadSchedule(job) is not { } existing) return false;
+        _store.Delete(Batch, BoxKeys.Name(Id, BoxKeys.Schedules, job));
+        _store.Delete(Batch, BoxKeys.TicksName(Id, BoxKeys.ScheduleIndex, existing.NextFire, job));
+        return true;
+    }
+
+    public List<Schedule> Schedules()
+    {
+        var prefix = BoxKeys.Space(Id, BoxKeys.Schedules);
+        var list = new List<Schedule>();
+        foreach (var (_, record) in _store.Scan(Batch, prefix, prefix, 4096))
+            if (TryDecode(record, out var s)) list.Add(s);
+        return list;
+    }
+
+    internal readonly record struct JobFire(string Job, string MessageId, bool Refused);
+
+    /// <summary>
+    /// Fires every schedule due at <paramref name="nowTicks"/>: one occurrence each, re-armed from now
+    /// (catch-up-one). A fire the byte budget refuses leaves <c>nextFire</c> unchanged, so a later poll
+    /// retries it. An unreadable schedule is removed, loudly.
+    /// </summary>
+    public List<JobFire> FireDueJobs(long nowTicks, long maxQueueBytes, int limit = 16)
+    {
+        var fires = new List<JobFire>();
+        var floor = _rt.Floor(Id, BoxKeys.ScheduleIndex);
+        var due = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.ScheduleIndex), BoxKeys.TicksFloor(Id, BoxKeys.ScheduleIndex, floor), limit);
+        var exhausted = due.Count < limit;
+        long lowestRefused = long.MaxValue;
+        foreach (var (key, _) in due)
+        {
+            if (BoxKeys.TicksAt(key) > nowTicks) { exhausted = true; break; }
+            var job = BoxKeys.NameAfterTicks(key);
+            if (ReadSchedule(job) is not { } s || !TryParse(s.Expression, out var parsed))
+            {
+                _store.Delete(Batch, key);
+                _store.Delete(Batch, BoxKeys.Name(Id, BoxKeys.Schedules, job));
+                fires.Add(new JobFire("<unreadable schedule removed>", "", Refused: true));
+                continue;
+            }
+
+            var messageId = $"job:{job}:{nowTicks.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            var entry = Envelope.EncodeRpcEntry(Encoding.UTF8.GetBytes(messageId), s.Template);
+            if (maxQueueBytes > 0 && Bytes + entry.Length > maxQueueBytes)
+            {
+                fires.Add(new JobFire(job, messageId, Refused: true));
+                lowestRefused = Math.Min(lowestRefused, s.NextFire);
+                continue;   // nextFire unchanged — retried on a later poll
+            }
+            Enqueue(entry);
+            _store.Delete(Batch, key);
+            WriteSchedule(job, s.Expression, nowTicks, parsed.NextOccurrence(new DateTime(nowTicks, DateTimeKind.Utc)).Ticks, s.Template);
+            fires.Add(new JobFire(job, messageId, Refused: false));
+        }
+        if (exhausted) _raises.Add((BoxKeys.ScheduleIndex, Math.Min(nowTicks + 1, lowestRefused)));
+        return fires;
+    }
+
+    private Schedule? ReadSchedule(string job)
+    {
+        var raw = _store.Read(Batch, BoxKeys.Name(Id, BoxKeys.Schedules, job));
+        return raw is not null && TryDecode(raw, out var s) ? s : null;
+    }
+
+    private void WriteSchedule(string job, string expression, long lastFire, long nextFire, byte[] template)
+    {
+        _store.Set(Batch, BoxKeys.Name(Id, BoxKeys.Schedules, job), JobScheduleRecord.Encode(job, expression, lastFire, nextFire, template));
+        _store.Set(Batch, BoxKeys.TicksName(Id, BoxKeys.ScheduleIndex, nextFire, job), []);
+        _rt.Lower(Id, BoxKeys.ScheduleIndex, nextFire);
+    }
+
+    private static bool TryDecode(byte[] record, out Schedule schedule)
+    {
+        try
+        {
+            JobScheduleRecord.Decode(record, out var job, out var expr, out var last, out var next, out var template);
+            schedule = new Schedule(job, expr, last, next, template.ToArray());
+            return true;
+        }
+        catch (Exception)
+        {
+            schedule = default;
+            return false;
+        }
+    }
+
+    private static bool TryParse(string expression, out JobExpression parsed)
+    {
+        try { parsed = JobExpression.Parse(expression); return true; }
+        catch (Exception) { parsed = null!; return false; }
+    }
+}
+
+/// <summary>A claimed entry: when and by whom, wrapping the queue entry unchanged (065).</summary>
+internal sealed record InFlightRecord(long ClaimTicks, string Node, byte[] Entry)
+{
+    private const byte Version = 1;
+
+    public static byte[] Encode(long claimTicks, string node, byte[] entry)
+    {
+        var nodeBytes = Encoding.UTF8.GetBytes(node);
+        var buf = new byte[1 + 8 + 2 + nodeBytes.Length + entry.Length];
+        buf[0] = Version;
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1), claimTicks);
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(9), (ushort)nodeBytes.Length);
+        nodeBytes.CopyTo(buf.AsSpan(11));
+        entry.CopyTo(buf.AsSpan(11 + nodeBytes.Length));
+        return buf;
+    }
+
+    public static InFlightRecord Decode(byte[] raw)
+    {
+        if (raw.Length < 11 || raw[0] != Version)
+            throw new InvalidDataException($"In-flight record version {(raw.Length > 0 ? raw[0] : -1)} is not readable by this build.");
+        var claim = BinaryPrimitives.ReadInt64BigEndian(raw.AsSpan(1));
+        var nodeLen = BinaryPrimitives.ReadUInt16BigEndian(raw.AsSpan(9));
+        var node = Encoding.UTF8.GetString(raw, 11, nodeLen);
+        return new InFlightRecord(claim, node, raw[(11 + nodeLen)..]);
+    }
+}

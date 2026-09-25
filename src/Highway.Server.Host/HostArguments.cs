@@ -22,6 +22,9 @@ internal sealed class HostArguments
 
     /// <summary>--compact: offline — compact the data directory, dropping tombstones (061 T5). Broker must be stopped.</summary>
     public bool Compact { get; private set; }
+
+    /// <summary>--wipe-data: offline — empty the data directory for a fresh 3.0 start, keeping node-local replication files (065 T6).</summary>
+    public bool WipeData { get; private set; }
     public string? ConfigPath { get; private set; }
     public int? Port { get; private set; }
     public string? BindAddress { get; private set; }
@@ -87,6 +90,11 @@ internal sealed class HostArguments
                 case "--validate":
                     RejectIfVerb(result, "--validate");
                     result.Validate = true;
+                    break;
+
+                case "--wipe-data":
+                    RejectIfVerb(result, "--wipe-data");
+                    result.WipeData = true;
                     break;
 
                 case "--compact":

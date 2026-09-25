@@ -23,29 +23,37 @@ machinery, with no response slot. You get:
 - **Durable by default.** Queued work survives a broker restart; memory-only durability is opt-in
   by name (an ephemeral broker), never the accidental default.
 
-Queues have their own key space, so a queue and an RPC service may share a name without colliding,
-and a queue never appears in service discovery.
+Every queue (and every RPC service, and every subscriber group's queue) lives in its own **box** — a
+contiguous key range found through the broker's catalog — so a queue and a service may share a name
+without colliding, and a queue never appears in service discovery.
 
 ## How it works
 
 **Send → claim → ack.** A send appends the message and rings the queue's doorbell so idle workers
-wake. A worker *claims* one message at a time, receiving its id and payload; the claim starts a
-**lease**. When the worker finishes it *acks*, and the message is gone. Until the ack arrives the
-message sits in that worker's processing list — which is exactly what makes delivery at-least-once.
+wake. A worker *claims* work with `HW.CLAIM`, receiving each message's id, payload and a **token**;
+the claim starts a **lease**. When the worker finishes it *acks* the token, and the message is gone.
+Until the ack arrives the message is held as that claim — which is exactly what makes delivery
+at-least-once. The token names the claim directly, so an ack, a renewal or a failure report is one
+lookup, and a stale token (the claim was recovered and redelivered) answers `:0` rather than settling
+the redelivery.
 
-**Lease recovery is the safety net.** Claims sweep expired leases across all known workers: a
-message whose lease elapsed returns to the queue with its attempt count incremented, so a worker that
-died mid-processing loses nothing. There is no background timer doing this — recovery and
-deferred-delivery promotion both happen *on the claim path*, decided by the broker's clock. The sweep
-runs at most once per `min(1 s, lease/10)` per queue and is **read-only except for expired entries**:
-a message still inside its lease is never touched (feature 061).
+**Lease recovery is the safety net.** Every claim first recovers expired leases: a message whose
+lease elapsed returns to the queue with its attempt count incremented, so a worker that died
+mid-processing loses nothing. There is no background timer doing this — recovery, deferred-delivery
+promotion and recurring-job firing all happen *on the claim path*, decided by the broker's clock.
+Claims are indexed by lease start, so recovery reads **only the claims that actually expired** — a
+message still inside its lease is never touched, and a claim with nothing expired reads nothing
+(feature 065; 061 had narrowed it to a throttled, read-only sweep of every worker's list).
 
-**In-flight work is changed in place, never re-written.** Ack, fail and touch act on the one message
-they name — a delete of its key, or an in-place update — and leave every other in-flight message
-exactly where it is. The broker's store is an ordered LSM (RocksDB), where a delete leaves a
-tombstone that later scans must step over; so the hot paths neither create churn nor walk history:
-a pop starts from the queue's known head, and every scan is bounded to its own key range. The cost of
-a claim or an ack therefore does not grow with how long the broker has been running (feature 061).
+**In-flight work is changed in place, never re-written.** Ack, fail and touch act on the one claim
+they name — a delete of its key, or an in-place update — and leave every other claim exactly where it
+is. The broker's store is an ordered LSM (RocksDB), where a delete leaves a tombstone that later scans
+must step over; so the hot paths neither create churn nor walk history: a claim starts from the
+queue's stored head, recovery and promotion seek their indexes from a known floor, and every scan is
+bounded to its own sub-range. Every count — depth, in flight, deferred, dead-lettered, bytes — is a
+counter the queue maintains as it changes, never a scan. The cost of a send, claim or ack therefore
+does not grow with how long the broker has been running, nor with how much is in flight (features 061,
+065).
 
 **Slow work vs. dead work.** A handler that outlives its lease would be redelivered while still
 running — a duplicate caused by nothing but slowness. A worker renews its lease ("still working")
@@ -63,9 +71,9 @@ diagnose without correlating logs across every worker.
 moves it to the queue's **dead-letter queue** instead of retrying forever, carrying its failure
 block. The DLQ is inspectable and re-drivable through its own command family.
 
-**Deferred delivery** uses an absolute UTC time, not a relative delay, so log replay after a
-restart cannot re-delay a message from replay time. A deferred send is invisible to workers until
-its time passes, when a claim promotes it into the live queue.
+**Deferred delivery** uses an absolute UTC time, not a relative delay, so a restart cannot re-delay a
+message. A deferred send is invisible to workers until its time passes, when a claim promotes it into
+the live queue. Deferred messages count against the queue's byte budget.
 
 **Back-pressure refuses, never drops.** A queue has a byte cap. When it is full a send is *refused*
 (a loud, named error) rather than silently dropping the oldest entry — a full queue is a signal,
@@ -79,11 +87,11 @@ claim sweep — again, no broker-side timer.
 
 ## Wire surface
 
-The queue command family — send, claim, ack, touch (renew), fail (explain), and the dead-letter
-commands — is defined in the *Queue Commands* and *Dead Letter Commands* sections of
-[`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md), which is authoritative for every argument,
-reply, error code and key. Recurring-job scheduling shares the queue's claim path and is documented
-alongside it.
+The work commands — `HW.SEND`, `HW.CLAIM`, `HW.ACK` / `HW.TOUCH` / `HW.FAIL` by token — and the
+dead-letter commands are defined in the *Work Commands* and *Dead Letter Commands* sections of
+[`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md), which is authoritative for every argument, reply
+and error code. Recurring-job scheduling shares the queue's claim path and is documented alongside it;
+the box layout is described in [storage-engine.md](storage-engine.md).
 
 ## Guarantees & limits
 
@@ -96,7 +104,8 @@ alongside it.
 - **Bounded costs:** a byte cap that refuses rather than drops; a delivery-attempt cap that
   dead-letters rather than loops; a client-bounded processing window that recovers hung handlers.
   These bounds are tracked line by line in [`constraints.md`](../product/constraints.md).
-- **Cost independent of history:** a poll, claim or ack costs the same after a million messages as
-  after the first (constraint C4.9). An idle poll with messages in flight writes nothing.
+- **Cost independent of history and of in-flight size:** a poll, claim or ack costs the same after a
+  million messages as after the first, and with ten thousand claims in flight as with one
+  (constraint C4.9). An idle poll with messages in flight writes nothing.
 - **What it is not:** not a pub/sub bus (use channels for broadcast), not an ordered log, and not a
   result-returning call (use RPC when the sender needs a reply).

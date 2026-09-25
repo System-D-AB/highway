@@ -9,7 +9,7 @@ namespace Highway.Integration.Tests;
 /// Feature 004.1 Task 11 — Requirement 7 AC5–AC7: doorbell regression tests.
 /// The doorbell mechanism is what feature 005's entire latency design rests on;
 /// these tests promote review-time probes to permanent coverage so it cannot
-/// regress silently. Also covers the HW.RECEIVE reply shape 005 parses against.
+/// regress silently. Also covers the HW.CLAIM reply shape the client parses against.
 /// </summary>
 public class DoorbellTests
 {
@@ -90,8 +90,8 @@ public class DoorbellTests
 
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
-        db.Execute("HW.SUBSCRIBE", "ring.ch", "grpX");
-        db.Execute("HW.SUBSCRIBE", "ring.ch", "grpY");
+        db.Subscribe("ring.ch", "grpX");
+        db.Subscribe("ring.ch", "grpY");
         db.Execute("HW.PUBLISH", "ring.ch", "fan-out-msg");
 
         (await collectorX.WaitForRingAsync(TimeSpan.FromSeconds(5)))
@@ -159,22 +159,30 @@ public class DoorbellTests
     }
 
     [Fact]
-    public void HwQClaim_ReplyShape_TwoElementArray()
+    public void HwClaim_ReplyShape_RowsOfTokenIdPayload()
     {
         using var server = new HighwayTestServer();
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.SUBSCRIBE", "shape.ch", "grp");
+        db.Subscribe("shape.ch", "grp");
         db.Execute("HW.PUBLISH", "shape.ch", "payload-a");
 
-        var result = db.Execute("HW.QCLAIM", "shape.ch@grp", "node-1");
+        var result = db.Execute("HW.CLAIM", "Q", "shape.ch@grp", "node-1");
 
-        // Contract: *2 [messageId, payload]
+        // Contract: *n of *3 [token, messageId, payload]
         result.IsNull.Should().BeFalse();
-        var pair = (RedisResult[])result!;
-        pair.Should().HaveCount(2);
-        long.Parse((string)pair[0]!).Should().BePositive("messageId is a decimal long");
-        ((string)pair[1]!).Should().Be("payload-a");
+        var rows = (RedisResult[])result!;
+        rows.Should().HaveCount(1);
+        var row = (RedisResult[])rows[0]!;
+        row.Should().HaveCount(3);
+        ((string)row[0]!).Should().NotBeNullOrEmpty("the token is the claim's handle");
+        long.Parse((string)row[1]!).Should().BePositive("messageId is a decimal long");
+        ((string)row[2]!).Should().Be("payload-a");
+
+        // Nothing due: an empty array, not nil.
+        var empty = db.Execute("HW.CLAIM", "Q", "shape.ch@grp", "node-1");
+        empty.IsNull.Should().BeFalse();
+        ((RedisResult[])empty!).Should().BeEmpty();
     }
 }

@@ -19,6 +19,7 @@ internal sealed class CommandHarness : IDisposable
     private readonly RecordingDoorbell _doorbell = new();
     private readonly FlightRecorder _recorder;
     private readonly HighwayServerOptions _options;
+    private readonly Highway.Server.Storage.Boxes.BoxRuntime _boxes = new();   // one per server, as the dispatcher holds
 
     public CommandHarness(IHighwayStore? store = null, HighwayServerOptions? options = null)
     {
@@ -42,7 +43,7 @@ internal sealed class CommandHarness : IDisposable
         var replication = _store is Highway.Server.Storage.Rocks.RocksDbStore rocks
             ? rocks.Replication
             : null;
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes);
         var input = CommandInput.FromStrings(args);
         var writer = new RespWriter();
         command.Execute(ctx, input, writer);
@@ -61,6 +62,36 @@ internal sealed class CommandHarness : IDisposable
     // -- helpers to read RESP replies as text for assertions --
 
     public static string AsText(byte[] resp) => Encoding.UTF8.GetString(resp);
+
+    /// <summary>A parsed 5.0 claim row.</summary>
+    public readonly record struct Claim(string Token, string Id, string Payload);
+
+    /// <summary>
+    /// Parses an HW.CLAIM reply — <c>*N</c> rows of <c>*3 [$token $id $payload]</c>, or <c>*0</c> — into its rows.
+    /// </summary>
+    private static readonly string CrLf = new(['\r', '\n']);
+
+    public static List<Claim> Claims(byte[] resp)
+    {
+        var text = AsText(resp);
+        var lines = text.Split(CrLf);
+        var rows = new List<Claim>();
+        if (!lines[0].StartsWith('*') || lines[0] == "*0" || lines[0] == "*-1") return rows;
+        var i = 1;
+        while (i < lines.Length && lines[i].StartsWith("*3"))
+        {
+            rows.Add(new Claim(lines[i + 2], lines[i + 4], lines[i + 6]));
+            i += 7;
+        }
+        return rows;
+    }
+
+    /// <summary>Runs HW.CLAIM and returns its single row, or null when nothing was due.</summary>
+    public Claim? ClaimOne(string kind, string name, string node, long? nowTicks = null)
+    {
+        var rows = Claims(Run(new Highway.Server.Commands.Ported.HwClaimCommand(), nowTicks ?? DateTime.UtcNow.Ticks, kind, name, node));
+        return rows.Count == 0 ? null : rows[0];
+    }
 }
 
 /// <summary>A doorbell that records rings instead of publishing — proves what a command would wake.</summary>

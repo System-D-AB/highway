@@ -39,6 +39,7 @@ public class TlsWarningTests
         using var loggerFactory = LoggerFactory.Create(b => b.AddProvider(loggerProvider));
 
         var server = new HighwayServerBuilder()
+            .Ephemeral()   // warnings only: never the shared default data directory
             .WithPassword("super-secret")
             .WithLoggerFactory(loggerFactory)
             .Build();
@@ -63,6 +64,7 @@ public class TlsWarningTests
         try
         {
             var server = new HighwayServerBuilder()
+                .Ephemeral()   // warnings only: never the shared default data directory
                 .WithTls(pfxPath)
                 .WithTls(opt => opt.ClientCertificateRequired = false)
                 .WithLoggerFactory(loggerFactory)
@@ -96,6 +98,7 @@ public class TlsWarningTests
         try
         {
             var server = new HighwayServerBuilder()
+                .Ephemeral()   // warnings only: never the shared default data directory
                 .WithTls(pfxPath)
                 .WithTls(opt =>
                 {
@@ -134,6 +137,7 @@ public class TlsWarningTests
         try
         {
             var server = new HighwayServerBuilder()
+                .Ephemeral()   // warnings only: never the shared default data directory
                 .WithTls(pfxPath)
                 .WithTls(opt => opt.IsEphemeral = true)
                 .WithLoggerFactory(loggerFactory)

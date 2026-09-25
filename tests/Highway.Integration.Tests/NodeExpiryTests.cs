@@ -47,7 +47,7 @@ public class NodeExpiryTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "node-1", Catalog);
+        db.Register("node-1", Catalog);
         Discover(db, "orders.create").Should().Equal("node-1");
 
         await WaitForExpiryAsync();
@@ -63,7 +63,7 @@ public class NodeExpiryTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "node-1", Catalog);
+        db.Register("node-1", Catalog);
         await WaitForExpiryAsync();
         Discover(db, "orders.create").Should().BeEmpty();
 
@@ -85,25 +85,26 @@ public class NodeExpiryTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "worker-1", Catalog);
+        db.Register("worker-1", Catalog);
         db.Execute("HW.CALL", "orders.create", "req-1", "payload-1");
 
         // worker-1 claims the request and then dies without acking.
-        var claimed = (RedisResult[])db.Execute("HW.DEQUEUE", "orders.create", "worker-1")!;
-        ((string)claimed[0]!).Should().Be("req-1");
+        var claimed = db.ClaimSvc("orders.create", "worker-1");
+        claimed!.Value.Id.Should().Be("req-1");
 
         await WaitForExpiryAsync();
 
-        // A different worker dequeues: the dead node's claim is swept and its
+        // A different worker claims: the dead node's claim is swept and its
         // work returned to the queue. The lease is 5 minutes, so this can only
         // be the node sweep.
-        db.Execute("HW.HEARTBEAT", "worker-2", Catalog);
-        var recovered = db.Execute("HW.DEQUEUE", "orders.create", "worker-2")!;
+        db.Register("worker-2", Catalog);
+        var recovered = db.ClaimSvc("orders.create", "worker-2");
 
-        recovered.IsNull.Should().BeFalse("a dead node's in-flight work must come back");
-        var pair = (RedisResult[])recovered!;
-        ((string)pair[0]!).Should().Be("req-1");
-        ((string)pair[1]!).Should().Be("payload-1", "the payload must survive the round trip intact");
+        recovered.Should().NotBeNull("a dead node's in-flight work must come back");
+        recovered!.Value.Id.Should().Be("req-1");
+        recovered.Value.PayloadText.Should().Be("payload-1", "the payload must survive the round trip intact");
+        recovered.Value.Token.Should().NotBe(claimed.Value.Token,
+            "the redelivery is a new claim, so the dead node's token no longer names it");
     }
 
     /// <summary>
@@ -117,17 +118,17 @@ public class NodeExpiryTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "sub-1", Catalog);
-        db.Execute("HW.SUBSCRIBE", "orders.placed", "sub-1");
+        db.Register("sub-1", Catalog);
+        db.Subscribe("orders.placed", "sub-1");
 
         // Published while the node is still alive but not consuming.
         db.Execute("HW.PUBLISH", "orders.placed", "msg-before");
 
         await WaitForExpiryAsync();
 
-        // Drive a dequeue so the node sweep definitely runs and prunes sub-1.
-        db.Execute("HW.HEARTBEAT", "worker-2", Catalog);
-        db.Execute("HW.DEQUEUE", "orders.create", "worker-2");
+        // Drive a claim so the node sweep definitely runs and prunes sub-1.
+        db.Register("worker-2", Catalog);
+        db.ClaimSvc("orders.create", "worker-2");
         Discover(db, "orders.create").Should().NotContain("sub-1", "sub-1 should have been pruned");
 
         // Published while the node is gone — its group still exists, so this queues.
@@ -137,9 +138,8 @@ public class NodeExpiryTests
         var payloads = new List<string>();
         for (var i = 0; i < 10; i++)
         {
-            var claimed = db.Execute("HW.QCLAIM", "orders.placed@sub-1", "sub-1");
-            if (claimed.IsNull) break;
-            payloads.Add((string)((RedisResult[])claimed!)[1]!);
+            if (db.ClaimQ("orders.placed@sub-1", "sub-1") is not { } claimed) break;
+            payloads.Add(claimed.PayloadText);
         }
 
         payloads.Should().Equal(["msg-before", "msg-after"],
@@ -154,16 +154,16 @@ public class NodeExpiryTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "worker-1", Catalog);
+        db.Register("worker-1", Catalog);
         db.Execute("HW.CALL", "orders.create", "req-1", "p");
-        db.Execute("HW.DEQUEUE", "orders.create", "worker-1");
+        db.ClaimSvc("orders.create", "worker-1");
 
         await WaitForExpiryAsync();
 
-        db.Execute("HW.HEARTBEAT", "worker-2", Catalog);
-        db.Execute("HW.DEQUEUE", "orders.create", "worker-2");
+        db.Register("worker-2", Catalog);
+        db.ClaimSvc("orders.create", "worker-2");
 
-        // The dead node is gone from the worker set, so future dequeues stop
+        // The dead node is gone from the worker set, so future claims stop
         // locking and sweeping its list — the 004.1 unbounded-growth deferral.
         // (040 fixture swap: the newline-mirror string is gone — physical-layout §3;
         // the set the mirror shadowed is the single source of truth now.)
@@ -178,14 +178,14 @@ public class NodeExpiryTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "worker-1", Catalog);
+        db.Register("worker-1", Catalog);
         db.Execute("HW.CALL", "orders.create", "req-1", "p");
-        db.Execute("HW.DEQUEUE", "orders.create", "worker-1");
+        db.ClaimSvc("orders.create", "worker-1");
 
         await WaitForExpiryAsync();
 
-        db.Execute("HW.HEARTBEAT", "worker-2", Catalog);
-        db.Execute("HW.DEQUEUE", "orders.create", "worker-2").IsNull.Should().BeTrue(
+        db.Register("worker-2", Catalog);
+        db.ClaimSvc("orders.create", "worker-2").Should().BeNull(
             "with pruning off, recovery falls back to the slower per-entry lease sweep");
 
         server.Inspect.SetMembers("hw:svc:orders.create:nodes").Should().Contain("worker-1");
@@ -194,7 +194,7 @@ public class NodeExpiryTests
     /// <summary>
     /// A node running with <c>HeartbeatEnabled = false</c> holds no registration
     /// at all. Pruning it on that basis would requeue a healthy worker's
-    /// in-flight work on every dequeue — a configuration choice turned into a
+    /// in-flight work on every claim — a configuration choice turned into a
     /// duplicate-execution storm.
     /// </summary>
     [Fact]
@@ -206,12 +206,12 @@ public class NodeExpiryTests
 
         // worker-1 never heartbeats; it just works.
         db.Execute("HW.CALL", "orders.create", "req-1", "p");
-        db.Execute("HW.DEQUEUE", "orders.create", "worker-1");
+        db.ClaimSvc("orders.create", "worker-1");
 
         await WaitForExpiryAsync();
 
-        db.Execute("HW.HEARTBEAT", "worker-2", Catalog);
-        db.Execute("HW.DEQUEUE", "orders.create", "worker-2").IsNull.Should().BeTrue(
+        db.Register("worker-2", Catalog);
+        db.ClaimSvc("orders.create", "worker-2").Should().BeNull(
             "a node with no registration is not participating in the registry and must be left to the lease sweep");
     }
 }

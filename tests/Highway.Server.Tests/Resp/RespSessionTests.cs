@@ -118,7 +118,7 @@ public class RespSessionTests
     public void Authenticated_HwCommand_Dispatches()
     {
         var session = Session(preAuthorized: true);
-        Text(session.Handle(F("HW.QSEND", "q", "m1", "body"))).Should().Be("+OK\r\n");
+        Text(session.Handle(F("HW.SEND", "q", "m1", "body"))).Should().Be("+OK\r\n");
     }
 
     [Fact]

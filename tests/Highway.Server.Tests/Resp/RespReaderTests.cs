@@ -74,7 +74,7 @@ public class RespReaderTests
     {
         // A payload with embedded CRLF and NUL must survive — length-prefixed, not line-delimited.
         var payload = new byte[] { 0x00, (byte)'\r', (byte)'\n', 0xFF, (byte)'a' };
-        var frame = BuildFrameWithRawArg("HW.QSEND", "q", "m1", payload);
+        var frame = BuildFrameWithRawArg("HW.SEND", "q", "m1", payload);
 
         var status = RespReader.TryReadCommand(new ReadOnlySequence<byte>(frame), MaxFrame, out var args, out _, out _);
         status.Should().Be(RespReadStatus.Complete);
@@ -86,7 +86,7 @@ public class RespReaderTests
     [Theory]
     [InlineData("PING")]
     [InlineData("HW.CALL", "orders", "req-1", "payload")]
-    [InlineData("HW.QSEND", "invoices", "m-42", "the-body-with-some-length")]
+    [InlineData("HW.SEND", "invoices", "m-42", "the-body-with-some-length")]
     [InlineData("AUTH", "default", "s3cr3t")]
     public void ByteByByte_ParsesIdenticallyToWholeFrame(params string[] args)
     {

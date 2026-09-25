@@ -30,6 +30,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
     private PendingCallRegistry? _pendingCalls;
     private ServiceDiscoveryCache? _discovery;
     private HeartbeatLoop? _heartbeat;
+    private SessionKeeper? _session;
     private readonly List<Task> _runningTasks = [];
     private readonly HighwayConnectionSource _connectionSource;
     private readonly HostingReport? _hostingReport;
@@ -147,8 +148,10 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
 
             // 042-1b B-T5: after the herd converges on a new master, pending RPCs are
             // re-driven with their original ids — the caller is the truth for "unanswered".
+            // 068 C3: the new master may not hold this node's session (a fresh node, a re-bootstrapped
+            // standby) — re-declare it first, so subscriptions and schedules exist before calls re-drive.
             var pendingForReplay = _pendingCalls;
-            connection.Converged += () => _ = pendingForReplay.ReplayPendingAsync();
+            connection.Converged += () => _ = ReestablishThenReplayAsync(pendingForReplay);
 
             var executor = new ServiceExecutor(_catalog, _scopeFactory);
             var watcher = new DoorbellWatcher(_connection, _pendingCalls, _options.DoorbellsEnabled, _loggerFactory);
@@ -249,31 +252,35 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
 
             await watcher.StartAsync(ct).ConfigureAwait(false);
 
-            // 3. Register this node's subscriber groups (025: the group is the logical
-            // consumer — SubscriptionGroup, or NodeName by default — and the node identifies
-            // itself so the server can track membership for group-aware retirement).
-            foreach (var channel in _catalog.AllChannels)
-            {
-                await _connection.SubscribeGroupAsync(channel.Name, group, _options.NodeName, ct).ConfigureAwait(false);
-            }
-
-            // 3b. Recurring jobs (028): the declarations become durable schedules on the
-            // broker. The template — the developer's registered instance — is serialized
-            // once HERE and replayed by the broker on every fire (D8). The queue name comes
-            // from the CONTRACT (its [Queue]), never from the declaration: addressing
-            // derives from contracts, the 010 lesson.
+            // 3. The session (068 C3): subscriber groups (025 — the group is the logical consumer,
+            // SubscriptionGroup or NodeName by default, and this node a member of it), recurring-job
+            // schedules (028 — the template, the developer's registered instance, is serialized once
+            // here and replayed by the broker on every fire), and — with heartbeats on — the catalog.
+            // One idempotent HW.SESSION, declared now and again whenever the broker has lost it.
+            var jobs = new List<SessionKeeper.Job>();
             foreach (var job in _options.Jobs.Registrations)
             {
+                // Addressing derives from contracts (the 010 lesson): the queue is the contract's [Queue].
                 var queueName = _catalog.GetQueueNameForMessageType(job.ContractType)
                     ?? throw new InvalidOperationException(
                         $"Job '{job.JobName}' declares {job.ContractType.Name}, but no [Queue] contract " +
                         "for that type was discovered. A job contract is an ordinary ISend with [Queue] " +
                         "— the schedule names when, the contract names where.");
-
-                var template = Wire.HighwayJson.EncodeEnvelope(_options.NodeName, job.Template);
-                await _connection.JobSetAsync(queueName, job.JobName, job.Expression, template, ct)
-                    .ConfigureAwait(false);
+                jobs.Add(new SessionKeeper.Job(queueName, job.JobName, job.Expression,
+                    Wire.HighwayJson.EncodeEnvelope(_options.NodeName, job.Template)));
             }
+
+            _session = new SessionKeeper(
+                _connection,
+                _options.NodeName,
+                _options.HeartbeatEnabled ? _catalog.ToCatalogInfo() : null,
+                [.. _catalog.AllChannels.Select(c => new SessionKeeper.Subscription(c.Name, group))],
+                jobs,
+                _loggerFactory.CreateLogger<SessionKeeper>());
+
+            // Declared before reporting Running, so the node is discoverable, subscribed and scheduling
+            // the moment StartAsync returns; a failure here fails the start.
+            await _session.EstablishAsync(ct).ConfigureAwait(false);
 
             // 4. Sweeper last — once everything can be woken.
             var sweeper = new BackstopSweeper(
@@ -287,14 +294,8 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             if (_options.HeartbeatEnabled)
             {
                 _heartbeat = new HeartbeatLoop(
-                    _connection, _catalog, _options.NodeName, _options.HeartbeatInterval,
+                    _connection, _session, _options.NodeName, _options.HeartbeatInterval,
                     _loggerFactory.CreateLogger<HeartbeatLoop>());
-
-                // Register before reporting Running, so the node is discoverable
-                // the moment StartAsync returns. Registering inside the loop
-                // instead would let a caller issue its first request before the
-                // node existed in the registry.
-                await _heartbeat.RegisterAsync(ct).ConfigureAwait(false);
 
                 loopTasks.Add(Task.Run(() => _heartbeat.RunAsync(stopToken), CancellationToken.None));
             }
@@ -337,6 +338,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             _pendingCalls = null;
             _discovery = null;
             _heartbeat = null;
+            _session = null;
             _stopCts?.Dispose();
             _stopCts = null;
             _workCts?.Dispose();
@@ -433,6 +435,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             _pendingCalls = null;
             _discovery = null;
             _heartbeat = null;
+            _session = null;
             _stopCts?.Dispose();
             _stopCts = null;
             _workCts?.Dispose();
@@ -453,6 +456,14 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
 
     /// <summary>Marks an in-flight operation complete.</summary>
     internal void EndOperation() => Interlocked.Decrement(ref _activeOperations);
+
+    /// <summary>After a failover adoption: the session first (the new master may not hold it), then the pending calls.</summary>
+    private async Task ReestablishThenReplayAsync(PendingCallRegistry pending)
+    {
+        if (_session is { } session)
+            await session.ReestablishAsync("failover").ConfigureAwait(false);
+        await pending.ReplayPendingAsync().ConfigureAwait(false);
+    }
 
     private async Task RunTrackedAsync(Func<Task> body)
     {

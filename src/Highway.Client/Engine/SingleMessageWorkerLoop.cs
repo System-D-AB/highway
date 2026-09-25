@@ -108,10 +108,11 @@ internal abstract class SingleMessageWorkerLoop
     /// Takes the next message, or <see langword="null"/> when the source is drained. Called
     /// only while a concurrency slot is held.
     /// </summary>
-    protected abstract Task<(string Id, byte[] Payload)?> ClaimAsync(CancellationToken stopToken);
+    protected abstract Task<ClaimedWork?> ClaimAsync(CancellationToken stopToken);
 
     /// <summary>Handles one claimed message. Exceptions are caught and logged by the base.</summary>
-    protected abstract Task ProcessAsync(string id, byte[] payload, CancellationToken workToken);
+    /// <summary>Handles one claimed message; settles it with <see cref="ClaimedWork.Token"/>.</summary>
+    protected abstract Task ProcessAsync(ClaimedWork work, CancellationToken workToken);
 
     /// <summary>
     /// Two-token contract: <paramref name="stopToken"/> stops claiming new work;
@@ -181,7 +182,7 @@ internal abstract class SingleMessageWorkerLoop
             // claim taken while the gate is full is a lease running on work that cannot start.
             await _gate.WaitAsync(stopToken).ConfigureAwait(false);
 
-            (string Id, byte[] Payload)? item;
+            ClaimedWork? item;
             try
             {
                 item = await ClaimAsync(stopToken).ConfigureAwait(false);
@@ -217,11 +218,11 @@ internal abstract class SingleMessageWorkerLoop
                 return; // drained to nil
             }
 
-            var (id, payload) = item.Value;
+            var work = item.Value;
 
             // Process on the thread pool so a synchronous-heavy handler cannot stall the
             // drain. The slot is already held and is released by ProcessAndReleaseAsync.
-            var task = Task.Run(() => ProcessAndReleaseAsync(id, payload, workToken), CancellationToken.None);
+            var task = Task.Run(() => ProcessAndReleaseAsync(work, workToken), CancellationToken.None);
             lock (_inflight)
             {
                 _inflight.Add(task);
@@ -245,8 +246,9 @@ internal abstract class SingleMessageWorkerLoop
     /// Individual renewals are not recorded — at this interval they would flood the recorder
     /// with the least interesting thing it could hold.</para>
     /// </summary>
-    private async Task RenewWhileRunningAsync(string id, CancellationToken stop)
+    private async Task RenewWhileRunningAsync(ClaimedWork work, CancellationToken stop)
     {
+        var id = work.Id;
         var started = DateTime.UtcNow;
 
         try
@@ -271,8 +273,7 @@ internal abstract class SingleMessageWorkerLoop
                     return;
                 }
 
-                await Connection.TouchAsync(Target.WireKind, Target.Name, NodeName, id, stop)
-                    .ConfigureAwait(false);
+                await Connection.TouchAsync(work.Token, stop).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -289,19 +290,19 @@ internal abstract class SingleMessageWorkerLoop
         }
     }
 
-    private async Task ProcessAndReleaseAsync(string id, byte[] payload, CancellationToken workToken)
+    private async Task ProcessAndReleaseAsync(ClaimedWork work, CancellationToken workToken)
     {
         // Renewal is on by default (019 R2.2): a handler outliving the lease is a correctness
         // failure with silent duplicate execution, and a developer should not have to opt in to
         // not having it. Zero disables it, restoring pre-019 behaviour exactly.
         using var renewalStop = CancellationTokenSource.CreateLinkedTokenSource(workToken);
         var renewal = _maxProcessingTime > TimeSpan.Zero
-            ? RenewWhileRunningAsync(id, renewalStop.Token)
+            ? RenewWhileRunningAsync(work, renewalStop.Token)
             : Task.CompletedTask;
 
         try
         {
-            await ProcessAsync(id, payload, workToken).ConfigureAwait(false);
+            await ProcessAsync(work, workToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -311,7 +312,7 @@ internal abstract class SingleMessageWorkerLoop
         {
             // Reported with CancellationToken.None: a failure that happens during shutdown is
             // exactly the one worth recording, so the report must not be cancelled with the work.
-            await Reporter.ReportAsync(Target, id, ex, FailureDisposition, CancellationToken.None)
+            await Reporter.ReportAsync(Target, work, ex, FailureDisposition, CancellationToken.None)
                 .ConfigureAwait(false);
         }
         finally

@@ -1,433 +1,105 @@
 using System.Globalization;
-
-
-
-
-
 using Highway.Client.Wire;
-
-
-
-
-
 using StackExchange.Redis;
-
-
-
-
-
-
-
-
-
-
 
 namespace Highway.Client.Engine;
 
-
-
-
-
-
-
-
-
-
-
-/// <summary>
-    /// The wire surface of <see cref="HighwayConnection"/> â€” every HW.* command
-/// shape, the reply-slot operations, and doorbell subscription. Loops, the
-    /// registry, and the client depend on this interface (mockable in unit tests);
-/// the command names and argument orders themselves live in exactly one place:
-    /// <see cref="HighwayConnection"/>.
-/// </summary>
-    /// <summary>
-/// Outcome of the <c>HW.HEARTBEAT</c> liveness form (feature 006).
-    /// </summary>
-
-
-
-
-
+/// <summary>Outcome of the <c>HW.HEARTBEAT</c> liveness form.</summary>
 internal enum HeartbeatReply
-
-
-
-
-
 {
-
-
-
-
-
     /// <summary>Liveness refreshed.</summary>
-
-
-
-
-
     Ok,
 
-
-
-
-
-
-
-
-
-
-
     /// <summary>
-    /// The server holds no registration for this node â€” it was never registered,
-    /// was pruned, or the registry was lost with the server. The node must send
-    /// the registration form before it can be discovered again.
+    /// <c>+SESSION</c>: the broker holds no session for this node — it was never established, was
+    /// pruned, or the broker lost it (a wipe, a fresh node, a re-bootstrap). The node must send
+    /// <c>HW.SESSION</c> before it is discoverable, subscribed, or scheduling jobs again.
     /// </summary>
-
-
-
-
-
-    ReRegisterRequired,
-
-
-
-
-
+    SessionRequired,
 }
 
-
-
-
-
-
-
-
-
-
-
-internal interface IHighwayConnection
-
-
-
-
-
-{
-
-
-
-
-
-    Task CallAsync(string service, string requestId, byte[] envelope, CancellationToken ct = default);
-
-
-
-
-
-    Task<(string RequestId, byte[] Payload)?> DequeueAsync(string service, string nodeId, CancellationToken ct = default);
-
-
-
-
-
-    Task ReplyAsync(string requestId, byte[] envelope, CancellationToken ct = default);
-
-
-
-
-
-    Task AckAsync(string service, string nodeId, string requestId, CancellationToken ct = default);
-
-
-
-
-
-    Task<long> PublishCommandAsync(
-
-
-
-
-
-        string channel, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
-
-
-
-
-
-    Task SubscribeGroupAsync(string channel, string group, string node, CancellationToken ct = default);
-
-    /// <summary>HW.JOB SET â€” registers/updates a recurring-job schedule (028). Last wins, loudly.</summary>
-    Task JobSetAsync(string queue, string job, string expression, byte[] template, CancellationToken ct = default);
-
-
-
-
-
-    Task<byte[]?> GetReplySlotAsync(string requestId, CancellationToken ct = default);
-
-
-
-
-
-    Task DeleteReplySlotAsync(string requestId, CancellationToken ct = default);
-
-
-
-
-
-    Task SubscribeDoorbellAsync(string channel, Action<string> onMessage, CancellationToken ct = default);
-
-
-
-
-
-
-
-
-
-
-
-    // Queue (feature 014)
-
-
-
-
-
-    Task QSendAsync(string queue, string messageId, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
-
-
-
-
-
-    Task<(string MessageId, byte[] Payload)?> QClaimAsync(string queue, string nodeId, CancellationToken ct = default);
-
-
-
-
-
-    Task QAckAsync(string queue, string nodeId, string messageId, CancellationToken ct = default);
-
-
-
-
-
-    Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default);
-
-
-
-
-
-
-
-
-
-
-
-    // Recoverability (feature 015)
-
-
-    /// <summary>HW.TOUCH â€” renew a claimed message's lease (019). True when it was renewed.</summary>
-    Task<bool> TouchAsync(
-        string kind, string name, string scope, string id, CancellationToken ct = default);
-
-    Task<bool> FailAsync(
-
-
-        string kind, string name, string scope, string id, string exceptionType, byte[] detail,
-
-
-        CancellationToken ct = default);
-
-
-
-
-
-    // Deduplication (feature 013)
-
-
-
-
-
-    Task<IdempotencyClaim> ClaimIdempotencyAsync(string name, string id, TimeSpan window, CancellationToken ct = default);
-
-
-
-
-
-    Task CompleteIdempotencyAsync(string name, string id, byte[] response, TimeSpan window, CancellationToken ct = default);
-
-
-
-
-
-    Task ReleaseIdempotencyAsync(string name, string id, CancellationToken ct = default);
-
-
-
-
-
-
-
-
-
-
-
-    // Registry (feature 006)
-
-
-
-
-
-    Task RegisterAsync(string nodeId, byte[] catalogJson, CancellationToken ct = default);
-
-
-
-
-
-    Task<HeartbeatReply> HeartbeatAsync(string nodeId, CancellationToken ct = default);
-
-
-
-
-
-    Task DepartAsync(string nodeId, CancellationToken ct = default);
-
-
-
-    /// <summary>HW.HEARTBEAT &lt;node&gt; BYE PURGE â€” retire forever (017). Returns what it destroyed.</summary>
-
-    Task<(int Groups, long Messages, long Bytes)> PurgeAsync(string nodeId, CancellationToken ct = default);
-
-
-
-
-
-    Task<IReadOnlyList<(string NodeId, TimeSpan SinceLastSeen)>> DiscoverAsync(string service, CancellationToken ct = default);
-
-
-
-
-
-    Task<IReadOnlyDictionary<string, string>> StatsAsync(string? name = null, CancellationToken ct = default);
-
-
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
+/// <summary>Which kind of work box a claim reads (protocol 5.0 target grammar: <c>SVC</c> / <c>Q</c>).</summary>
+internal enum WorkKind { Service, Queue }
 
 /// <summary>
-    /// Owns the single <see cref="ConnectionMultiplexer"/> shared by all Highway
-/// traffic on this node, and every wire shape against the 004/004.1 contract.
-    /// All command names and argument orders live in exactly this class.
-///
-    /// <para><b>Error classification (004.1 contract):</b> server errors starting
-/// with <c>ERR HW_</c> are permanent (<see cref="HighwayTransportException"/>);
-    /// the bare <c>ERR Transaction failed.</c> is a transient watch-conflict abort
-/// (<see cref="HighwayTransientException"/>) â€” safe to retry; anything else is
-    /// permanent. Transient aborts (and connection interruptions) are retried here
-/// with bounded backoff before surfacing.</para>
-    /// </summary>
+/// One claimed message: the opaque <see cref="Token"/> the broker issued (echoed verbatim to settle it),
+/// the message's id, and its payload.
+/// </summary>
+internal readonly record struct ClaimedWork(string Token, string Id, byte[] Payload);
 
-
-
-
-
-internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
-
-
-
-
-
+/// <summary>
+/// The wire surface of <see cref="HighwayConnection"/> — every HW.* command shape and doorbell
+/// subscription (protocol 5.0). Loops, the registry, and the client depend on this interface (mockable
+/// in unit tests); the command names and argument orders live in exactly one place:
+/// <see cref="HighwayConnection"/>.
+/// </summary>
+internal interface IHighwayConnection
 {
+    // Work: enqueue
+    Task CallAsync(string service, string requestId, byte[] envelope, CancellationToken ct = default);
+    Task QSendAsync(string queue, string messageId, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
+    Task<long> PublishCommandAsync(string channel, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
 
+    // Work: claim and settle (one path for services, queues and group queues)
+    Task<ClaimedWork?> ClaimAsync(WorkKind kind, string name, string nodeId, CancellationToken ct = default);
+    Task<bool> AckAsync(string token, CancellationToken ct = default);
 
+    /// <summary>HW.TOUCH — renew a claimed message's lease (019). True when it was renewed.</summary>
+    Task<bool> TouchAsync(string token, CancellationToken ct = default);
 
+    /// <summary>HW.FAIL — record why a handler failed, without acknowledging (015). True when recorded.</summary>
+    Task<bool> FailAsync(string token, string exceptionType, byte[] detail, CancellationToken ct = default);
 
+    // RPC reply
+    Task ReplyAsync(string requestId, byte[] envelope, CancellationToken ct = default);
 
+    /// <summary>HW.RESULT — takes (reads and removes) a waiting reply, or null when none is waiting.</summary>
+    Task<byte[]?> TakeReplyAsync(string requestId, CancellationToken ct = default);
+
+    // Doorbells (latency only, never correctness)
+    Task SubscribeDoorbellAsync(string channel, Action<string> onMessage, CancellationToken ct = default);
+    Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default);
+
+    // Deduplication (feature 013)
+    Task<IdempotencyClaim> ClaimIdempotencyAsync(string name, string id, TimeSpan window, CancellationToken ct = default);
+    Task CompleteIdempotencyAsync(string name, string id, byte[] response, TimeSpan window, CancellationToken ct = default);
+    Task ReleaseIdempotencyAsync(string name, string id, CancellationToken ct = default);
+
+    // Session and registry
+    /// <summary>HW.SESSION — declares everything the broker holds for this node: catalog, subscriptions, jobs.</summary>
+    Task EstablishSessionAsync(string nodeId, byte[] sessionJson, CancellationToken ct = default);
+    Task<HeartbeatReply> HeartbeatAsync(string nodeId, CancellationToken ct = default);
+    Task DepartAsync(string nodeId, CancellationToken ct = default);
+
+    /// <summary>HW.HEARTBEAT &lt;node&gt; BYE PURGE — retire forever (017). Returns what it destroyed.</summary>
+    Task<(int Groups, long Messages, long Bytes)> PurgeAsync(string nodeId, CancellationToken ct = default);
+    Task<IReadOnlyList<(string NodeId, TimeSpan SinceLastSeen)>> DiscoverAsync(string service, CancellationToken ct = default);
+    Task<IReadOnlyDictionary<string, string>> StatsAsync(string? name = null, CancellationToken ct = default);
+}
+
+/// <summary>
+/// Owns the single <see cref="ConnectionMultiplexer"/> shared by all Highway traffic on this node, and
+/// every wire shape of protocol 5.0. All command names and argument orders live in exactly this class.
+///
+/// <para><b>Error classification:</b> server errors starting with <c>ERR HW_</c> are permanent
+/// (<see cref="HighwayTransportException"/>); <c>NOTPRIMARY</c> is failover (follow it and retry); a lost
+/// or disposed connection is retried with bounded backoff, failing over first when other endpoints are
+/// configured. Anything else is permanent.</para>
+/// </summary>
+internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
+{
     /// <summary>Bare transient-abort message emitted by Garnet (004.1 contract).</summary>
-
-
-
-
-
     public const string TransientAbortMessage = "ERR Transaction failed.";
 
-
-
-
-
-
-
-
-
-
-
     private static readonly TimeSpan[] RetryDelays =
-
-
-
-
-
     [
-
-
-
-
-
         TimeSpan.FromMilliseconds(50),
-
-
-
-
-
         TimeSpan.FromMilliseconds(100),
-
-
-
-
-
         TimeSpan.FromMilliseconds(200),
-
-
-
-
-
     ];
 
-
-
-
-
-
-
-
-
-
-
     private ConnectionMultiplexer _redis;
-
-
-
-
-
     private IDatabase _db;
-
-
-
-
-
     private ISubscriber _subscriber;
     private readonly HighwayConnectionSource? _source;
     private readonly List<(string Channel, Action<string> OnMessage)> _doorbells = [];
@@ -437,16 +109,6 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     /// the same connection without creating a second one (feature 026, D1).
     /// </summary>
     internal IConnectionMultiplexer Multiplexer => _redis;
-
-
-
-
-
-
-
-
-
-
 
     internal static HighwayConnection FromMultiplexer(IConnectionMultiplexer redis)
     {
@@ -572,29 +234,9 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     }
 
     private HighwayConnection(ConnectionMultiplexer redis, HighwayConnectionSource? source = null)
-
-
-
-
-
     {
-
-
-
-
-
         _redis = redis;
-
-
-
-
-
         _db = redis.GetDatabase();
-
-
-
-
-
         _subscriber = redis.GetSubscriber();
         _source = source;
         _lastSuccessTicks = DateTime.UtcNow.Ticks;
@@ -612,49 +254,14 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
             _healthTicker = new Timer(_ => OnHealthTick(), null,
                 TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
         }
-
-
-
-
-
     }
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>
     /// Connects to the configured server, failing fast with a descriptive
-    /// exception â€” no silent retry loop at startup.
+    /// exception — no silent retry loop at startup.
     /// </summary>
-
-
-
-
-
     public static Task<HighwayConnection> ConnectAsync(string configuration, CancellationToken ct = default)
-
-
-
-
-
         => ConnectAsync(configuration, credentials: null, ct);
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>
     /// Connects with optional credentials and transport security (feature 012).
@@ -668,11 +275,6 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     /// <para>Every path out of this method redacts the configuration string. It routinely
     /// carries a password now, and an exception message is not a safe place for one.</para>
     /// </summary>
-
-
-
-
-
     public static async Task<HighwayConnection> ConnectAsync(
         string configuration, HighwayOptions? credentials, CancellationToken ct = default)
     {
@@ -700,2152 +302,330 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     internal static ConfigurationOptions BuildConfigurationOptions(string configuration, IHighwayConnectionSettings? credentials)
         => HighwayConnectionConfiguration.Build(configuration, credentials);
 
-
-
-
-
-
-
-
-
-
-
     /// <summary>
     /// Whether a connect failure was really an authentication failure. StackExchange.Redis
     /// wraps the server's <c>NOAUTH</c> / <c>WRONGPASS</c> reply in a connection exception,
     /// so the distinction is only visible in the message chain.
     /// </summary>
-
-
-
-
-
     private static bool IsAuthenticationFailure(Exception? ex)
-
-
-
-
-
     {
-
-
-
-
-
         for (var e = ex; e is not null; e = e.InnerException)
-
-
-
-
-
         {
-
-
-
-
-
             var message = e.Message;
-
-
-
-
-
             if (message.Contains("NOAUTH", StringComparison.Ordinal)
-
-
-
-
-
                 || message.Contains("WRONGPASS", StringComparison.Ordinal)
-
-
-
-
-
                 || message.Contains("NOPERM", StringComparison.Ordinal))
-
-
-
-
-
             {
-
-
-
-
-
                 return true;
-
-
-
-
-
             }
-
-
-
-
-
         }
-
-
-
-
-
         return false;
-
-
-
-
-
     }
 
-
-
-
-
-
-
-
-
-
-
     // -------------------------------------------------------------------------
-
-
-
-
-
     // RPC commands
-
-
-
-
-
     // -------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>HW.CALL &lt;service&gt; &lt;requestId&gt; &lt;payload&gt;</summary>
-
-
-
-
-
     public Task CallAsync(string service, string requestId, byte[] envelope, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             await _db.ExecuteAsync("HW.CALL", service, requestId, envelope).ConfigureAwait(false);
-
-
-
-
-
             return true;
-
-
-
-
-
         }, ct);
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>
-    /// HW.DEQUEUE &lt;service&gt; &lt;nodeId&gt; â†’ (requestId, payload), or null when
-    /// the queue is empty (the server replies a nil array: RedisResult.IsNull).
+    /// HW.CLAIM SVC|Q &lt;name&gt; &lt;nodeId&gt; → one claimed message, or null when nothing is due (an empty
+    /// array). The token is the claim's handle for ack / touch / fail.
     /// </summary>
-
-
-
-
-
-    public Task<(string RequestId, byte[] Payload)?> DequeueAsync(string service, string nodeId, CancellationToken ct = default)
-
-
-
-
-
+    public Task<ClaimedWork?> ClaimAsync(WorkKind kind, string name, string nodeId, CancellationToken ct = default)
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
-            var result = await _db.ExecuteAsync("HW.DEQUEUE", service, nodeId).ConfigureAwait(false);
-
-
-
-
-
-            if (result is null || result.IsNull)
-
-
-
-
-
-                return default((string, byte[])?);
-
-
-
-
-
-
-
-
-
-
-
-            var arr = (RedisResult[])result!;
-
-
-
-
-
-            return ((string)arr[0]!, (byte[])arr[1]!);
-
-
-
-
-
+            var result = await _db.ExecuteAsync("HW.CLAIM", kind == WorkKind.Service ? "SVC" : "Q", name, nodeId).ConfigureAwait(false);
+            if (result is null || result.IsNull) return default(ClaimedWork?);
+            var rows = (RedisResult[])result!;
+            if (rows.Length == 0) return default(ClaimedWork?);
+            var row = (RedisResult[])rows[0]!;
+            return new ClaimedWork((string)row[0]!, (string)row[1]!, (byte[])row[2]!);
         }, ct);
 
+    /// <summary>HW.ACK &lt;token&gt; → true when removed; false when it was no longer held (a late ack is not an error).</summary>
+    public Task<bool> AckAsync(string token, CancellationToken ct = default)
+        => SendAsync(async () => (long)(await _db.ExecuteAsync("HW.ACK", token).ConfigureAwait(false)) == 1, ct);
 
+    /// <summary>HW.TOUCH &lt;token&gt; — "still working", so a slow handler is not duplicated underneath itself (019).</summary>
+    public Task<bool> TouchAsync(string token, CancellationToken ct = default)
+        => SendAsync(async () => (long)(await _db.ExecuteAsync("HW.TOUCH", token).ConfigureAwait(false)) == 1, ct);
 
-
-
-
-
-
-
-
+    /// <summary>HW.FAIL &lt;token&gt; &lt;type&gt; &lt;detail&gt; — records why a handler failed, without acknowledging (015).</summary>
+    public Task<bool> FailAsync(string token, string exceptionType, byte[] detail, CancellationToken ct = default)
+        => SendAsync(async () =>
+            (long)(await _db.ExecuteAsync("HW.FAIL", token, exceptionType, detail).ConfigureAwait(false)) == 1, ct);
 
     /// <summary>HW.REPLY &lt;requestId&gt; &lt;payload&gt;</summary>
-
-
-
-
-
     public Task ReplyAsync(string requestId, byte[] envelope, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             await _db.ExecuteAsync("HW.REPLY", requestId, envelope).ConfigureAwait(false);
-
-
-
-
-
             return true;
-
-
-
-
-
         }, ct);
-
-
-
-
-
-
-
-
-
-
-
-    /// <summary>HW.ACK &lt;service&gt; &lt;nodeId&gt; &lt;requestId&gt;</summary>
-
-
-
-
-
-    public Task AckAsync(string service, string nodeId, string requestId, CancellationToken ct = default)
-
-
-
-
-
-        => SendAsync(async () =>
-
-
-
-
-
-        {
-
-
-
-
-
-            await _db.ExecuteAsync("HW.ACK", service, nodeId, requestId).ConfigureAwait(false);
-
-
-
-
-
-            return true;
-
-
-
-
-
-        }, ct);
-
-
-
-
-
-
-
-
-
-
-
-    // -------------------------------------------------------------------------
-
-
-
-
-
-    // Pub/Sub commands
-
-
-
-
-
-    // -------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>
-    /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; [AT &lt;ticks&gt;] â†’ group count.
+    /// HW.RESULT &lt;requestId&gt; → the reply, removed in the same command, or null when none is waiting.
+    /// Routed through the send pipeline, so it retries and follows <c>NOTPRIMARY</c> like every command
+    /// (the stock GET/DEL it replaces did neither).
+    /// </summary>
+    public Task<byte[]?> TakeReplyAsync(string requestId, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            var result = await _db.ExecuteAsync("HW.RESULT", requestId).ConfigureAwait(false);
+            return result is null || result.IsNull ? null : (byte[]?)result;
+        }, ct);
+
+    // -------------------------------------------------------------------------
+    // Pub/Sub commands
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; [AT &lt;ticks&gt;] → group count.
     ///
     /// <para>The delivery time is sent as an <b>absolute</b> .NET UTC tick count rather
     /// than a relative delay: the server stores what it is told, so a slow round trip
     /// cannot silently extend the delay and AOF replay cannot re-delay from replay time.</para>
     /// </summary>
-
-
-
-
-
     public Task<long> PublishCommandAsync(
-
-
-
-
-
         string channel, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             var result = deliverAt is { } at
-
-
-
-
-
                 ? await _db.ExecuteAsync("HW.PUBLISH", channel, envelope, "AT",
-
-
-
-
-
                         at.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false)
-
-
-
-
-
                 : await _db.ExecuteAsync("HW.PUBLISH", channel, envelope).ConfigureAwait(false);
-
-
-
-
-
             return (long)result!;
-
-
-
-
-
         }, ct);
 
-
-
-
-
-
-
-
-
-
-
-    /// <summary>HW.SUBSCRIBE &lt;channel&gt; &lt;group&gt; &lt;node&gt; â€” the node identifies itself so the server can track group membership (025).</summary>
-
-
-
-
-
-    public Task SubscribeGroupAsync(string channel, string group, string node, CancellationToken ct = default)
-
-
-
-
-
-        => SendAsync(async () =>
-
-
-
-
-
-        {
-
-
-
-
-
-            await _db.ExecuteAsync("HW.SUBSCRIBE", channel, group, node).ConfigureAwait(false);
-
-
-
-
-
-            return true;
-
-
-
-
-
-        }, ct);
-
-    /// <summary>HW.JOB SET &lt;queue&gt; &lt;job&gt; &lt;expression&gt; &lt;template&gt; (idempotent; last registration wins).</summary>
-    public Task JobSetAsync(string queue, string job, string expression, byte[] template, CancellationToken ct = default)
-        => SendAsync(async () =>
-        {
-            await _db.ExecuteAsync("HW.JOB", "SET", queue, job, expression, template).ConfigureAwait(false);
-            return true;
-        }, ct);
-
-
-
-
-
-
-
-
-
-
-
     // -------------------------------------------------------------------------
-
-
-
-
-
-    // Reply slots (stock GET/DEL on hw:rep:{requestId}) and doorbells
-
-
-
-
-
-    // -------------------------------------------------------------------------
-    // -------------------------------------------------------------------------
-
-
-
-
-
     // Queue (feature 014)
-
-
-
-
-
     // -------------------------------------------------------------------------
 
-
-
-
-
-
-
-
-
-
-
-    /// <summary>HW.QSEND &lt;queue&gt; &lt;messageId&gt; &lt;payload&gt; [AT ticks].</summary>
-
-
-
-
-
+    /// <summary>HW.SEND &lt;queue&gt; &lt;messageId&gt; &lt;payload&gt; [AT ticks].</summary>
     public Task QSendAsync(
-
-
-
-
-
         string queue, string messageId, byte[] envelope,
-
-
-
-
-
         DateTimeOffset? deliverAt = null, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             if (deliverAt is { } at)
-
-
-
-
-
-            {
-
-
-
-
-
-                await _db.ExecuteAsync("HW.QSEND", queue, messageId, envelope, "AT",
-
-
-
-
-
+                await _db.ExecuteAsync("HW.SEND", queue, messageId, envelope, "AT",
                     at.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
-
-
-
-
-
-            }
-
-
-
-
-
             else
-
-
-
-
-
-            {
-
-
-
-
-
-                await _db.ExecuteAsync("HW.QSEND", queue, messageId, envelope).ConfigureAwait(false);
-
-
-
-
-
-            }
-
-
-
-
-
+                await _db.ExecuteAsync("HW.SEND", queue, messageId, envelope).ConfigureAwait(false);
             return true;
-
-
-
-
-
         }, ct);
-
-
-
-
-
-
-
-
-
-
-
-    /// <summary>HW.QCLAIM &lt;queue&gt; &lt;nodeId&gt; â†’ (messageId, payload), or null when empty.</summary>
-
-
-
-
-
-    public Task<(string MessageId, byte[] Payload)?> QClaimAsync(
-
-
-
-
-
-        string queue, string nodeId, CancellationToken ct = default)
-
-
-
-
-
-        => SendAsync(async () =>
-
-
-
-
-
-        {
-
-
-
-
-
-            var result = await _db.ExecuteAsync("HW.QCLAIM", queue, nodeId).ConfigureAwait(false);
-
-
-
-
-
-            if (result is null || result.IsNull)
-
-
-
-
-
-                return default((string, byte[])?);
-
-
-
-
-
-
-
-
-
-
-
-            var arr = (RedisResult[])result!;
-
-
-
-
-
-            return ((string)arr[0]!, (byte[])arr[1]!);
-
-
-
-
-
-        }, ct);
-
-
-
-
-
-
-
-
-
-
-
-    /// <summary>HW.QACK &lt;queue&gt; &lt;nodeId&gt; &lt;messageId&gt;.</summary>
-
-
-
-
-
-    public Task QAckAsync(string queue, string nodeId, string messageId, CancellationToken ct = default)
-
-
-
-
-
-        => SendAsync(async () =>
-
-
-
-
-
-        {
-
-
-
-
-
-            await _db.ExecuteAsync("HW.QACK", queue, nodeId, messageId).ConfigureAwait(false);
-
-
-
-
-
-            return true;
-
-
-
-
-
-        }, ct);
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>
-    /// HW.FAIL &lt;kind&gt; &lt;name&gt; &lt;scope&gt; &lt;id&gt; &lt;type&gt; &lt;detail&gt; â€” records why a
-    /// handler failed, without acknowledging (feature 015).
+    /// Subscribes to a queue doorbell — a latency optimisation, never correctness. Tracked like every
+    /// other doorbell, so a failover re-subscribes it (before 3.0 it was lost, and queue workers fell back
+    /// to backstop polling after the first failover).
     /// </summary>
-    /// <returns>True when the message was found and annotated; false when it was already gone.</returns>
-    /// <summary>
-    /// HW.TOUCH &lt;kind&gt; &lt;name&gt; &lt;scope&gt; &lt;id&gt; â€” says "still working" about a claimed
-    /// message, so a slow handler is not duplicated underneath itself (019).
-    /// </summary>
-    /// <returns>True when the entry was found and renewed; false when it was already gone.</returns>
-    public Task<bool> TouchAsync(
-        string kind, string name, string scope, string id, CancellationToken ct = default)
-        => SendAsync(async () =>
-        {
-            var result = await _db.ExecuteAsync("HW.TOUCH", kind, name, scope, id).ConfigureAwait(false);
-            return (long)result == 1;
-        }, ct);
-
-    public Task<bool> FailAsync(
-
-
-        string kind, string name, string scope, string id, string exceptionType, byte[] detail,
-
-
-        CancellationToken ct = default)
-
-
-        => SendAsync(async () =>
-
-
-        {
-
-
-            var result = await _db.ExecuteAsync("HW.FAIL", kind, name, scope, id, exceptionType, detail)
-
-
-                .ConfigureAwait(false);
-
-
-            return (long)result == 1;
-
-
-        }, ct);
-
-
-
-
-
-    /// <summary>Subscribes to a queue doorbell â€” a latency optimisation, never correctness.</summary>
-
-
-
-
-
-    public async Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default)
-
-
-
-
-
-    {
-
-
-
-
-
-        try
-
-
-
-
-
-        {
-
-
-
-
-
-            await _subscriber.SubscribeAsync(
-
-
-
-
-
-                RedisChannel.Literal($"hw:door:q:{queue}"),
-
-
-
-
-
-                (_, value) => onMessage(value.ToString() ?? string.Empty)).ConfigureAwait(false);
-
-
-
-
-
-        }
-
-
-
-
-
-        catch (RedisException ex)
-
-
-
-
-
-        {
-
-
-
-
-
-            throw Classify(ex);
-
-
-
-
-
-        }
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
+    public Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default)
+        => SubscribeDoorbellAsync($"hw:door:q:{queue}", onMessage, ct);
 
     // -------------------------------------------------------------------------
-
-
-
-
-
     // Deduplication (feature 013)
-
-
-
-
-
     // -------------------------------------------------------------------------
 
-
-
-
-
-
-
-
-
-
-
-    /// <summary>Value written while a handler is running, before its response exists.</summary>
-
-
-
-
-
-    private static readonly byte[] InProgressMarker = " hw:in-progress"u8.ToArray();
-
-
-
-
-
-
-
-
-
-
-
-    private static string IdempotencyKey(string name, string id) => $"hw:idem:{name}:{id}";
-
-
-
-
-
-
-
-
-
-
+    private static long WindowSeconds(TimeSpan window) => Math.Max(1, (long)Math.Ceiling(window.TotalSeconds));
 
     /// <summary>
-    /// Attempts to claim the right to run a handler for one delivery.
-    ///
-    /// <para><c>SET NX EX</c> is atomic, so two concurrent redeliveries cannot both claim.
-    /// The loser reads what the winner left: a response if the handler finished, or the
-    /// in-progress marker if it is still running â€” or crashed.</para>
+    /// HW.IDEM BEGIN — claims the right to run a handler for one delivery. Atomic on the broker, so two
+    /// concurrent redeliveries cannot both claim: the loser learns whether the winner finished (its cached
+    /// result) or is still running — or crashed, until the window lapses.
     /// </summary>
-
-
-
-
-
-    public async Task<IdempotencyClaim> ClaimIdempotencyAsync(
-
-
-
-
-
+    public Task<IdempotencyClaim> ClaimIdempotencyAsync(
         string name, string id, TimeSpan window, CancellationToken ct = default)
-
-
-
-
-
-    {
-
-
-
-
-
-        try
-
-
-
-
-
+        => SendAsync(async () =>
         {
-
-
-
-
-
-            var key = IdempotencyKey(name, id);
-
-
-
-
-
-
-
-
-
-
-
-            if (await _db.StringSetAsync(key, InProgressMarker, window, When.NotExists).ConfigureAwait(false))
-
-
-
-
-
-                return IdempotencyClaim.Claimed();
-
-
-
-
-
-
-
-
-
-
-
-            var prior = await _db.StringGetAsync(key).ConfigureAwait(false);
-
-
-
-
-
-            if (!prior.HasValue)
-
-
-
-
-
-            {
-
-
-
-
-
-                // Expired between the SET NX and the GET. Racing an expiry is not worth a
-
-
-
-
-
-                // second round trip: treat it as ours and run.
-
-
-
-
-
-                return IdempotencyClaim.Claimed();
-
-
-
-
-
-            }
-
-
-
-
-
-
-
-
-
-
-
-            var bytes = (byte[])prior!;
-
-
-
-
-
-            return bytes.AsSpan().SequenceEqual(InProgressMarker)
-
-
-
-
-
+            var result = await _db.ExecuteAsync("HW.IDEM", "BEGIN", name, id,
+                WindowSeconds(window).ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
+            if (result.Resp2Type == ResultType.Array)
+                return IdempotencyClaim.Duplicate((byte[])((RedisResult[])result!)[1]!);
+            return string.Equals((string?)result, "BUSY", StringComparison.Ordinal)
                 ? IdempotencyClaim.InProgress()
+                : IdempotencyClaim.Claimed();
+        }, ct);
 
-
-
-
-
-                : IdempotencyClaim.Duplicate(bytes);
-
-
-
-
-
-        }
-
-
-
-
-
-        catch (RedisException ex)
-
-
-
-
-
-        {
-
-
-
-
-
-            throw Classify(ex);
-
-
-
-
-
-        }
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    /// <summary>Replaces the in-progress marker with the handler's response.</summary>
-
-
-
-
-
-    public async Task CompleteIdempotencyAsync(
-
-
-
-
-
+    /// <summary>HW.IDEM END — replaces the in-progress claim with the handler's response for the window.</summary>
+    public Task CompleteIdempotencyAsync(
         string name, string id, byte[] response, TimeSpan window, CancellationToken ct = default)
-
-
-
-
-
-    {
-
-
-
-
-
-        try
-
-
-
-
-
+        => SendAsync(async () =>
         {
-
-
-
-
-
-            await _db.StringSetAsync(IdempotencyKey(name, id), response, window).ConfigureAwait(false);
-
-
-
-
-
-        }
-
-
-
-
-
-        catch (RedisException ex)
-
-
-
-
-
-        {
-
-
-
-
-
-            throw Classify(ex);
-
-
-
-
-
-        }
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
+            await _db.ExecuteAsync("HW.IDEM", "END", name, id,
+                WindowSeconds(window).ToString(CultureInfo.InvariantCulture), response).ConfigureAwait(false);
+            return true;
+        }, ct);
 
     /// <summary>
-    /// Drops the marker so the delivery can be retried immediately.
-    ///
-    /// <para>Used when the handler could not be run at all â€” a transport failure before
-    /// any work happened. Leaving the marker would block the redelivery for the whole
-    /// window over something that never ran.</para>
+    /// HW.IDEM ABORT — drops the claim so the delivery can be retried at once. Used when the handler could
+    /// not run at all; leaving the claim would block the redelivery for the whole window over something that
+    /// never ran. Best effort: the claim expires on its own.
     /// </summary>
-
-
-
-
-
     public async Task ReleaseIdempotencyAsync(string name, string id, CancellationToken ct = default)
-
-
-
-
-
     {
-
-
-
-
-
         try
-
-
-
-
-
         {
-
-
-
-
-
-            await _db.KeyDeleteAsync(IdempotencyKey(name, id)).ConfigureAwait(false);
-
-
-
-
-
+            await SendAsync(async () =>
+            {
+                await _db.ExecuteAsync("HW.IDEM", "ABORT", name, id).ConfigureAwait(false);
+                return true;
+            }, ct).ConfigureAwait(false);
         }
-
-
-
-
-
-        catch (RedisException)
-
-
-
-
-
+        catch (Exception ex) when (ex is HighwayTransportException or HighwayTransientException)
         {
-
-
-
-
-
-            // Best effort. The marker expires on its own.
-
-
-
-
-
+            // Best effort. The claim expires on its own.
         }
-
-
-
-
-
     }
-
-
-
-
-
-
-
-
-
-
-
-    public async Task<byte[]?> GetReplySlotAsync(string requestId, CancellationToken ct = default)
-
-
-
-
-
-    {
-
-
-
-
-
-        try
-
-
-
-
-
-        {
-
-
-
-
-
-            var value = await _db.StringGetAsync($"hw:rep:{requestId}").ConfigureAwait(false);
-
-
-
-
-
-            return value.HasValue ? (byte[])value! : null;
-
-
-
-
-
-        }
-
-
-
-
-
-        catch (RedisException ex)
-
-
-
-
-
-        {
-
-
-
-
-
-            throw Classify(ex);
-
-
-
-
-
-        }
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    /// <summary>Deletes the reply slot after retrieval.</summary>
-
-
-
-
-
-    public async Task DeleteReplySlotAsync(string requestId, CancellationToken ct = default)
-
-
-
-
-
-    {
-
-
-
-
-
-        try
-
-
-
-
-
-        {
-
-
-
-
-
-            await _db.KeyDeleteAsync($"hw:rep:{requestId}").ConfigureAwait(false);
-
-
-
-
-
-        }
-
-
-
-
-
-        catch (RedisException ex)
-
-
-
-
-
-        {
-
-
-
-
-
-            throw Classify(ex);
-
-
-
-
-
-        }
-
-
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>
     /// Subscribes to a doorbell channel. SE.Redis auto-resubscribes after a
     /// reconnect (verified by ClientReconnectTests), so no re-issue logic is needed.
     /// </summary>
-
-
-
-
-
     public async Task SubscribeDoorbellAsync(string channel, Action<string> onMessage, CancellationToken ct = default)
-
-
-
-
-
     {
-
-
-
-
-
         _doorbells.Add((channel, onMessage));
         await _subscriber.SubscribeAsync(RedisChannel.Literal(channel), (_, value) =>
-
-
-
-
-
         {
-
-
-
-
-
             try
-
-
-
-
-
             {
-
-
-
-
-
                 onMessage((string)value!);
-
-
-
-
-
             }
-
-
-
-
-
             catch
-
-
-
-
-
             {
-
-
-
-
-
                 // A failing handler must never kill the subscription;
-
-
-
-
-
                 // owners log inside their handlers.
-
-
-
-
-
             }
-
-
-
-
-
         }).ConfigureAwait(false);
-
-
-
-
-
     }
 
-
-
-
-
-
-
-
-
-
-
     // -------------------------------------------------------------------------
-
-
-
-
-
     // Registry commands (feature 006)
-
-
-
-
-
     // -------------------------------------------------------------------------
 
-
-
-
-
-
-
-
-
-
-
     /// <summary>
-    /// HW.HEARTBEAT &lt;nodeId&gt; &lt;catalogJson&gt; â€” the registration form.
-    /// Sent once at start and again whenever the server asks for it.
+    /// HW.SESSION &lt;nodeId&gt; &lt;sessionJson&gt; — declares the catalog, group subscriptions and job schedules
+    /// the broker holds for this node, in one idempotent command. Sent at start, after a failover adoption,
+    /// and whenever a heartbeat answers <c>+SESSION</c>.
     /// </summary>
-
-
-
-
-
-    public Task RegisterAsync(string nodeId, byte[] catalogJson, CancellationToken ct = default)
-
-
-
-
-
+    public Task EstablishSessionAsync(string nodeId, byte[] sessionJson, CancellationToken ct = default)
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
-            await _db.ExecuteAsync("HW.HEARTBEAT", nodeId, catalogJson).ConfigureAwait(false);
-
-
-
-
-
+            await _db.ExecuteAsync("HW.SESSION", nodeId, sessionJson).ConfigureAwait(false);
             return true;
-
-
-
-
-
         }, ct);
 
-
-
-
-
-
-
-
-
-
-
     /// <summary>
-    /// HW.HEARTBEAT &lt;nodeId&gt; â€” the liveness form. The catalog never crosses
-    /// the wire here, so beat cost is independent of catalog size.
+    /// HW.HEARTBEAT &lt;nodeId&gt; — the liveness form: 8 bytes on the broker, independent of catalog size.
     ///
-    /// <para><c>+REGISTER</c> is a normal reply, not a failure: the server holds
-    /// no record for this node and needs the catalog before it can be discovered
-    /// again. It must never be classified as a transport or transient error.</para>
+    /// <para><c>+SESSION</c> is a normal reply, not a failure: the broker holds no session for this node and
+    /// needs it declared again. It must never be classified as a transport or transient error.</para>
     /// </summary>
-
-
-
-
-
     public Task<HeartbeatReply> HeartbeatAsync(string nodeId, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             var result = await _db.ExecuteAsync("HW.HEARTBEAT", nodeId).ConfigureAwait(false);
-
-
-
-
-
-            return string.Equals((string?)result, "REGISTER", StringComparison.Ordinal)
-
-
-
-
-
-                ? HeartbeatReply.ReRegisterRequired
-
-
-
-
-
+            return string.Equals((string?)result, "SESSION", StringComparison.Ordinal)
+                ? HeartbeatReply.SessionRequired
                 : HeartbeatReply.Ok;
-
-
-
-
-
         }, ct);
 
-
-
-
-
-
-
-
-
-
-
     /// <summary>
-    /// HW.HEARTBEAT &lt;nodeId&gt; BYE â€” graceful departure. The node leaves
+    /// HW.HEARTBEAT &lt;nodeId&gt; BYE — graceful departure. The node leaves
     /// discovery immediately instead of after the expiry window.
     /// </summary>
-
-
-
-
-
     public Task DepartAsync(string nodeId, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             await _db.ExecuteAsync("HW.HEARTBEAT", nodeId, "BYE").ConfigureAwait(false);
-
-
-
-
-
             return true;
-
-
-
-
-
         }, ct);
 
-
-
     /// <summary>
-    /// HW.HEARTBEAT &lt;node&gt; BYE PURGE â€” the node is never coming back (017).
+    /// HW.HEARTBEAT &lt;node&gt; BYE PURGE — the node is never coming back (017).
     ///
     /// <para>Unlike <see cref="DepartAsync"/>, this destroys the node's subscriber queues.
     /// It returns what it destroyed so an irreversible act leaves a record.</para>
     /// </summary>
 
     public Task<(int Groups, long Messages, long Bytes)> PurgeAsync(string nodeId, CancellationToken ct = default)
-
         => SendAsync(async () =>
-
         {
-
             var result = (RedisResult[])(await _db
-
                 .ExecuteAsync("HW.HEARTBEAT", nodeId, "BYE", "PURGE").ConfigureAwait(false))!;
-
-
-
             return ((int)(long)result[0], (long)result[1], (long)result[2]);
-
         }, ct);
 
-
-
-
-
-
-
-
-
-
-
     /// <summary>
-    /// HW.DISCOVER &lt;service&gt; â†’ live nodes hosting the service, with the age
+    /// HW.DISCOVER &lt;service&gt; → live nodes hosting the service, with the age
     /// of each one's last beat. Empty when nobody hosts it.
     /// </summary>
-
-
-
-
-
     public Task<IReadOnlyList<(string NodeId, TimeSpan SinceLastSeen)>> DiscoverAsync(
-
-
-
-
-
         string service, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             var result = await _db.ExecuteAsync("HW.DISCOVER", service).ConfigureAwait(false);
-
-
-
-
-
             if (result is null || result.IsNull)
-
-
-
-
-
                 return (IReadOnlyList<(string, TimeSpan)>)[];
 
-
-
-
-
-
-
-
-
-
-
             var outer = (RedisResult[])result!;
-
-
-
-
-
             var nodes = new List<(string, TimeSpan)>(outer.Length);
-
-
-
-
-
             foreach (var item in outer)
-
-
-
-
-
             {
-
-
-
-
-
                 var pair = (RedisResult[])item!;
-
-
-
-
-
                 var seconds = long.TryParse((string)pair[1]!, out var s) ? s : 0;
-
-
-
-
-
                 nodes.Add(((string)pair[0]!, TimeSpan.FromSeconds(seconds)));
-
-
-
-
-
             }
-
-
-
-
-
             return nodes;
-
-
-
-
-
         }, ct);
-
-
-
-
-
-
-
-
-
-
 
     /// <summary>
-    /// HW.STATS [name] â†’ the flat field/value reply as a map. Reply shape is
+    /// HW.STATS [name] → the flat field/value reply as a map. Reply shape is
     /// self-describing so new fields extend the map rather than breaking callers.
     /// </summary>
-
-
-
-
-
     public Task<IReadOnlyDictionary<string, string>> StatsAsync(string? name = null, CancellationToken ct = default)
-
-
-
-
-
         => SendAsync(async () =>
-
-
-
-
-
         {
-
-
-
-
-
             var result = name is null
-
-
-
-
-
                 ? await _db.ExecuteAsync("HW.STATS").ConfigureAwait(false)
-
-
-
-
-
                 : await _db.ExecuteAsync("HW.STATS", name).ConfigureAwait(false);
 
-
-
-
-
-
-
-
-
-
-
             var fields = new Dictionary<string, string>(StringComparer.Ordinal);
-
-
-
-
-
             if (result is null || result.IsNull)
-
-
-
-
-
                 return (IReadOnlyDictionary<string, string>)fields;
 
-
-
-
-
-
-
-
-
-
-
             var flat = (RedisResult[])result!;
-
-
-
-
-
             for (var i = 0; i + 1 < flat.Length; i += 2)
-
-
-
-
-
                 fields[(string)flat[i]!] = (string)flat[i + 1]!;
 
-
-
-
-
-
-
-
-
-
-
             return fields;
-
-
-
-
-
         }, ct);
 
-
-
-
-
-
-
-
-
-
-
     // -------------------------------------------------------------------------
-
-
-
-
-
     // Send pipeline: bounded transient retry + classification
-
-
-
-
-
     // -------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
 
     private async Task<T> SendAsync<T>(Func<Task<T>> operation, CancellationToken ct)
-
-
-
-
-
     {
-
-
-
-
-
         var attempt = 0;
-
-
-
-
-
         while (true)
-
-
-
-
-
         {
-
-
-
-
-
             ct.ThrowIfCancellationRequested();
-
-
-
-
-
             try
-
-
-
-
-
             {
-
-
-
-
-
                 var result = await operation().ConfigureAwait(false);
                 NoteSuccess();   // the herd health clock (042-1b): a completed exchange
                 return result;
-
-
-
-
-
             }
-
-
-
-
-
             catch (RedisServerException ex)
-
-
-
-
-
             {
-
-
-
-
-
                 if (TrySwitchOnNotPrimary(ex.Message))
                 {
                     if (attempt < RetryDelays.Length)
@@ -2857,66 +637,17 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
                 }
 
                 if (IsTransient(ex.Message) && attempt < RetryDelays.Length)
-
-
-
-
-
                 {
-
-
-
-
-
                     await Task.Delay(RetryDelays[attempt], ct).ConfigureAwait(false);
-
-
-
-
-
                     attempt++;
-
-
-
-
-
                     continue;
-
-
-
-
-
                 }
-
-
-
-
-
                 throw Classify(ex);
-
-
-
-
-
             }
-
-
-
-
-
-            catch (RedisConnectionException ex)
-
-
-
-
-
+            catch (Exception ex) when (ex is RedisConnectionException or ObjectDisposedException)
             {
-
-
-
-
-
-                // The active host is gone. With a multi-endpoint connection string, probe
+                // The active host is gone — or its multiplexer was disposed under an operation that
+                // outlived a failover (069 L4: an ObjectDisposedException used to escape the retry). With a multi-endpoint connection string, probe
                 // the others for the writable node before burning a plain retry (042 R6.1)
                 // — the path a killed primary takes, where no -NOTPRIMARY can be spoken.
                 // A single-endpoint client falls through to the bounded retry.
@@ -2928,89 +659,19 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
                 }
 
                 // Brief interruption while SE.Redis reconnects — bounded retry.
-
-
-
-
-
                 if (attempt < RetryDelays.Length)
-
-
-
-
-
                 {
-
-
-
-
-
                     await Task.Delay(RetryDelays[attempt], ct).ConfigureAwait(false);
-
-
-
-
-
                     attempt++;
-
-
-
-
-
                     continue;
-
-
-
-
-
                 }
-
-
-
-
-
                 throw new HighwayTransportException($"Connection to the Highway server failed: {ex.Message}");
-
-
-
-
-
             }
-
-
-
-
-
         }
-
-
-
-
-
     }
 
-
-
-
-
-
-
-
-
-
-
-    /// <summary>True for the bare watch-conflict abort â€” the only transient class.</summary>
-
-
-
-
-
+    /// <summary>True for the bare watch-conflict abort — the only transient class.</summary>
     public static bool IsTransient(string message)
-
-
-
-
-
         => string.Equals(message, TransientAbortMessage, StringComparison.Ordinal);
 
     /// <summary>042 T6: <c>NOTPRIMARY &lt;endpoint&gt; &lt;epoch&gt;</c> — not an ERR HW_ prefix.</summary>
@@ -3034,7 +695,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
 
         // A stood-down node that never learned its successor redirects to ITSELF —
         // following that is a loop. Walk the roster instead (excluding it).
-        if (string.Equals(HighwayConnectionSource.HostOf(_source.ActiveServer), endpoint, StringComparison.OrdinalIgnoreCase))
+        if (EndpointIdentity.Same(HighwayConnectionSource.HostOf(_source.ActiveServer), endpoint))
         {
             _ = WalkAsync(excludeCurrent: true, attempts: 8, delayMs: 250);
             return true;   // the retry loop backs off while the walk lands
@@ -3083,241 +744,51 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
         try { Converged?.Invoke(); } catch { /* a re-drive failure surfaces on its own path */ }
     }
 
-
-
-
-
-
-
-
-
-
-
     /// <summary>
     /// Maps a server/connection error to the typed permanent/transient split.
     ///
     /// <para>Authentication and authorization failures are <b>permanent</b>: retrying a
     /// wrong password wastes the backoff budget and trips attempt counters on systems that
     /// keep them. They are given their own types because the remedy differs from every
-    /// other permanent failure â€” one is a configuration problem, not a code or network
+    /// other permanent failure — one is a configuration problem, not a code or network
     /// problem.</para>
     /// </summary>
-
-
-
-
-
     public static Exception Classify(RedisException ex)
-
-
-
-
-
     {
-
-
-
-
-
         if (ex is RedisServerException { Message: TransientAbortMessage })
-
-
-
-
-
             return new HighwayTransientException(ex.Message);
-
-
-
-
-
-
-
-
-
-
 
         var message = ex.Message;
 
-
-
-
-
-
-
-
-
-
-
         if (message.StartsWith("NOAUTH", StringComparison.Ordinal))
-
-
-
-
-
         {
-
-
-
-
-
             return new HighwayAuthenticationException(
-
-
-
-
-
                 "The Highway server requires authentication and none was supplied. " +
-
-
-
-
-
                 "Set HighwayOptions.Password.", ex);
-
-
-
-
-
         }
-
-
-
-
-
-
-
-
-
-
 
         if (message.StartsWith("WRONGPASS", StringComparison.Ordinal))
-
-
-
-
-
         {
-
-
-
-
-
             return new HighwayAuthenticationException(
-
-
-
-
-
                 "The Highway server rejected the supplied credentials.", ex);
-
-
-
-
-
         }
-
-
-
-
-
-
-
-
-
-
 
         if (message.StartsWith("NOPERM", StringComparison.Ordinal))
-
-
-
-
-
         {
-
-
-
-
-
-            // Garnet's reply does not name the command â€” it is literally
-
-
-
-
-
-            // "NOPERM this user has no permissions to run the command" â€” so the caller
-
-
-
-
-
+            // Garnet's reply does not name the command — it is literally
+            // "NOPERM this user has no permissions to run the command" — so the caller
             // attaches it. Parsing it out would produce null every time.
-
-
-
-
-
             return new HighwayAuthorizationException(command: null, ex);
-
-
-
-
-
         }
 
-
-
-
-
-
-
-
-
-
-
         return new HighwayTransportException(message);
-
-
-
-
-
     }
-
-
-
-
-
-
-
-
-
-
 
     public async ValueTask DisposeAsync()
-
-
-
-
-
     {
-
-
-
-
-
         _healthTicker?.Dispose();
         await _redis.DisposeAsync().ConfigureAwait(false);
-
-
-
-
-
     }
-
-
-
-
-
 
     /// <summary>
     /// CLIENT SETNAME rejects spaces and newlines, and a rejected name would fail the whole
@@ -3332,8 +803,3 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
         return new string(buf);
     }
 }
-
-
-
-
-

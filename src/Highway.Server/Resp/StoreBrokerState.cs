@@ -18,46 +18,35 @@ namespace Highway.Server.Resp;
 internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions options, ObservedAddressRegistry? observed = null) : IBrokerState
 {
     public IReadOnlyList<(string Name, long Depth, long Bytes)> Queues()
-    {
-        using var snap = store.Snapshot();
-        var rows = new List<(string, long, long)>();
-        foreach (var name in StoreInspection.QueueNames(store))
-        {
-            var depth = store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue(name)));
-            var bytes = store.ReadByteCounter(snap, HighwayNames.QueueBytes(name));
-            rows.Add((name, depth, bytes));
-        }
-        return rows;
-    }
+        => [.. EachQueue().Select(q => (q.Name, q.Box.Ready, q.Box.Bytes))];
 
-    // ---- IBrokerState (the dashboard's read surface, 040/041) ----------------
-    // Same DTOs BrokerState produced, computed in-process from IHighwayStore rather than over a
-    // self-connection with raw SCAN/GET (which the RESP server does not serve). Never throws —
-    // a read that cannot complete returns StateResult.Fail, so a dashboard panel degrades rather
-    // than taking down the page (C7.1).
+    /// <summary>Every queue box with its counters open (065) — no data is scanned.</summary>
+    private IEnumerable<(string Name, Storage.Boxes.WorkBox Box)> EachQueue()
+    {
+        var rt = new Storage.Boxes.BoxRuntime();
+        using var batch = store.NewBatch();
+        foreach (var (_, name, id) in Storage.Boxes.Catalog.List(store, batch, Storage.Boxes.BoxKeys.Kind.Queue))
+        {
+            using var wb = new Storage.Boxes.WorkBox(store, rt, id, tracksBytes: true, batch);
+            yield return (name, wb);
+        }
+    }
 
     public Task<StateResult<IReadOnlyList<QueueStateDto>>> QueuesAsync(CancellationToken ct = default)
     {
         try
         {
-            using var snap = store.Snapshot();
             var rows = new List<QueueStateDto>();
-            foreach (var name in StoreInspection.QueueNames(store))
+            foreach (var (name, wb) in EachQueue())
             {
-                var workers = store.SetMembers(snap, HighwayKeyspace.SetPrefix(HighwayNames.QueueNodes(name)));
-                long inFlight = 0;
-                foreach (var w in workers)
-                    inFlight += store.ListLength(snap,
-                        HighwayKeyspace.ListPrefix(HighwayNames.QueueProcessing(name, Encoding.UTF8.GetString(w))));
-
                 rows.Add(new QueueStateDto(
                     Name: name,
-                    Depth: store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue(name))),
-                    Bytes: store.ReadByteCounter(snap, HighwayNames.QueueBytes(name)),
+                    Depth: wb.Ready,
+                    Bytes: wb.Bytes,
                     MaxBytes: options.MaxQueueBytes,
-                    InFlight: inFlight,
-                    DeadLettered: store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.QueueDeadLetter(name))),
-                    Delayed: store.SortedSetLength(snap, HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed(name))),
+                    InFlight: wb.InFlight,
+                    DeadLettered: wb.Dead,
+                    Delayed: wb.Delayed,
                     IsSubscriberGroup: name.Contains('@')));
             }
             return Task.FromResult(StateResult<IReadOnlyList<QueueStateDto>>.Ok(rows));
@@ -78,18 +67,15 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
     {
         try
         {
-            using var snap = store.Snapshot();
             var rows = new List<JobScheduleDto>();
-            foreach (var queue in StoreInspection.NamesWithJobSchedules(store, snap))
+            foreach (var (queue, wb) in EachQueue())
             {
-                var schedKey = HighwayKeyspace.SortedSetPrefix(HighwayNames.JobSchedules(queue));
-                foreach (var member in store.SortedSetRangeByScore(snap, schedKey, long.MinValue, long.MaxValue, 1024))
+                foreach (var job in wb.Schedules())
                 {
-                    Internal.JobScheduleRecord.Decode(member, out var job, out var expr, out var lastFire, out var nextFire, out _);
                     rows.Add(new JobScheduleDto(
-                        queue, job, expr,
-                        new DateTimeOffset(nextFire, TimeSpan.Zero),
-                        lastFire > 0 ? new DateTimeOffset(lastFire, TimeSpan.Zero) : null));
+                        queue, job.Job, job.Expression,
+                        new DateTimeOffset(job.NextFire, TimeSpan.Zero),
+                        job.LastFire > 0 ? new DateTimeOffset(job.LastFire, TimeSpan.Zero) : null));
                 }
             }
             return Task.FromResult(StateResult<IReadOnlyList<JobScheduleDto>>.Ok(rows));

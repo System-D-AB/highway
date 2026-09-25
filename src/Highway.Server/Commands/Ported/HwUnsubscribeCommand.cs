@@ -9,7 +9,7 @@ namespace Highway.Server.Commands.Ported;
 ///
 /// Removes a subscriber group, deleting its pending queue and everything it owns. Idempotent.
 ///
-/// <para>Ported from Garnet. The teardown is the shared <see cref="RegistrySupport.RetireGroup"/>
+/// <para>Ported from Garnet. The teardown is the shared <see cref="BoxCommandSupport.RetireGroup"/>
 /// — the one implementation that <c>HW.UNSUBSCRIBE</c>, <c>HW.HEARTBEAT BYE PURGE</c>, and the
 /// automatic retirement all use (017). Where Garnet enumerated and DELETEd each of the group's
 /// keys, retirement now issues one <see cref="Highway.Server.Storage.IHighwayStore.DeleteRange"/>
@@ -33,15 +33,15 @@ internal sealed class HwUnsubscribeCommand : HighwayCommand
 
     protected override void Run(CommandContext ctx, RespWriter writer)
     {
-        var store = ctx.Store;
-
-        using var _lock = ctx.Locks.Lock(_channel);
-        using var snap = store.Snapshot();
-        using var batch = store.NewBatch();
-
-        RegistrySupport.RetireGroup(store, snap, batch, _channel, _group);
-
+        // 065: the group's queue box goes in one range delete, under its lock and the channel's.
+        var lockNames = BoxCommandSupport.GroupLockNames(ctx, _channel, [_group]);
+        lockNames.Add(_channel);
+        using var _lock = ctx.Locks.LockMany(lockNames);
+        using var batch = ctx.Store.NewBatch();
+        var retired = new List<(Storage.Boxes.BoxKeys.Kind, string, uint)>();
+        BoxCommandSupport.RetireGroup(ctx, batch, _channel, _group, retired);
         batch.Commit();
+        BoxCommandSupport.Forget(ctx, retired);
         writer.SimpleString("OK");
     }
 

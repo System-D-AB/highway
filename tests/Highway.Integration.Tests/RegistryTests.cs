@@ -6,8 +6,9 @@ using Xunit;
 namespace Highway.Integration.Tests;
 
 /// <summary>
-/// Feature 006 Task 11 — the three registry commands driven over real RESP
-/// against an embedded server.
+/// Feature 006 Task 11 — the registry commands driven over real RESP against an embedded
+/// server. Since protocol 5.0 (068) registration is <c>HW.SESSION</c>; <c>HW.HEARTBEAT</c>
+/// carries only liveness and departure.
 /// </summary>
 public class RegistryTests : IDisposable
 {
@@ -54,7 +55,7 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Register_ThenDiscover_ReturnsTheNode()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        ((string)_db.Register("node-1", OrdersCatalog)!).Should().Be("OK");
 
         DiscoverNodes("orders.create").Should().Equal("node-1");
     }
@@ -62,7 +63,7 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Discover_ReturnsNodeIdWithAgeOfLastBeat()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
 
         var pair = (RedisResult[])((RedisResult[])_db.Execute("HW.DISCOVER", "orders.create")!)[0]!;
 
@@ -78,8 +79,8 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Register_TwoNodesSameService_BothDiscoverable()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
-        _db.Execute("HW.HEARTBEAT", "node-2", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
+        _db.Register("node-2", OrdersCatalog);
 
         DiscoverNodes("orders.create").Should().BeEquivalentTo(["node-1", "node-2"]);
     }
@@ -87,7 +88,7 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Register_EmptyCatalog_IsAValidPureCaller()
     {
-        _db.Execute("HW.HEARTBEAT", "caller-1", EmptyCatalog);
+        _db.Register("caller-1", EmptyCatalog);
 
         Stats().Should().ContainKey("nodes").WhoseValue.Should().Be("1");
         DiscoverNodes("orders.create").Should().BeEmpty();
@@ -97,7 +98,7 @@ public class RegistryTests : IDisposable
     public void Register_RepeatedIdenticalCatalog_DoesNotDuplicateState()
     {
         for (var i = 0; i < 5; i++)
-            _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+            _db.Register("node-1", OrdersCatalog);
 
         DiscoverNodes("orders.create").Should().ContainSingle("re-registration must be idempotent")
             .Which.Should().Be("node-1");
@@ -107,26 +108,37 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Register_ChangedCatalog_RemovesServicesNoLongerHosted()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
         DiscoverNodes("orders.create").Should().Equal("node-1");
 
         // Redeployed under the same name, now hosting something else entirely.
         const string newCatalog =
             """{"services":[{"name":"billing.charge","requestType":"R","responseType":"S"}],"channels":[]}""";
-        _db.Execute("HW.HEARTBEAT", "node-1", newCatalog);
+        _db.Register("node-1", newCatalog);
 
         DiscoverNodes("orders.create").Should().BeEmpty("a redeployed node must leave no stale index entries");
         DiscoverNodes("billing.charge").Should().Equal("node-1");
     }
 
+    [Fact]
+    public void Session_WithoutCatalog_RegistersNothing()
+    {
+        // A client with heartbeats off declares a session with no catalog (068): it must not
+        // become a registered node, or dead-node recovery would take its work for not beating.
+        ((string)_db.Session("quiet-1")!).Should().Be("OK");
+
+        Stats()["nodes"].Should().Be("0");
+        ((string)_db.Execute("HW.HEARTBEAT", "quiet-1")!).Should().Be("SESSION");
+    }
+
     // ──────────────────────────────────────────────────────────────────
-    // The +REGISTER handshake — Requirement 1 AC3/AC5
+    // The +SESSION handshake (was +REGISTER) — Requirement 1 AC3/AC5
     // ──────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void Liveness_ForUnregisteredNode_AsksForRegistration_AndMutatesNothing()
+    public void Liveness_ForUnregisteredNode_AsksForASession_AndMutatesNothing()
     {
-        ((string)_db.Execute("HW.HEARTBEAT", "ghost")!).Should().Be("REGISTER");
+        ((string)_db.Execute("HW.HEARTBEAT", "ghost")!).Should().Be("SESSION");
 
         Stats()["nodes"].Should().Be("0",
             "a liveness beat must not conjure a registration it has no catalog for");
@@ -135,7 +147,7 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Liveness_AfterRegistration_ReturnsOk()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
 
         ((string)_db.Execute("HW.HEARTBEAT", "node-1")!).Should().Be("OK");
     }
@@ -146,22 +158,22 @@ public class RegistryTests : IDisposable
     /// alive but undiscoverable, with nothing to surface the fault.
     /// </summary>
     [Fact]
-    public void Liveness_AfterTheNodeIsGone_AsksForRegistrationAgain()
+    public void Liveness_AfterTheNodeIsGone_AsksForASessionAgain()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
         _db.Execute("HW.HEARTBEAT", "node-1", "BYE");
 
-        ((string)_db.Execute("HW.HEARTBEAT", "node-1")!).Should().Be("REGISTER");
+        ((string)_db.Execute("HW.HEARTBEAT", "node-1")!).Should().Be("SESSION");
 
-        // And re-registering restores discoverability — the self-healing loop.
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        // And re-declaring the session restores discoverability — the self-healing loop.
+        _db.Register("node-1", OrdersCatalog);
         DiscoverNodes("orders.create").Should().Equal("node-1");
     }
 
     [Fact]
     public void Liveness_PreservesTheStoredCatalog()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
 
         for (var i = 0; i < 5; i++)
             ((string)_db.Execute("HW.HEARTBEAT", "node-1")!).Should().Be("OK");
@@ -178,7 +190,7 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Bye_RemovesTheNodeFromDiscoveryImmediately()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
 
         ((string)_db.Execute("HW.HEARTBEAT", "node-1", "BYE")!).Should().Be("OK");
 
@@ -193,8 +205,8 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Bye_LeavesOtherNodesAlone()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
-        _db.Execute("HW.HEARTBEAT", "node-2", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
+        _db.Register("node-2", OrdersCatalog);
 
         _db.Execute("HW.HEARTBEAT", "node-1", "BYE");
 
@@ -206,40 +218,43 @@ public class RegistryTests : IDisposable
     // ──────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void Heartbeat_SecondArgNeitherByeNorJson_IsRejected()
+    public void Heartbeat_SecondArgOtherThanBye_IsRejected()
     {
-        var act = () => _db.Execute("HW.HEARTBEAT", "node-1", "just some text");
+        var text = () => _db.Execute("HW.HEARTBEAT", "node-1", "just some text");
+        text.Should().Throw<RedisServerException>().WithMessage("ERR HW_INVALID_ARG*");
 
-        act.Should().Throw<RedisServerException>()
-            .WithMessage("ERR HW_INVALID_ARG*");
+        // The 4.x registration form (a catalog as the second argument) is gone: registration is HW.SESSION.
+        var catalog = () => _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        catalog.Should().Throw<RedisServerException>().WithMessage("ERR HW_INVALID_ARG*");
+        Stats()["nodes"].Should().Be("0");
     }
 
     [Fact]
-    public void Heartbeat_BlankNodeId_IsRejected()
+    public void Session_BlankNodeId_IsRejected()
     {
-        var act = () => _db.Execute("HW.HEARTBEAT", "", OrdersCatalog);
+        var act = () => _db.Register("", OrdersCatalog);
 
         act.Should().Throw<RedisServerException>().WithMessage("ERR HW_INVALID_ARG*");
     }
 
     [Fact]
-    public void Heartbeat_NodeIdWithNewline_IsRejected()
+    public void Session_NodeIdWithNewline_IsRejected()
     {
         // The registry mirror lists are newline-delimited; an unvalidated
         // identifier would split into two entries and corrupt routing.
-        var act = () => _db.Execute("HW.HEARTBEAT", "node\n2", OrdersCatalog);
+        var act = () => _db.Register("node\n2", OrdersCatalog);
 
         act.Should().Throw<RedisServerException>().WithMessage("ERR HW_INVALID_ARG*");
     }
 
     [Fact]
-    public void Heartbeat_OversizedCatalog_IsRejected()
+    public void Session_OversizedCatalog_IsRejected()
     {
         using var small = new HighwayTestServer(o => o.MaxCatalogBytes = 64);
         using var redis = ConnectionMultiplexer.Connect(small.ConnectionString);
 
         var big = """{"services":[],"channels":[],"pad":" """ + new string('x', 200) + "\"}";
-        var act = () => redis.GetDatabase().Execute("HW.HEARTBEAT", "node-1", big);
+        var act = () => redis.GetDatabase().Register("node-1", big);
 
         act.Should().Throw<RedisServerException>().WithMessage("ERR HW_PAYLOAD_TOO_LARGE*");
     }
@@ -259,8 +274,8 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Stats_Server_ReportsLiveNodesAndCatalogTotals()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
-        _db.Execute("HW.HEARTBEAT", "node-2", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
+        _db.Register("node-2", OrdersCatalog);
 
         var stats = Stats();
 
@@ -273,7 +288,7 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Stats_Service_ReportsQueueDepthAndHosts()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
         _db.Execute("HW.CALL", "orders.create", "req-1", "payload");
         _db.Execute("HW.CALL", "orders.create", "req-2", "payload");
 
@@ -286,11 +301,11 @@ public class RegistryTests : IDisposable
     }
 
     [Fact]
-    public void Stats_Service_CountsDequeuedButUnackedAsInFlight()
+    public void Stats_Service_CountsClaimedButUnackedAsInFlight()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
         _db.Execute("HW.CALL", "orders.create", "req-1", "payload");
-        _db.Execute("HW.DEQUEUE", "orders.create", "node-1");
+        _db.ClaimSvc("orders.create", "node-1").Should().NotBeNull();
 
         var stats = Stats("orders.create");
 
@@ -301,7 +316,7 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Stats_Channel_ReportsGroupsAndPending()
     {
-        _db.Execute("HW.SUBSCRIBE", "orders.placed", "grp-1");
+        _db.Subscribe("orders.placed", "grp-1");
         _db.Execute("HW.PUBLISH", "orders.placed", "m1");
         _db.Execute("HW.PUBLISH", "orders.placed", "m2");
 
@@ -327,8 +342,8 @@ public class RegistryTests : IDisposable
     {
         const string dual =
             """{"services":[{"name":"dual","requestType":"R","responseType":"S"}],"channels":[{"name":"dual","subscriberCount":1}]}""";
-        _db.Execute("HW.HEARTBEAT", "node-1", dual);
-        _db.Execute("HW.SUBSCRIBE", "dual", "grp-1");
+        _db.Register("node-1", dual);
+        _db.Subscribe("dual", "grp-1");
 
         Stats("dual")["kind"].Should().Be("service", "the kind field makes the resolution explicit");
     }
@@ -336,8 +351,8 @@ public class RegistryTests : IDisposable
     [Fact]
     public void Stats_ExcludesDepartedNodes()
     {
-        _db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
-        _db.Execute("HW.HEARTBEAT", "node-2", OrdersCatalog);
+        _db.Register("node-1", OrdersCatalog);
+        _db.Register("node-2", OrdersCatalog);
         _db.Execute("HW.HEARTBEAT", "node-1", "BYE");
 
         Stats()["nodes"].Should().Be("1");
@@ -358,7 +373,7 @@ public class RegistryTests : IDisposable
             using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
             var db = redis.GetDatabase();
 
-            db.Execute("HW.HEARTBEAT", "node-1", OrdersCatalog);
+            db.Register("node-1", OrdersCatalog);
 
             server.Restart();
 

@@ -18,19 +18,25 @@ on the dashboard.
 
 ## How it works
 
-**One command, four forms.** `HW.HEARTBEAT` registers a node's catalog, proves liveness on a
-recurring beat, or departs — and departure has two distinct meanings that must not be confused:
+**A session, then beats.** A node declares its session once with `HW.SESSION` — its catalog, the
+subscriber groups it belongs to, and its job schedules (3.0) — then proves liveness with a recurring
+`HW.HEARTBEAT <node>`, or departs — and departure has two distinct meanings that must not be
+confused:
 
 - **`BYE`** — "I am stopping." A subscriber's backlog is preserved; it expects to return.
 - **`BYE PURGE`** — "I am never coming back." It retires the node's subscriber groups, destroying
   their queues, and reports the groups, messages and bytes removed.
 
-**The catalog travels once; a beat is 8 bytes.** A node's catalog cannot change while it runs, so the
-client sends it once at registration and every later beat is a bare `HW.HEARTBEAT <node>`. The server
-mirrors that: the catalog record is written once, and each beat refreshes a separate 8-byte liveness
-key (`hw:reg:seen:{node}`) — so a beat costs a tiny write on the primary and ships 8 bytes to each
-standby, regardless of catalog size (feature 060). The broker only asks for the catalog again
-(`+REGISTER`) if it has no record for the node — after a prune, or if the registry was lost.
+**The session travels once; a beat is 8 bytes.** A node's session cannot change while it runs, so the
+client declares it once and every later beat is a bare `HW.HEARTBEAT <node>`. The server mirrors that:
+the registration is written once, and each beat refreshes a separate 8-byte liveness timestamp — so a
+beat costs a tiny write on the primary and ships 8 bytes to each standby, regardless of catalog size
+(feature 060). The broker asks for the session again (`+SESSION`) whenever it has no registration for
+the node — after a prune, a wipe, or on a fresh or re-bootstrapped node — and the client re-declares
+**all** of it at once, so subscriptions and schedules come back with the registration (3.0; before,
+only the catalog was re-sent and a lost subscription stayed lost). The client also re-declares after
+following a failover. A node running with heartbeats off declares no catalog: a registered node that
+never beats would look dead.
 
 **Discovery and load balancing.** `HW.DISCOVER` returns the live nodes currently hosting a service,
 which is what lets RPC and queue work spread across competing consumers without any client-side
@@ -57,9 +63,8 @@ stored address would outlive the socket it described.
 
 ## Wire surface
 
-`HW.HEARTBEAT` (register / beat / `BYE` / `BYE PURGE`), `HW.DISCOVER` and `HW.STATS` are defined in
-[`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md), along with the registry key schema and the
-mirror keys that map nodes to the services and groups they back.
+`HW.SESSION`, `HW.HEARTBEAT` (beat / `BYE` / `BYE PURGE`), `HW.DISCOVER` and `HW.STATS` are defined in
+[`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md).
 
 ## Guarantees & limits
 

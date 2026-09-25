@@ -27,7 +27,7 @@ public class CatalogueTests : IDisposable
         => Encoding.UTF8.GetBytes("""{"v":1,"src":"t","ts":"2026-08-09T00:00:00Z","body":{}}""");
 
     private static void Register(IDatabase db, string node, string catalogJson)
-        => db.Execute("HW.HEARTBEAT", node, catalogJson);
+        => db.Register(node, catalogJson);
 
     /// <summary>Reproduces the samples' shape — the deployment the original screenshot came from.</summary>
     private void SeedSamplesShape(IDatabase db)
@@ -38,10 +38,10 @@ public class CatalogueTests : IDisposable
         Register(db, "shop-1",
             """{"nodeId":"shop-1","services":[],"queues":[],"channels":[{"name":"orders.placed"}]}""");
 
-        db.Execute("HW.SUBSCRIBE", "orders.placed", "shop-1");
-        db.Execute("HW.SUBSCRIBE", "inventory.low", "order-service-1");
+        db.Subscribe("orders.placed", "shop-1");
+        db.Subscribe("inventory.low", "order-service-1");
         db.Execute("HW.PUBLISH", "orders.placed", Envelope());
-        db.Execute("HW.QSEND", "invoices.generate", "inv-1", Envelope());
+        db.Send("invoices.generate", "inv-1", Envelope());
     }
 
     // ---- classification (T1) --------------------------------------------------
@@ -106,7 +106,7 @@ public class CatalogueTests : IDisposable
         var catalogue = await _server.ReadCatalogueAsync();
 
         catalogue.Should().Contain(e => e.Name == "shop-1" && e.Kind == EntityKind.Node,
-            "HW.HEARTBEAT records under the node id, so every node becomes a recorder name - " +
+            "HW.SESSION records under the node id, so every node becomes a recorder name - " +
             "that is a symptom, and once nodes are first-class they must not also appear as " +
             "unlabelled rows");
     }
@@ -203,15 +203,22 @@ public class CatalogueTests : IDisposable
     /// more than the test: <b>the server refuses to register an unparseable catalog</b>, so one
     /// can never reach storage through the normal path. <c>Catalogue.ReadNode</c>'s tolerance of
     /// bad JSON is defence against a corrupted record, not a case an operator can cause.
+    ///
+    /// <para>Since 5.0 the catalog travels inside the <c>HW.SESSION</c> JSON, so "unreadable" is
+    /// either a session that does not parse at all or a catalog that is not a catalog object.</para>
     /// </summary>
     [Fact]
-    public void AnUnreadableCatalog_IsRefusedAtRegistration_SoItNeverReachesTheCatalogue()
+    public async Task AnUnreadableCatalog_IsRefusedAtRegistration_SoItNeverReachesTheCatalogue()
     {
         var db = Db();
 
-        var act = () => Register(db, "broken-node", "not json at all");
-
-        act.Should().Throw<RedisServerException>().WithMessage("*parseable catalog JSON*",
+        var unparseable = () => db.Execute("HW.SESSION", "broken-node", """{"catalog": not json at all}""");
+        unparseable.Should().Throw<RedisServerException>().WithMessage("ERR HW_INVALID_ARG*does not parse*",
             "rejecting it at the door beats storing something no reader can trust");
+
+        var notACatalog = () => db.Execute("HW.SESSION", "broken-node", """{"catalog":"not json at all"}""");
+        notACatalog.Should().Throw<RedisServerException>().WithMessage("ERR HW_INVALID_ARG*catalog*");
+
+        (await _server.ReadNodesAsync()).Should().NotContain(n => n.Name == "broken-node");
     }
 }

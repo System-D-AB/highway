@@ -2,7 +2,7 @@
 
 > **Status:** current
 > **Protocol:** the *Pub/Sub Commands* section of [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md)
-> is authoritative for `HW.PUBLISH` / `HW.SUBSCRIBE` / `HW.UNSUBSCRIBE`. Guarantees are C2 in
+> is authoritative for `HW.PUBLISH`, the subscriptions `HW.SESSION` declares, and `HW.UNSUBSCRIBE`. Guarantees are C2 in
 > [`constraints.md`](../product/constraints.md). This doc explains how pub/sub works and why.
 
 *Highway pub/sub is durable fan-out: a publish reaches every subscriber group registered at publish
@@ -30,7 +30,9 @@ identifiers for this). This is why pub/sub inherits durability, competing-replic
 dead-lettering for free — there is one delivery engine underneath, two verbs on top.
 
 **Fan-out is atomic and per-group.** `HW.PUBLISH` enqueues into *every* registered group's queue in
-one transaction — all groups or none, so a crash never leaves a partial delivery. "Delivered" means
+one commit, holding every group's lock — all groups or none, so a crash never leaves a partial
+delivery, and a publish can never race a claim on the same group (3.0; before it, a publish and a
+claim took different locks and could, in the worst case, overwrite a message). "Delivered" means
 delivered to every group, never "delivered to whoever grabbed it first": first-acknowledgement-wins
 would let a fast subscriber starve a slow one, which is not fan-out. Within a group, replicas
 **compete** through that group's single queue, so each message is processed once per group by
@@ -43,15 +45,21 @@ registry past a threshold (24 h default) is retired, and retirement is never sil
 records an event, and reports what it destroyed. See
 [registry-and-heartbeat.md](registry-and-heartbeat.md).
 
-**Deferred publish** uses an absolute future time, so log replay after a restart can't re-delay from
-replay time; a group registering during the delay is resolved at publish time and does not receive a
-message aimed before it existed.
+**Deferred publish** uses an absolute future time, so a restart can't re-delay it; a group
+registering during the delay is resolved at publish time and does not receive a message aimed before
+it existed. A deferred copy counts against its group's byte budget like any other (3.0).
+
+**Subscriptions are part of the session** (3.0). A node declares the groups it subscribes through in
+`HW.SESSION`, with its catalog and job schedules, and re-declares them whenever the broker answers a
+heartbeat with `+SESSION` or the client follows a failover. Before 3.0 a subscription was sent once at
+start, so a broker that lost it (a wipe, a fresh node) kept answering while every publish reached
+nobody, silently, until the subscriber restarted.
 
 ## Wire surface
 
-`HW.PUBLISH` (immediate or deferred), `HW.SUBSCRIBE` (register a group, optionally the node backing
-it) and `HW.UNSUBSCRIBE` are defined in [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md).
-Subscribers *consume* through the queue commands (`HW.QCLAIM`/`HW.QACK`) on the derived
+`HW.PUBLISH` (immediate or deferred), `HW.SESSION` (whose `subscriptions` register a group and the
+node backing it) and `HW.UNSUBSCRIBE` are defined in [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md).
+Subscribers *consume* through the work commands (`HW.CLAIM Q`, `HW.ACK <token>`) on the derived
 `{channel}@{group}` queue — there is no separate receive command.
 
 ## Guarantees & limits

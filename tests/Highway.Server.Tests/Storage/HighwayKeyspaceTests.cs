@@ -68,10 +68,14 @@ public class HighwayKeyspaceTests
         var zset = HighwayKeyspace.SortedSetPrefix("orders");
         var kv = HighwayKeyspace.Kv("orders");
 
-        // The one-byte family tag differs, so the first byte differs.
-        list[0].Should().NotBe(set[0]);
-        set[0].Should().NotBe(zset[0]);
-        zset[0].Should().NotBe(kv[0]);
+        // 065: every family key starts with the system box's families prefix; the one-byte family tag
+        // right after it differs, so the keys diverge there.
+        var tag = HighwayKeyspace.FamiliesPrefix.Length;
+        foreach (var key in new[] { list, set, zset, kv })
+            key.AsSpan().StartsWith(HighwayKeyspace.FamiliesPrefix).Should().BeTrue();
+        list[tag].Should().NotBe(set[tag]);
+        set[tag].Should().NotBe(zset[tag]);
+        zset[tag].Should().NotBe(kv[tag]);
     }
 
     [Fact]

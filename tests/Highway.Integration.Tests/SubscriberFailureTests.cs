@@ -131,6 +131,17 @@ public class SubscriberFailureTests : IDisposable
     }
 
     /// <summary>
+    /// True when an <c>[Idempotent]</c> marker (in progress or completed) exists for
+    /// <paramref name="scope"/>/<paramref name="id"/>. HW.IDEM BEGIN answers <c>BUSY</c> or
+    /// <c>[DONE, bytes]</c> for an existing marker and <c>CLAIMED</c> when there was none.
+    /// </summary>
+    private static bool IdemMarkerExists(IDatabase db, string scope, string id)
+    {
+        var reply = db.Execute("HW.IDEM", "BEGIN", scope, id, "60");
+        return reply.Resp2Type == ResultType.Array || reply.ToString() == "BUSY";
+    }
+
+    /// <summary>
     /// The headline: a subscriber that throws must produce a dead letter naming the exception,
     /// not an acknowledged message and silence.
     /// </summary>
@@ -217,7 +228,9 @@ public class SubscriberFailureTests : IDisposable
         // The gate is keyed on the DERIVED QUEUE name, which is what makes it work per group
         // rather than per channel. Before 018 no such key was ever written for a subscriber.
         // (040 fixture swap: KEYS is not served, so the message id comes from the flight
-        // recorder's Published event and the marker is read back by its exact key.)
+        // recorder's Published event. 5.0: the marker is no longer a stock-readable key, so it
+        // is probed with HW.IDEM BEGIN — BUSY or [DONE, …] means a marker exists; CLAIMED
+        // means none did.)
         var replay = (RedisResult[])db.Execute("HW.REPLAY", "sub.idem")!;
         var messageIds = replay
             .Select(Fields)
@@ -228,8 +241,7 @@ public class SubscriberFailureTests : IDisposable
             .ToArray();
         messageIds.Should().NotBeEmpty("the publish was recorded with its message id");
 
-        var markerFound = messageIds.Any(id =>
-            !db.StringGet($"hw:idem:sub.idem@idem-node:{id}").IsNull);
+        var markerFound = messageIds.Any(id => IdemMarkerExists(db, "sub.idem@idem-node", id!));
 
         markerFound.Should().BeTrue(
             "[Idempotent] must actually run for a subscriber - before 018 the attribute was " +

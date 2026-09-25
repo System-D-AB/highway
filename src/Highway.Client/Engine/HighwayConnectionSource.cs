@@ -95,6 +95,12 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
                     throw new InvalidOperationException("Highway server connection string is required.");
 
                 var options = HighwayConnectionConfiguration.Build(server, _settings);
+                // 069 L1: with other endpoints configured there is somewhere else to go, so an operation on a
+                // dead connection must fail at once and let the failover walk run — not sit in
+                // StackExchange.Redis's backlog for its 5 s timeout first (and 5 s more for every other
+                // connection still holding the dead multiplexer). A single-endpoint client keeps the default:
+                // waiting for its one server to come back is all it can do.
+                if (HasAlternateEndpoints) options.BacklogPolicy = BacklogPolicy.FailFast;
                 _connectTask = ConnectAsyncCore(options);
             }
             task = _connectTask;
@@ -173,7 +179,7 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
         lock (_syncLock)
         {
             previousHost = HostOf(_activeServer);
-            if (string.Equals(previousHost, endpoint, StringComparison.OrdinalIgnoreCase)
+            if (EndpointIdentity.Same(previousHost, endpoint)
                 && _multiplexer is { IsConnected: true })
                 return;
 
@@ -237,7 +243,7 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
     /// <summary>Logs and raises <see cref="MasterChanged"/> — only when the master host actually changed (050 T5).</summary>
     private void RaiseMasterChanged(string? previousHost, string newHost)
     {
-        if (string.Equals(previousHost, newHost, StringComparison.OrdinalIgnoreCase)) return;
+        if (EndpointIdentity.Same(previousHost, newHost)) return;
         var epoch = Volatile.Read(ref _lastSeenEpoch);
         _logger.LogInformation("Highway master changed to {Master} (epoch {Epoch})", newHost, epoch);
         Observability.HighwayClientMetrics.RecordFailover();   // 051 R2: the caller-side view of a cluster event
@@ -331,8 +337,9 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
             .ToArray();
 
         var list = (fromRoster.Length > 0 ? fromRoster : HostsOf(_originalServer))
-            .Where(h => !excludeCurrent || !string.Equals(h, current, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(h => string.Equals(h, current, StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            // 069 L2: by identity, not spelling — "localhost:p" and the roster's "127.0.0.1:p" are one host.
+            .Where(h => !excludeCurrent || !EndpointIdentity.Same(h, current))
+            .OrderBy(h => EndpointIdentity.Same(h, current) ? 1 : 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         return list;
@@ -382,6 +389,9 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
                     var options = HighwayConnectionConfiguration.Build(host + OptionsOf(_originalServer), _settings);
                     options.ConnectTimeout = Math.Min(options.ConnectTimeout, 2_000);
                     options.AbortOnConnectFail = true;
+                    // 069 L3: one attempt. The default ConnectRetry = 3 tripled a dead node's probe
+                    // (~6 s on Windows, where a refused connect takes ~2 s) inside every failover walk.
+                    options.ConnectRetry = 1;
                     probe = await ConnectionMultiplexer.ConnectAsync(options).ConfigureAwait(false);
 
                     var verdict = await HandshakeAsync(probe).ConfigureAwait(false);

@@ -9,7 +9,7 @@ namespace Highway.Integration.Tests;
 
 /// <summary>
 /// Feature 028 — recurring jobs at the wire level: the schedule store (<c>HW.JOB</c>), the
-/// fire-and-re-arm inside <c>HW.QCLAIM</c>'s promotion sweep, and the policies (catch-up-one,
+/// fire-and-re-arm inside <c>HW.CLAIM Q</c>'s promotion sweep, and the policies (catch-up-one,
 /// refusal on a full queue).
 ///
 /// <para>The central claim under adversarial test: <b>exactly one fire per occurrence</b>,
@@ -105,13 +105,12 @@ public class RecurringJobTests : IDisposable
         // the claim transaction's locks, so exactly one of these promotes the occurrence —
         // and whichever poller claims it, there is only ONE to claim.
         var claims = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Task.Run(() =>
-            _db.Execute("HW.QCLAIM", "rj.fire", $"racer-{i}"))));
+            _db.ClaimQ("rj.fire", $"racer-{i}"))));
 
-        var winners = claims.Where(c => !c.IsNull).ToArray();
+        var winners = claims.Where(c => c is not null).Select(c => c!.Value).ToArray();
         winners.Should().HaveCount(1, "one occurrence, one claim — the transaction is the election");
 
-        var fields = (RedisResult[])winners[0]!;
-        ((string?)fields[0]).Should().StartWith("job:tick:", "occurrence ids name their schedule");
+        winners[0].Id.Should().StartWith("job:tick:", "occurrence ids name their schedule");
 
         // And the schedule re-armed: nextFire moved forward, lastFire recorded.
         var row = List().Should().ContainSingle(r => (string?)r[1] == "tick").Subject;
@@ -126,13 +125,13 @@ public class RecurringJobTests : IDisposable
         // Let MANY occurrences go by unfired (nothing polls). OD3: the backlog collapses.
         await Task.Delay(4200);
 
-        _db.Execute("HW.QCLAIM", "rj.catchup", "worker-1");   // fires
-        var first = _db.Execute("HW.QCLAIM", "rj.catchup", "worker-1");
-        var second = _db.Execute("HW.QCLAIM", "rj.catchup", "worker-1");
+        _db.ClaimQ("rj.catchup", "worker-1");   // fires
+        var first = _db.ClaimQ("rj.catchup", "worker-1");
+        var second = _db.ClaimQ("rj.catchup", "worker-1");
 
-        // One fire happened across those claims: the first QCLAIM promoted one occurrence and
+        // One fire happened across those claims: the first claim promoted one occurrence and
         // either it or the next claimed it; nothing else is waiting.
-        new[] { first, second }.Count(c => !c.IsNull)
+        new[] { first, second }.Count(c => c is not null)
             .Should().BeLessThanOrEqualTo(1, "four missed seconds must not become four messages (OD3)");
     }
 
@@ -148,8 +147,8 @@ public class RecurringJobTests : IDisposable
             Template(src: new string('x', 128)));
 
         await Task.Delay(1100);
-        db.Execute("HW.QCLAIM", "rj.full", "worker-1").IsNull
-            .Should().BeTrue("the fire was refused, so nothing was enqueued");
+        db.ClaimQ("rj.full", "worker-1")
+            .Should().BeNull("the fire was refused, so nothing was enqueued");
 
         // nextFire unchanged → still due → a later poll retries. Provable via LIST: nextFire
         // remains in the past.

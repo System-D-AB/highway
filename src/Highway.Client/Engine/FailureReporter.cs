@@ -80,11 +80,12 @@ internal sealed class FailureReporter(IHighwayConnection connection, ILogger log
     /// </summary>
     public async Task ReportAsync(
         FailureTarget target,
-        string messageId,
+        ClaimedWork work,
         Exception exception,
         string disposition,
         CancellationToken cancellationToken = default)
     {
+        var messageId = work.Id;
         logger.LogError(exception,
             "Handler failed for message '{MessageId}' on {Kind} '{Target}'; {Disposition}",
             messageId, target.Kind, target.Name, disposition);
@@ -92,7 +93,7 @@ internal sealed class FailureReporter(IHighwayConnection connection, ILogger log
         try
         {
             await connection.FailAsync(
-                target.WireKind, target.Name, target.Scope, messageId,
+                work.Token,
                 exception.GetType().FullName ?? exception.GetType().Name,
                 BuildDetail(exception, target.Scope),
                 cancellationToken).ConfigureAwait(false);

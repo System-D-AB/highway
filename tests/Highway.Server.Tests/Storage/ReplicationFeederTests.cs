@@ -662,7 +662,8 @@ public class ReplicationFeederTests
     private static void Put(RocksDbStore store, string key, string value)
     {
         using var batch = store.NewBatch();
-        store.Set(batch, Encoding.UTF8.GetBytes(key), Encoding.UTF8.GetBytes(value));
+        // A system-box family key (065): a raw string key would read as 2.x data on reopen.
+        store.Set(batch, Highway.Server.Storage.Layout.HighwayKeyspace.Kv(key), Encoding.UTF8.GetBytes(value));
         batch.Commit();
     }
 }

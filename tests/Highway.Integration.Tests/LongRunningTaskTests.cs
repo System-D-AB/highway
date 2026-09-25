@@ -80,7 +80,7 @@ public class LongRunningTaskTests : IDisposable
             _server.ConnectionString, "lr-node",
             o => o.LeaseRenewalInterval = TimeSpan.FromMilliseconds(200)))
         {
-            db.Execute("HW.QSEND", "lr.slow", "msg-1", Envelope());
+            db.Send("lr.slow", "msg-1", Envelope());
 
             // Long enough for the 0.8s lease to have expired three times over.
             await Task.Delay(4_500);
@@ -113,7 +113,7 @@ public class LongRunningTaskTests : IDisposable
                 o.MaxProcessingTime = TimeSpan.FromSeconds(1);   // give up quickly
             }))
         {
-            db.Execute("HW.QSEND", "lr.slow", "msg-hung", Envelope());
+            db.Send("lr.slow", "msg-hung", Envelope());
 
             // Past the cap, renewal stops and the ordinary sweep takes over: requeue,
             // attempts++, and eventually the dead letter.
@@ -122,7 +122,7 @@ public class LongRunningTaskTests : IDisposable
             {
                 if (_server.Inspect.ListLength("hw:q:lr.slow:dlq") > 0) break;
                 await Task.Delay(200);
-                db.Execute("HW.QCLAIM", "lr.slow", "sweeper");
+                db.ClaimQ("lr.slow", "sweeper");
             }
         }
 
@@ -140,7 +140,7 @@ public class LongRunningTaskTests : IDisposable
             _server.ConnectionString, "lr-off",
             o => o.MaxProcessingTime = TimeSpan.Zero))
         {
-            db.Execute("HW.QSEND", "lr.slow", "msg-off", Envelope());
+            db.Send("lr.slow", "msg-off", Envelope());
             await Task.Delay(4_000);
         }
 
@@ -155,10 +155,11 @@ public class LongRunningTaskTests : IDisposable
     public void Touch_RenewsAClaimedEntry_WithoutAcknowledgingIt()
     {
         var db = Db();
-        db.Execute("HW.QSEND", "lr.cmd", "msg-1", Envelope());
-        db.Execute("HW.QCLAIM", "lr.cmd", "node-a");
+        db.Send("lr.cmd", "msg-1", Envelope());
+        var claim = db.ClaimQ("lr.cmd", "node-a");
+        claim.Should().NotBeNull();
 
-        var renewed = (long)db.Execute("HW.TOUCH", "Q", "lr.cmd", "node-a", "msg-1");
+        var renewed = db.Touch(claim!.Value.Token);
 
         renewed.Should().Be(1);
         (_server.Inspect.ListLength("hw:q:lr.cmd:proc:node-a")).Should().Be(1,
@@ -172,18 +173,19 @@ public class LongRunningTaskTests : IDisposable
         using var slow = new HighwayTestServer(o => o.Lease = TimeSpan.FromMilliseconds(600));
         var db = ConnectionMultiplexer.Connect(slow.ConnectionString).GetDatabase();
 
-        db.Execute("HW.QSEND", "lr.clock", "msg-1", Envelope());
-        db.Execute("HW.QCLAIM", "lr.clock", "node-a");
+        db.Send("lr.clock", "msg-1", Envelope());
+        var claim = db.ClaimQ("lr.clock", "node-a");
+        claim.Should().NotBeNull();
 
         // Keep renewing across more than a full lease period.
         for (var i = 0; i < 5; i++)
         {
             Thread.Sleep(200);
-            ((long)db.Execute("HW.TOUCH", "Q", "lr.clock", "node-a", "msg-1")).Should().Be(1);
+            db.Touch(claim!.Value.Token).Should().Be(1);
         }
 
         // A claim runs the sweep; the renewed entry must not have been requeued by it.
-        db.Execute("HW.QCLAIM", "lr.clock", "other-node");
+        db.ClaimQ("lr.clock", "other-node").Should().BeNull("the renewed claim is still held by node-a");
 
         (slow.Inspect.ListLength("hw:q:lr.clock:proc:node-a")).Should().Be(1,
             "the sweep decides expiry from the claim timestamp, so moving it forward IS " +
@@ -194,11 +196,12 @@ public class LongRunningTaskTests : IDisposable
     public void Touch_OnAMessageThatIsGone_ReturnsZero()
     {
         var db = Db();
-        db.Execute("HW.QSEND", "lr.gone", "msg-1", Envelope());
-        db.Execute("HW.QCLAIM", "lr.gone", "node-a");
-        db.Execute("HW.QACK", "lr.gone", "node-a", "msg-1");
+        db.Send("lr.gone", "msg-1", Envelope());
+        var claim = db.ClaimQ("lr.gone", "node-a");
+        claim.Should().NotBeNull();
+        db.Ack(claim!.Value.Token).Should().Be(1);
 
-        ((long)db.Execute("HW.TOUCH", "Q", "lr.gone", "node-a", "msg-1")).Should().Be(0,
+        db.Touch(claim.Value.Token).Should().Be(0,
             "a late renewal is a race the client cannot avoid, not an error to investigate");
     }
 
@@ -206,12 +209,14 @@ public class LongRunningTaskTests : IDisposable
     public void Touch_PreservesTheFailureBlock()
     {
         var db = Db();
-        db.Execute("HW.QSEND", "lr.block", "msg-1", Envelope());
-        db.Execute("HW.QCLAIM", "lr.block", "node-a");
+        db.Send("lr.block", "msg-1", Envelope());
+        var claim = db.ClaimQ("lr.block", "node-a");
+        claim.Should().NotBeNull();
+        var token = claim!.Value.Token;
 
-        db.Execute("HW.FAIL", "Q", "lr.block", "node-a", "msg-1", "System.TimeoutException", "first");
-        db.Execute("HW.TOUCH", "Q", "lr.block", "node-a", "msg-1");
-        db.Execute("HW.FAIL", "Q", "lr.block", "node-a", "msg-1", "System.InvalidOperationException", "second");
+        db.Fail(token, "System.TimeoutException", "first").Should().Be(1);
+        db.Touch(token).Should().Be(1);
+        db.Fail(token, "System.InvalidOperationException", "second").Should().Be(1);
 
         // If renewal had rebuilt the entry from its decoded parts it would have dropped the
         // trailer, and firstType with it - the exact miss 015 made at three of four sites.
@@ -220,7 +225,7 @@ public class LongRunningTaskTests : IDisposable
         for (var i = 0; i < 6; i++)
         {
             Thread.Sleep(900);
-            db.Execute("HW.QCLAIM", "lr.block", "node-a");
+            db.ClaimQ("lr.block", "node-a");
         }
 
         var peeked = (RedisResult[])db.Execute("HW.DLQ", "PEEK", "Q", "lr.block")!;
@@ -237,13 +242,14 @@ public class LongRunningTaskTests : IDisposable
     }
 
     [Fact]
-    public void Touch_RejectsAnUnknownTarget_NamingTheAcceptedForms()
+    public void Touch_RejectsAMalformedToken_NamingWhereTokensComeFrom()
     {
-        var act = () => Db().Execute("HW.TOUCH", "CH", "x", "y", "z");
+        // 5.0: HW.TOUCH takes only the token (the SVC|Q target grammar moved to HW.CLAIM), so the
+        // actionable rejection is now for a token that does not parse.
+        var act = () => Db().Execute("HW.TOUCH", "not-a-token");
 
-        var thrown = act.Should().Throw<RedisServerException>();
-        thrown.WithMessage("*SVC*");
-        thrown.WithMessage("*Q*");
+        act.Should().Throw<RedisServerException>()
+            .WithMessage("ERR HW_INVALID_TOKEN*HW.CLAIM*");
     }
 
     [Fact]
@@ -251,10 +257,10 @@ public class LongRunningTaskTests : IDisposable
     {
         var db = Db();
         db.Execute("HW.CALL", "lr.svc", "req-1", Envelope());
-        db.Execute("HW.DEQUEUE", "lr.svc", "node-a");
+        var claim = db.ClaimSvc("lr.svc", "node-a");
+        claim.Should().NotBeNull();
 
-        ((long)db.Execute("HW.TOUCH", "SVC", "lr.svc", "node-a", "req-1")).Should().Be(1,
-            "the SVC form exists so the grammar matches HW.FAIL and HW.DLQ - adding it later " +
-            "would have been a breaking change to the target grammar");
+        db.Touch(claim!.Value.Token).Should().Be(1,
+            "one token grammar settles service claims exactly as it does queue claims");
     }
 }

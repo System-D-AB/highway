@@ -8,7 +8,7 @@ namespace Highway.Integration.Tests;
 /// <summary>
 /// Feature 013 Part 1 — the defect this feature exists for.
 ///
-/// <para>Before this change, <c>HW.DEQUEUE</c>'s lease sweep requeued abandoned work with
+/// <para>Before this change, the service claim's lease sweep (<c>HW.CLAIM SVC</c> in 5.0) requeued abandoned work with
 /// no attempt limit and no destination. A request whose handler failed every time was
 /// claimed, abandoned, requeued, claimed — for the life of the deployment. Because the
 /// queue is FIFO, it was also retried <i>ahead of everything behind it</i>, so one poison
@@ -37,7 +37,7 @@ public class DeadLetterTests : IDisposable
     /// <summary>Claims the request and never acknowledges it — a crashed consumer.</summary>
     private static async Task AbandonOnceAsync(IDatabase db, string service, string node)
     {
-        await db.ExecuteAsync("HW.DEQUEUE", service, node);
+        await db.ClaimSvcAsync(service, node);
         await Task.Delay(70);   // let the lease expire
     }
 
@@ -57,8 +57,8 @@ public class DeadLetterTests : IDisposable
         for (var i = 0; i < 6; i++)
             await AbandonOnceAsync(db, Service, "node-a");
 
-        // One more dequeue to run the sweep that moves it.
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
+        // One more claim to run the sweep that moves it.
+        await db.ClaimSvcAsync(Service, "node-a");
 
         var queue = ListLength($"hw:svc:{Service}:q");
         var dlq   = ListLength($"hw:svc:{Service}:dlq");
@@ -103,8 +103,8 @@ public class DeadLetterTests : IDisposable
         {
             var id = $"ok-{i}";
             await db.ExecuteAsync("HW.CALL", Service, id, "payload"u8.ToArray());
-            await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
-            await db.ExecuteAsync("HW.ACK", Service, "node-a", id);
+            var claimed = await db.ClaimSvcAsync(Service, "node-a");
+            (await db.AckAsync(claimed!.Value.Token)).Should().Be(1);
         }
 
         (ListLength($"hw:svc:{Service}:dlq")).Should().Be(0);

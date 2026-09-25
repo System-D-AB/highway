@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
@@ -45,6 +44,7 @@ internal sealed class ReplicationFeeder : IDisposable
     private const string EpochFileName = "repl-epoch.txt";
 
     private readonly ReplicationSource _source;
+    private readonly WalTailerPool _walTailers;
     private readonly ConcurrentDictionary<string, ReplicaSlot> _slots = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SnapshotSessionState> _snapshots = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _dropEvents = new();
@@ -53,6 +53,8 @@ internal sealed class ReplicationFeeder : IDisposable
     private readonly string _dataDir;
     private readonly Lock _roleLock = new();
     private readonly Timer? _deadman;
+    private readonly CancellationTokenSource _peerWatchCts = new();
+    private readonly ConcurrentDictionary<string, PeerObservation> _peerObservations = new(StringComparer.OrdinalIgnoreCase);
 
     private string? _knownPrimaryEndpoint;
 
@@ -78,6 +80,8 @@ internal sealed class ReplicationFeeder : IDisposable
         _dataDir = dataDir;
         Options = options;
         _source = new ReplicationSource(db);
+        _walTailers = new WalTailerPool(db, _source);
+        OnEpochChanged += _walTailers.Clear;   // 066: a new epoch is a new history, as for the tail
         OnEpochChanged += Tail.Clear;   // 062: a new epoch is a new history — nothing captured before it is served
         Epoch = LoadPersistedEpoch();
         Role = options.StartAsReplica ? ReplicaRole.Replica : ReplicaRole.Primary;
@@ -85,6 +89,15 @@ internal sealed class ReplicationFeeder : IDisposable
         SelfEndpoint = options.AdvertiseEndpoint ?? "127.0.0.1:6500";
         if (options.AutoFailover && ReferenceEquals(options.Clock, TimeProvider.System))
             _deadman = new Timer(_ => TickDeadman(), null, TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(200));
+
+        // 069 R1: herd-arrival promotion does not depend on AutoFailover (the deadman is only a fence
+        // backstop), so neither does the check that guards it. Idle unless this node is a standby that
+        // has lost its master. A test clock gets no network probe; tests inject their own.
+        if (ReferenceEquals(options.Clock, TimeProvider.System) && options.Priority > 0)
+        {
+            PeerProbe = HigherPeerWatch.NetworkProbe(this);
+            _ = Task.Run(() => PeerWatchLoopAsync(_peerWatchCts.Token));
+        }
     }
 
     public HighwayReplicationOptions Options { get; }
@@ -99,7 +112,11 @@ internal sealed class ReplicationFeeder : IDisposable
         get => _role;
         private set
         {
-            if (_role != value) Tail.Clear();
+            if (_role != value)
+            {
+                Tail.Clear();
+                _walTailers.Clear();
+            }
             _role = value;
         }
     }
@@ -107,6 +124,9 @@ internal sealed class ReplicationFeeder : IDisposable
 
     /// <summary>Recently committed batches, served to caught-up replicas without reading the WAL (062).</summary>
     internal ReplicationTail Tail { get; } = new();
+
+    /// <summary>WAL tailers held between pulls for replicas behind the tail (066).</summary>
+    internal WalTailerPool WalTailers => _walTailers;
 
     /// <summary>This node's own advertised address (config; falls back to the bind endpoint).</summary>
     public string SelfEndpoint { get; set; }
@@ -130,10 +150,15 @@ internal sealed class ReplicationFeeder : IDisposable
     public string RedirectEndpoint()
     {
         if (Role == ReplicaRole.Primary) return SelfEndpoint;
+        if (OutrankedByHigherPeer(out var peer) && peer is not null) return peer;   // 069 R1: where the herd belongs
         return _knownPrimaryEndpoint
             ?? HostOf(Options.PrimaryServer)
             ?? SelfEndpoint;
     }
+
+    /// <summary>The options after a connection string's first endpoint (password, TLS), for dialing a peer.</summary>
+    internal static string ConnectionTail(string? server)
+        => server is not null && server.Contains(',') ? server[server.IndexOf(',')..] : "";
 
     internal static string? HostOf(string? connectionString)
     {
@@ -180,6 +205,19 @@ internal sealed class ReplicationFeeder : IDisposable
     /// just the configured primary. Null → only the configured primary is told.
     /// </summary>
     public Func<IReadOnlyList<string>>? RosterPeers { get; set; }
+
+    /// <summary>
+    /// Reads the current roster with priorities (069): the higher-priority peers a standby must check
+    /// before answering willing (R1), and the priority that settles two primaries at one epoch (R2).
+    /// Set by the owning store; null leaves neither check anyone to consult.
+    /// </summary>
+    public Func<IReadOnlyList<RosterMember>>? RosterMembers { get; set; }
+
+    /// <summary>
+    /// Probes one peer (069 R1). The network probe is wired on the real clock for any node with a priority;
+    /// tests inject their own. Null: willingness is the timer alone, as before 069.
+    /// </summary>
+    internal Func<string, CancellationToken, Task<PeerObservation>>? PeerProbe { get; set; }
 
     /// <summary>
     /// Registers this node into the replicated roster (050 T1 / F1). Set by the owning store,
@@ -242,7 +280,77 @@ internal sealed class ReplicationFeeder : IDisposable
                GoodbyeSeen,
                Options.WillingnessThreshold,
                HasSeenMaster,
-               Options.FenceTimeout);
+               Options.FenceTimeout)
+           && !OutrankedByHigherPeer(out _);
+
+    /// <summary>
+    /// True while this standby has lost its master (the unstaggered threshold has passed, or GOODBYE was
+    /// seen): the window in which it probes, and defers to, its higher-priority peers (069 R1).
+    /// </summary>
+    private bool MasterLost()
+    {
+        if (Role != ReplicaRole.Replica || Options.Priority == 0) return false;
+        if (GoodbyeSeen) return true;
+        var window = HasSeenMaster ? Options.WillingnessThreshold : Options.FenceTimeout;
+        return Options.Clock.GetUtcNow() - LastPeerContact >= window;
+    }
+
+    /// <summary>Roster members that would take the herd before this node: priority set, and higher (a lower number).</summary>
+    private List<RosterMember> HigherPeers()
+    {
+        var own = Options.Priority;
+        return (RosterMembers?.Invoke() ?? [])
+            .Where(m => m.Priority > 0 && m.Priority < own
+                        && !string.Equals(m.Endpoint, SelfEndpoint, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    /// <summary>069 R1: a higher-priority peer could take the herd, so this standby must not (see <see cref="HigherPeerWatch"/>).</summary>
+    internal bool OutrankedByHigherPeer(out string? redirect)
+    {
+        redirect = null;
+        if (PeerProbe is null || !MasterLost()) return false;
+        return HigherPeerWatch.Outranked(Options.Clock.GetUtcNow(), HigherPeers(), _peerObservations, SelfEndpoint, out redirect);
+    }
+
+    /// <summary>One probe round over the higher-priority peers (069 R1); forgets every answer while the master is present.</summary>
+    internal async Task ProbeHigherPeersAsync(CancellationToken ct = default)
+    {
+        if (PeerProbe is not { } probe || !MasterLost())
+        {
+            _peerObservations.Clear();
+            return;
+        }
+
+        var peers = HigherPeers();
+        var results = await Task.WhenAll(peers.Select(m => probe(m.Endpoint, ct))).ConfigureAwait(false);
+        for (var i = 0; i < peers.Count; i++)
+        {
+            var endpoint = peers[i].Endpoint;
+            _peerObservations[endpoint] = results[i].After(
+                _peerObservations.TryGetValue(endpoint, out var previous) ? previous : null);
+        }
+    }
+
+    private async Task PeerWatchLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(HigherPeerWatch.Interval, ct).ConfigureAwait(false);
+                await ProbeHigherPeersAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                Logger?.LogDebug(ex, "[replication] higher-peer probe round failed");
+            }
+        }
+    }
 
     /// <summary>True once a WAL gap forced this node into resync-required state (G4).</summary>
     public bool ResyncRequired { get; private set; }
@@ -293,7 +401,46 @@ internal sealed class ReplicationFeeder : IDisposable
             Logger?.LogInformation("[replication] replica {ReplicaId} attached (watermark={Watermark}, epoch={Epoch})",
                 replicaId, lastAppliedSeq, replicaEpoch);
         EnforceCap();
+
+        // 069 R2: an equal-epoch announce from another node means two primaries at one epoch. The
+        // higher-priority one keeps the herd; this one yields if it is outranked.
+        if (callerEndpoint is not null && replicaEpoch == Epoch && Role is ReplicaRole.Primary or ReplicaRole.Fenced)
+            YieldIfOutranked(callerEndpoint);
+
         return (Epoch, MinAckedWatermark());
+    }
+
+    /// <summary>
+    /// 069 R2, the equal-epoch tie-break. Two nodes that promoted at the same epoch each announce
+    /// themselves to the other; the one with the lower priority (a higher number, or priority 0) demotes
+    /// on hearing the other, preserves its tail as a reconciliation report and schedules its rejoin as
+    /// the survivor's replica, the same path a higher-epoch demotion takes. A split that slips past R1
+    /// therefore heals deterministically instead of lasting forever.
+    /// </summary>
+    private void YieldIfOutranked(string peerEndpoint)
+    {
+        var peer = (RosterMembers?.Invoke() ?? [])
+            .FirstOrDefault(m => string.Equals(m.Endpoint, peerEndpoint, StringComparison.OrdinalIgnoreCase));
+        if (peer.Endpoint is null || peer.Priority <= 0) return;
+        if (Options.Priority > 0 && peer.Priority >= Options.Priority) return;
+
+        var rejoinRequested = false;
+        lock (_roleLock)
+        {
+            if (Role is not (ReplicaRole.Primary or ReplicaRole.Fenced)) return;
+            var from = Role;
+            Role = ReplicaRole.Demoted;
+            _slots.Clear();
+            _knownPrimaryEndpoint = peerEndpoint;
+            LastReconciliationPath = WriteReconciliationReport();
+            Note($"demote from={from} epoch={Epoch} reason=equal-epoch-tie-break peer={peer.NodeId} peerPriority={peer.Priority} " +
+                 $"file={LastReconciliationPath}", LogLevel.Warning);
+            ScheduleRejoinIfConfigured(Epoch, ref rejoinRequested);
+        }
+
+        OnDemoted?.Invoke();
+        if (rejoinRequested)
+            RejoinRequested?.Invoke();
     }
 
     public bool Ack(string replicaId, ulong appliedSeq)
@@ -324,7 +471,6 @@ internal sealed class ReplicationFeeder : IDisposable
         if (maxBytes < 1) maxBytes = 1;
 
         var batches = new List<(ulong Seq, byte[] Data)>();
-        ulong pageBytes = 0;
         ulong? nextSeq = null;
         var latestAtStart = Engine.GetLatestSequenceNumber();
 
@@ -338,55 +484,35 @@ internal sealed class ReplicationFeeder : IDisposable
         if (Role == ReplicaRole.Primary && Tail.TryRead(fromSeq, maxBytes, batches, out var more))
             return new ReplicationPage(Epoch, batches, more);
 
-        foreach (var pooled in _source.GetPooledWalUpdates(fromSeq))
+        // 066: behind the tail, read the WAL through a held tailer. GetUpdatesSince re-read the live WAL
+        // file from its start on every page; a tailer continues where the previous page stopped, so a
+        // catch-up costs one such read in total instead of one per page. A chunk is one write batch of
+        // whole WAL records starting at the record that contains fromSeq + 1.
+        if (_walTailers.Read(fromSeq, maxBytes) is { } chunk && chunk.Next > fromSeq + 1)
         {
-            try
+            // The first sequence served must follow the cursor. On a WAL trimmed past it the tailer starts
+            // at what still exists: detected here, refused loudly (G4).
+            if (chunk.First > fromSeq + 1)
+                throw new ReplicationGapException(fromSeq, chunk.First);
+
+            // 058 R2 / 062: the chunk starts at the record that CONTAINS the cursor, so its head is either
+            // already applied (the cursor sits on a record boundary) or the cursor is inside a record that
+            // group commit merged while the tail served it piecemeal. Serve only what follows the cursor —
+            // or, if the record cannot be split with certainty, refuse like a gap: the replica re-syncs
+            // from a snapshot rather than diverge.
+            if (chunk.First <= fromSeq)
             {
-                // 058 R2: GetUpdatesSince starts at the batch that CONTAINS fromSeq, so the first
-                // batch is always one the replica already has. Skip any batch whose last sequence
-                // is at or below the watermark — otherwise a caught-up replica is served its own
-                // last batch on every pull and busy-loops (058 bug 1). The pooled buffer is still
-                // returned by the finally below.
-                var lastSeq = pooled.SequenceNumber + WriteBatchCount(pooled.PooledData, pooled.Length) - 1;
-                if (lastSeq <= fromSeq)
-                    continue;
-
-                // The first batch KEPT must actually follow the cursor. GetUpdatesSince on a
-                // trimmed WAL starts at what still exists — detected here, refused loudly.
-                if (batches.Count == 0 && pooled.SequenceNumber > fromSeq + 1)
-                    throw new ReplicationGapException(fromSeq, pooled.SequenceNumber);
-
-                var length = pooled.Length;
-                if (batches.Count > 0 && pageBytes + (ulong)length > (ulong)maxBytes)
-                {
-                    nextSeq = pooled.SequenceNumber;
-                    break;
-                }
-
-                // 062: the cursor is inside this record. Group commit merges concurrent committers into
-                // one WAL record while the tail served them one by one, so a replica fed from the tail
-                // can stand mid-record; served whole, the record would be skipped by the replica
-                // (first sequence <= its watermark) and its tail lost. Serve only what follows the
-                // cursor — or, if the record cannot be split with certainty, refuse like a gap: the
-                // replica re-syncs from a snapshot rather than diverge.
-                if (batches.Count == 0 && pooled.SequenceNumber <= fromSeq)
-                {
-                    if (!WriteBatchTrim.TryStartAt(pooled.PooledData.AsSpan(0, length), fromSeq + 1, out var rest))
-                        throw new ReplicationGapException(fromSeq, lastSeq + 1);
-                    batches.Add((fromSeq + 1, rest));
-                    pageBytes += (ulong)rest.Length;
-                    continue;
-                }
-
-                var owned = pooled.PooledData.AsSpan(0, length).ToArray();
-                batches.Add((pooled.SequenceNumber, owned));
-                pageBytes += (ulong)length;
+                if (!WriteBatchTrim.TryStartAt(chunk.Data, fromSeq + 1, out var rest))
+                    throw new ReplicationGapException(fromSeq, chunk.Next);
+                batches.Add((fromSeq + 1, rest));
             }
-            finally
+            else
             {
-                if (pooled.PooledData is not null)
-                    ArrayPool<byte>.Shared.Return(pooled.PooledData);
+                batches.Add((chunk.First, chunk.Data));
             }
+
+            if (chunk.Next <= latestAtStart)
+                nextSeq = chunk.Next;
         }
 
         // The other gap shape: GetUpdatesSince reads the LIVE WAL only, so after this
@@ -398,19 +524,6 @@ internal sealed class ReplicationFeeder : IDisposable
             throw new ReplicationGapException(fromSeq, latestAtStart + 1);
 
         return new ReplicationPage(Epoch, batches, nextSeq);
-    }
-
-    /// <summary>
-    /// The number of entries in a RocksDB <c>WriteBatch</c>, read from its 12-byte header
-    /// (<c>[8B LE sequence][4B LE count]</c>, the format <see cref="WalTailSummary"/> decodes). A
-    /// batch's sequence range is <c>[SequenceNumber, SequenceNumber + Count - 1]</c>. A short or
-    /// absent buffer counts as 1, so a malformed batch is never skipped in error (058 R2).
-    /// </summary>
-    private static uint WriteBatchCount(byte[]? data, int length)
-    {
-        if (data is null || length < 12) return 1;
-        var count = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(8, 4));
-        return count == 0 ? 1u : count;
     }
 
     public SnapshotBeginResult BeginSnapshot()
@@ -560,27 +673,37 @@ internal sealed class ReplicationFeeder : IDisposable
     private void AnnouncePromotionAsync(IReadOnlyCollection<string> endpoints, ulong epoch)
         => _ = Task.Run(async () =>
         {
-            var server = Options.PrimaryServer;   // carries the password/TLS tail, if any
-            var tail = server is not null && server.Contains(',') ? server[server.IndexOf(',')..] : "";
+            var tail = ConnectionTail(Options.PrimaryServer);   // the password/TLS tail, if any
 
-            var live = new HashSet<string>(endpoints, StringComparer.OrdinalIgnoreCase);
+            // Every peer is told at once, each with a short timeout (069): a dead old primary must not
+            // delay the announce to a live standby — that announce is what settles an equal-epoch pair.
+            async Task<bool> TellAsync(string endpoint)
+            {
+                try
+                {
+                    var config = ConfigurationOptions.Parse(endpoint + tail);
+                    config.ConnectTimeout = 1_000;
+                    config.AsyncTimeout = 2_000;
+                    config.ConnectRetry = 1;
+                    config.AbortOnConnectFail = true;
+                    using var mux = await ConnectionMultiplexer.ConnectAsync(config).ConfigureAwait(false);
+                    await mux.GetDatabase().ExecuteAsync("HW.REPL.HELLO",
+                        Options.ReplicaId, "0", epoch.ToString(CultureInfo.InvariantCulture), SelfEndpoint,
+                        "FORMAT", HighwayServerBuilder.StorageFormatVersion.ToString(CultureInfo.InvariantCulture))
+                        .ConfigureAwait(false);
+                    return true;
+                }
+                catch
+                {
+                    return false;   // unreachable (dead, or mid-partition): retried next pass
+                }
+            }
+
+            var live = endpoints.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             for (var attempt = 0; attempt < 5 && live.Count > 0; attempt++)
             {
-                foreach (var endpoint in live.ToArray())
-                {
-                    try
-                    {
-                        using var mux = await ConnectionMultiplexer.ConnectAsync(endpoint + tail).ConfigureAwait(false);
-                        await mux.GetDatabase().ExecuteAsync("HW.REPL.HELLO",
-                            Options.ReplicaId, "0", epoch.ToString(CultureInfo.InvariantCulture), SelfEndpoint)
-                            .ConfigureAwait(false);
-                        live.Remove(endpoint);   // told successfully
-                    }
-                    catch
-                    {
-                        // Unreachable (dead, or mid-partition) — retried next pass.
-                    }
-                }
+                var told = await Task.WhenAll(live.Select(TellAsync)).ConfigureAwait(false);
+                live = live.Where((_, i) => !told[i]).ToList();
                 if (live.Count > 0)
                     await Task.Delay(1_000).ConfigureAwait(false);
             }
@@ -893,7 +1016,7 @@ internal sealed class ReplicationFeeder : IDisposable
         if (latest > acked)
         {
             sb.AppendLine($"unreplicated tail ({acked + 1}..{latest}), by entity:");
-            foreach (var line in WalTailSummary.Describe(_source, acked))
+            foreach (var line in WalTailSummary.Describe(_source, acked, BoxName))
                 sb.AppendLine("  " + line);
         }
         else
@@ -938,8 +1061,28 @@ internal sealed class ReplicationFeeder : IDisposable
         }
     }
 
+    /// <summary>A work box's "kind name" from the local catalog, for the reconciliation report (065), or null.</summary>
+    private string? BoxName(uint box)
+    {
+        try
+        {
+            var raw = Engine.Get(Boxes.BoxKeys.MetaKey(box), Engine.GetColumnFamily(Layout.HighwayColumnFamilies.OrderedNames[Layout.HighwayColumnFamilies.Data]));
+            if (raw is null) return null;
+            using var doc = System.Text.Json.JsonDocument.Parse(raw);
+            var name = doc.RootElement.GetProperty("name").GetString();
+            var kind = doc.RootElement.GetProperty("kind").GetInt32() == (int)Boxes.BoxKeys.Kind.Service ? "service" : "queue";
+            return $"{kind} {name}";
+        }
+        catch (Exception)
+        {
+            return null;   // the report still names the box by id
+        }
+    }
+
     public void Dispose()
     {
+        _peerWatchCts.Cancel();
+        _walTailers.Dispose();
         _deadman?.Dispose();
         _drainTimer?.Dispose();
         foreach (var s in _snapshots.Values)

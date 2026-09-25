@@ -33,7 +33,7 @@ public class BackstopSweeperTests
 
         await RunForAsync(sweeper, 150);
 
-        await _connection.DidNotReceive().GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _connection.DidNotReceive().TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public class BackstopSweeperTests
     [Fact]
     public async Task Sweep_AgedPendingCall_ReadsTheReplySlot()
     {
-        _connection.GetReplySlotAsync("aged", Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync("aged", Arg.Any<CancellationToken>()).Returns((byte[]?)null);
         var registry = new PendingCallRegistry(_connection);
         _ = registry.Register("aged", typeof(TestResponse), TimeSpan.FromSeconds(30), CancellationToken.None);
 
@@ -65,14 +65,14 @@ public class BackstopSweeperTests
             registry, TimeSpan.FromMilliseconds(20), [], NullLogger<BackstopSweeper>.Instance);
         await RunForAsync(sweeper, 200);
 
-        await _connection.Received().GetReplySlotAsync("aged", Arg.Any<CancellationToken>());
+        await _connection.Received().TakeReplyAsync("aged", Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task Sweep_WhenAnIterationThrows_KeepsSweeping()
     {
         var calls = 0;
-        _connection.GetReplySlotAsync("boom", Arg.Any<CancellationToken>())
+        _connection.TakeReplyAsync("boom", Arg.Any<CancellationToken>())
             .Returns<byte[]?>(_ =>
             {
                 calls++;

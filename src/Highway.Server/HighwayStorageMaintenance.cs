@@ -29,10 +29,36 @@ public static class HighwayStorageMaintenance
 
         var before = DirectorySize(dataDir);
         var stopwatch = Stopwatch.StartNew();
-        using (var store = RocksDbStore.Open(dataDir))
+        using (var store = RocksDbStore.Open(dataDir, allowLegacyLayout: true))
             store.CompactAll();
         stopwatch.Stop();
         return new CompactionResult(before, DirectorySize(dataDir), stopwatch.Elapsed);
+    }
+
+    /// <summary>
+    /// <c>highways --wipe-data</c> (065 T6): empties a data directory for a fresh 3.0 start, keeping only
+    /// the node-local replication files (the persisted epoch, the bootstrap log, a rejoin marker) — the
+    /// node's identity in its replica set survives, its data does not. Refuses while a broker holds the
+    /// directory (RocksDB's LOCK). Returns how many entries were removed.
+    /// </summary>
+    public static int WipeData(string dataDir)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dataDir);
+        if (!Directory.Exists(dataDir)) return 0;
+
+        // A running broker holds the LOCK; opening proves it is free (and fails loudly if not).
+        if (File.Exists(Path.Combine(dataDir, "CURRENT")))
+            using (RocksDbStore.Open(dataDir, allowLegacyLayout: true)) { }
+
+        var removed = 0;
+        foreach (var entry in Directory.EnumerateFileSystemEntries(dataDir))
+        {
+            if (RocksDbStore.IsNodeLocalFile(Path.GetFileName(entry))) continue;
+            if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+            else File.Delete(entry);
+            removed++;
+        }
+        return removed;
     }
 
     private static long DirectorySize(string path)

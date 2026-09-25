@@ -29,15 +29,14 @@ public class ServerIsolationTests
         db1.Execute("HW.CALL", "isolation.test", "req-iso-1", "payload-from-server1");
 
         // Server 2 should not see it
-        var result = db2.Execute("HW.DEQUEUE", "isolation.test", "node-1");
-        result.IsNull.Should().BeTrue("server2 should not see data written to server1");
+        var result = db2.ClaimSvc("isolation.test", "node-1");
+        result.Should().BeNull("server2 should not see data written to server1");
 
         // Server 1 should see it
-        var result1 = db1.Execute("HW.DEQUEUE", "isolation.test", "node-1");
-        result1.IsNull.Should().BeFalse("server1 should see its own data");
+        var result1 = db1.ClaimSvc("isolation.test", "node-1");
+        result1.Should().NotBeNull("server1 should see its own data");
 
-        var arr = (RedisResult[])result1!;
-        ((string)arr[0]!).Should().Be("req-iso-1");
-        ((string)arr[1]!).Should().Be("payload-from-server1");
+        result1!.Value.Id.Should().Be("req-iso-1");
+        result1.Value.PayloadText.Should().Be("payload-from-server1");
     }
 }

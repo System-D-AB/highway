@@ -60,23 +60,16 @@ internal static class StoreInspection
     }
 
     /// <summary>Every distinct queue name that exists as a live queue list (<c>q:{queue}:q</c>).</summary>
+    /// <summary>
+    /// Every queue and group queue, from the catalog (065). Before 3.0 this dumped the entire keyspace to
+    /// recover queue names from list keys — on every dashboard refresh and every metrics collection.
+    /// </summary>
     public static IReadOnlyList<string> QueueNames(IHighwayStore store)
     {
-        var names = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var (key, _) in Dump(store))
-        {
-            var decoded = DecodeName(key, TagList);
-            // The list family also holds proc/dlq lists; only the live queue matches "q:{q}:q".
-            if (decoded is { } n && n.StartsWith("q:", StringComparison.Ordinal) && n.EndsWith(":q", StringComparison.Ordinal))
-            {
-                var queue = n["q:".Length..^":q".Length];
-                if (queue.Length > 0) names.Add(queue);
-            }
-        }
-        return [.. names];
+        using var batch = store.NewBatch();
+        return [.. Storage.Boxes.Catalog.List(store, batch, Storage.Boxes.BoxKeys.Kind.Queue).Select(x => x.Name)];
     }
 
-    /// <summary>Reads a registration record by node id, or null when absent.</summary>
     public static byte[]? RegistrationRecord(IHighwayStore store, IStoreSnapshot snap, string nodeId)
         => store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationNode(nodeId)));
 
@@ -91,7 +84,4 @@ internal static class StoreInspection
                     .Select(m => Encoding.UTF8.GetString(m))];
 
     /// <summary>Queues that have at least one recurring schedule, from the <c>job:index</c> set (028).</summary>
-    public static IReadOnlyList<string> NamesWithJobSchedules(IHighwayStore store, IStoreSnapshot snap)
-        => [.. store.SetMembers(snap, HighwayKeyspace.SetPrefix(HighwayNames.JobIndex))
-                    .Select(m => Encoding.UTF8.GetString(m))];
 }

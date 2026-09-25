@@ -65,14 +65,17 @@ public class RpcWorkerLoopTests : IDisposable
         await run;
     }
 
+    /// <summary>A claimed request as HW.CLAIM returns it; the token is derived from the id for readable assertions.</summary>
+    private static ClaimedWork W(string id, byte[] payload) => new("t-" + id, id, payload);
+
     [Fact]
     public async Task Drain_DequeuesUntilNil()
     {
-        _connection.DequeueAsync("test.hello", "test-node", Arg.Any<CancellationToken>())
+        _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
             .Returns(
-                ("r1", RequestEnvelope("a")),
-                ("r2", RequestEnvelope("b")),
-                ((string, byte[])?)null);
+                W("r1", RequestEnvelope("a")),
+                W("r2", RequestEnvelope("b")),
+                (ClaimedWork?)null);
 
         var wake = new LoopWake();
         await RunOnePassAsync(CreateLoop(wake), wake);
@@ -89,12 +92,12 @@ public class RpcWorkerLoopTests : IDisposable
     public async Task Process_SendsReplyBeforeAck()
     {
         var order = new List<string>();
-        _connection.DequeueAsync("test.hello", "test-node", Arg.Any<CancellationToken>())
-            .Returns(("r1", RequestEnvelope("a")), ((string, byte[])?)null);
+        _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
+            .Returns(W("r1", RequestEnvelope("a")), (ClaimedWork?)null);
         _connection.ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Returns(_ => { lock (order) order.Add("REPLY"); return Task.CompletedTask; });
-        _connection.AckAsync("test.hello", "test-node", "r1", Arg.Any<CancellationToken>())
-            .Returns(_ => { lock (order) order.Add("ACK"); return Task.CompletedTask; });
+        _connection.AckAsync("t-r1", Arg.Any<CancellationToken>())
+            .Returns(_ => { lock (order) order.Add("ACK"); return Task.FromResult(true); });
 
         var wake = new LoopWake();
         await RunOnePassAsync(CreateLoop(wake), wake);
@@ -106,8 +109,8 @@ public class RpcWorkerLoopTests : IDisposable
     public async Task Process_PoisonEnvelope_Replies400AndAcks()
     {
         byte[]? replyBytes = null;
-        _connection.DequeueAsync("test.hello", "test-node", Arg.Any<CancellationToken>())
-            .Returns(("bad", "not-json"u8.ToArray()), ((string, byte[])?)null);
+        _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
+            .Returns(W("bad", "not-json"u8.ToArray()), (ClaimedWork?)null);
         _connection.ReplyAsync("bad", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Returns(ci => { replyBytes = ci.Arg<byte[]>(); return Task.CompletedTask; });
 
@@ -120,34 +123,33 @@ public class RpcWorkerLoopTests : IDisposable
         output.StatusCode.Should().Be(StatusCodes.Status400BadRequest);
         output.Error!.Code.Should().Be("BAD_ENVELOPE");
 
-        await _connection.Received(1).AckAsync("test.hello", "test-node", "bad", Arg.Any<CancellationToken>());
+        await _connection.Received(1).AckAsync("t-bad", Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task Process_ReplyFails_DoesNotAck()
     {
-        _connection.DequeueAsync("test.hello", "test-node", Arg.Any<CancellationToken>())
-            .Returns(("r1", RequestEnvelope("a")), ((string, byte[])?)null);
+        _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
+            .Returns(W("r1", RequestEnvelope("a")), (ClaimedWork?)null);
         _connection.ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Returns<Task>(_ => throw new HighwayTransportException("permanent"));
 
         var wake = new LoopWake();
         await RunOnePassAsync(CreateLoop(wake), wake);
 
-        await _connection.DidNotReceive().AckAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _connection.DidNotReceive().AckAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task Drain_TransientAbort_DoesNotKillTheLoop()
     {
         var calls = 0;
-        _connection.DequeueAsync("test.hello", "test-node", Arg.Any<CancellationToken>())
+        _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
             .Returns(_ =>
             {
                 calls++;
                 if (calls == 1) throw new HighwayTransientException(HighwayConnection.TransientAbortMessage);
-                return Task.FromResult<(string, byte[])?>(null);
+                return Task.FromResult<ClaimedWork?>(null);
             });
 
         var wake = new LoopWake();
@@ -165,8 +167,8 @@ public class RpcWorkerLoopTests : IDisposable
     [Fact]
     public async Task Drain_PermanentError_EndsPassWithoutDying()
     {
-        _connection.DequeueAsync("test.hello", "test-node", Arg.Any<CancellationToken>())
-            .Returns<Task<(string, byte[])?>>(_ => throw new HighwayTransportException("permanent"));
+        _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
+            .Returns<Task<ClaimedWork?>>(_ => throw new HighwayTransportException("permanent"));
 
         var wake = new LoopWake();
         var loop = CreateLoop(wake);
@@ -199,10 +201,10 @@ public class RpcWorkerLoopTests : IDisposable
         using var provider = services.BuildServiceProvider();
         var executor = new ServiceExecutor(catalog, provider.GetRequiredService<IServiceScopeFactory>());
 
-        _connection.DequeueAsync("test.throws", "test-node", Arg.Any<CancellationToken>())
+        _connection.ClaimAsync(WorkKind.Service, "test.throws", "test-node", Arg.Any<CancellationToken>())
             .Returns(
-                ("r1", HighwayJson.EncodeEnvelope("caller", new ThrowingRequest { Message = "boom" })),
-                ((string, byte[])?)null);
+                W("r1", HighwayJson.EncodeEnvelope("caller", new ThrowingRequest { Message = "boom" })),
+                (ClaimedWork?)null);
 
         var wake = new LoopWake();
         var loop = new RpcWorkerLoop(throwing, _connection, executor, "test-node", 4, wake, NullLogger.Instance);
@@ -214,6 +216,6 @@ public class RpcWorkerLoopTests : IDisposable
         await run;
 
         await _connection.Received(1).ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
-        await _connection.Received(1).AckAsync("test.throws", "test-node", "r1", Arg.Any<CancellationToken>());
+        await _connection.Received(1).AckAsync("t-r1", Arg.Any<CancellationToken>());
     }
 }

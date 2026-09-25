@@ -45,15 +45,15 @@ public class ByteBudgetTests : IDisposable
 
         Counter("bb.count").Should().Be(0, "an untouched queue has no counter key at all");
 
-        db.Execute("HW.QSEND", "bb.count", "m-1", Payload());
+        db.Send("bb.count", "m-1", Payload());
         var afterOne = Counter("bb.count");
         afterOne.Should().BeGreaterThan(0);
 
-        db.Execute("HW.QSEND", "bb.count", "m-2", Payload());
+        db.Send("bb.count", "m-2", Payload());
         Counter("bb.count").Should().BeGreaterThan(afterOne, "a second message adds to it");
 
         // A claim moves the message out of the live queue, so the bytes go with it.
-        db.Execute("HW.QCLAIM", "bb.count", "node-a");
+        db.ClaimQ("bb.count", "node-a");
         Counter("bb.count").Should().Be(afterOne,
             "a claimed message has left the live queue - the budget governs what is waiting");
     }
@@ -71,12 +71,12 @@ public class ByteBudgetTests : IDisposable
 
         // A mixed workload: sends, claims, acks, and an abandoned claim that the sweep requeues.
         for (var i = 0; i < 6; i++)
-            db.Execute("HW.QSEND", q, $"m-{i}", Payload(512));
+            db.Send(q, $"m-{i}", Payload(512));
 
-        db.Execute("HW.QCLAIM", q, "node-a");
-        db.Execute("HW.QCLAIM", q, "node-a");
-        db.Execute("HW.QACK", q, "node-a", "m-0");
-        db.Execute("HW.QSEND", q, "m-late", Payload(512));
+        var first = db.ClaimQ(q, "node-a")!.Value;
+        db.ClaimQ(q, "node-a");
+        db.Ack(first.Token);
+        db.Send(q, "m-late", Payload(512));
 
         // Recompute the truth from the structure itself and compare.
         var entries = _server.Inspect.ListEntries($"hw:q:{q}:q");
@@ -100,7 +100,7 @@ public class ByteBudgetTests : IDisposable
 
         for (var i = 0; i < 50; i++)
         {
-            try { db.Execute("HW.QSEND", q, $"m-{i}", Payload()); accepted++; }
+            try { db.Send(q, $"m-{i}", Payload()); accepted++; }
             catch (RedisServerException ex) { refusal = ex; break; }
         }
 
@@ -124,7 +124,7 @@ public class ByteBudgetTests : IDisposable
         RedisServerException? refusal = null;
         for (var i = 0; i < 50 && refusal is null; i++)
         {
-            try { db.Execute("HW.QSEND", q, $"m-{i}", Payload()); }
+            try { db.Send(q, $"m-{i}", Payload()); }
             catch (RedisServerException ex) { refusal = ex; }
         }
 
@@ -143,15 +143,15 @@ public class ByteBudgetTests : IDisposable
         var accepted = 0;
         for (var i = 0; i < 50; i++)
         {
-            try { db.Execute("HW.QSEND", q, $"m-{i}", Payload()); accepted++; }
+            try { db.Send(q, $"m-{i}", Payload()); accepted++; }
             catch (RedisServerException) { break; }
         }
 
         for (var i = 0; i < accepted; i++)
-            db.Execute("HW.QCLAIM", q, "node-a");
+            db.ClaimQ(q, "node-a");
 
         // A limit that never recovers is a broken queue, not a bounded one.
-        var act = () => db.Execute("HW.QSEND", q, "after-drain", Payload());
+        var act = () => db.Send(q, "after-drain", Payload());
         act.Should().NotThrow("claiming the backlog frees the budget it was using");
     }
 
@@ -171,7 +171,7 @@ public class ByteBudgetTests : IDisposable
         // Fill billing by publishing while it is the ONLY subscriber. A group queue cannot be
         // filled directly — 018 reserves '@' in queue names precisely so a queue cannot
         // impersonate a group — so the legitimate path is the only path, which is the point.
-        db.Execute("HW.SUBSCRIBE", channel, "billing");
+        db.Subscribe(channel, "billing");
 
         for (var i = 0; i < 50; i++)
         {
@@ -180,7 +180,7 @@ public class ByteBudgetTests : IDisposable
         }
 
         // shipping joins afterwards, so its queue starts empty and healthy.
-        db.Execute("HW.SUBSCRIBE", channel, "shipping");
+        db.Subscribe(channel, "shipping");
         var shippingBefore = _server.Inspect.ListLength($"hw:q:{channel}@shipping:q");
         shippingBefore.Should().Be(0, "a group registered after the fact starts empty (C2.4)");
 
@@ -201,8 +201,8 @@ public class ByteBudgetTests : IDisposable
         var db = Db();
         const string channel = "bb.ok";
 
-        db.Execute("HW.SUBSCRIBE", channel, "billing");
-        db.Execute("HW.SUBSCRIBE", channel, "shipping");
+        db.Subscribe(channel, "billing");
+        db.Subscribe(channel, "shipping");
 
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
@@ -223,7 +223,7 @@ public class ByteBudgetTests : IDisposable
         var refused = 0;
         for (var i = 0; i < 50; i++)
         {
-            try { db.Execute("HW.QSEND", q, $"m-{i}", Payload()); }
+            try { db.Send(q, $"m-{i}", Payload()); }
             catch (RedisServerException) { refused++; }
         }
 
@@ -251,7 +251,7 @@ public class ByteBudgetTests : IDisposable
         var db = Db();
         const string channel = "bb.norecord";
 
-        db.Execute("HW.SUBSCRIBE", channel, "grp");
+        db.Subscribe(channel, "grp");
         for (var i = 0; i < 50; i++)
         {
             try { db.Execute("HW.PUBLISH", channel, Payload()); }
@@ -279,7 +279,7 @@ public class ByteBudgetTests : IDisposable
         var db = ConnectionMultiplexer.Connect(unlimited.ConnectionString).GetDatabase();
 
         for (var i = 0; i < 40; i++)
-            db.Execute("HW.QSEND", "bb.unlimited", $"m-{i}", Payload());
+            db.Send("bb.unlimited", $"m-{i}", Payload());
 
         (unlimited.Inspect.ListLength("hw:q:bb.unlimited:q")).Should().Be(40,
             "zero is documented as 'no limit', and an operator who sets it means it");

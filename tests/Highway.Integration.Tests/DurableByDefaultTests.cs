@@ -61,13 +61,13 @@ public class DurableByDefaultTests : IDisposable
         var db = Connect();
 
         // Queue: work nobody has claimed.
-        db.Execute("HW.QSEND", "dur.queue", "msg-1", Envelope("""{"Amount":42}"""));
+        db.Send("dur.queue", "msg-1", Envelope("""{"Amount":42}"""));
 
         // Pub/Sub: a group registered but offline, so the message is sitting in its queue.
-        db.Execute("HW.SUBSCRIBE", "dur.channel", "billing");
+        db.Subscribe("dur.channel", "billing");
         db.Execute("HW.PUBLISH", "dur.channel", Envelope("""{"Order":"ORD-1"}"""));
 
-        // RPC: a request nobody has dequeued.
+        // RPC: a request nobody has claimed.
         db.Execute("HW.CALL", "dur.svc", "req-1", Envelope());
 
         // The process goes away; only the RocksDB directory remains, and Restart() recovers it.
@@ -92,15 +92,15 @@ public class DurableByDefaultTests : IDisposable
     {
         const string body = """{"Amount":42,"Currency":"SEK"}""";
 
-        Connect().Execute("HW.QSEND", "dur.payload", "msg-1", Envelope(body));
+        Connect().Send("dur.payload", "msg-1", Envelope(body));
 
         _server.Restart();
 
-        var claimed = (RedisResult[])Connect().Execute("HW.QCLAIM", "dur.payload", "node-a")!;
+        var claimed = Connect().ClaimQ("dur.payload", "node-a");
 
         claimed.Should().NotBeNull();
-        ((string)claimed[0]!).Should().Be("msg-1");
-        Encoding.UTF8.GetString((byte[])claimed[1]!).Should().Contain(body,
+        claimed!.Value.Id.Should().Be("msg-1");
+        Encoding.UTF8.GetString((byte[])claimed.Value.Payload!).Should().Contain(body,
             "the recovered entry must decode to the bytes that were stored");
     }
 }

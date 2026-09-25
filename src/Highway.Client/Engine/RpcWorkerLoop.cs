@@ -39,14 +39,12 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
     protected override string FailureDisposition
         => "it was not acknowledged, so lease recovery will redeliver it";
 
-    protected override async Task<(string Id, byte[] Payload)?> ClaimAsync(CancellationToken stopToken)
-    {
-        var item = await Connection.DequeueAsync(_descriptor.Name, NodeName, stopToken).ConfigureAwait(false);
-        return item is null ? null : (item.Value.RequestId, item.Value.Payload);
-    }
+    protected override Task<ClaimedWork?> ClaimAsync(CancellationToken stopToken)
+        => Connection.ClaimAsync(WorkKind.Service, _descriptor.Name, NodeName, stopToken);
 
-    protected override async Task ProcessAsync(string requestId, byte[] payload, CancellationToken ct)
+    protected override async Task ProcessAsync(ClaimedWork work, CancellationToken ct)
     {
+        var (token, requestId, payload) = work;
         object? request = null;
         Output result;
 
@@ -68,7 +66,7 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
                     Message = "The request envelope could not be parsed.",
                 },
             };
-            await ReplyThenAckAsync(requestId, result, ct).ConfigureAwait(false);
+            await ReplyThenAckAsync(requestId, token, result, ct).ConfigureAwait(false);
             return;
         }
 
@@ -79,7 +77,7 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
                 StatusCode = StatusCodes.Status400BadRequest,
                 Error = new ErrorDetail { Code = "BAD_ENVELOPE", Message = "The request body deserialized to null." },
             };
-            await ReplyThenAckAsync(requestId, result, ct).ConfigureAwait(false);
+            await ReplyThenAckAsync(requestId, token, result, ct).ConfigureAwait(false);
             return;
         }
 
@@ -99,7 +97,7 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
                     Logger.LogDebug(
                         "Suppressed a duplicate delivery of '{RequestId}' on '{Service}'; replying with the original response",
                         requestId, _descriptor.Name);
-                    await ReplyRawThenAckAsync(requestId, claim.Response!, ct).ConfigureAwait(false);
+                    await ReplyRawThenAckAsync(requestId, token, claim.Response!, ct).ConfigureAwait(false);
                     return;
 
                 case IdempotencyOutcome.InProgress:
@@ -163,19 +161,19 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
                 .ConfigureAwait(false);
         }
 
-        await ReplyRawThenAckAsync(requestId, envelopeBytes, ct).ConfigureAwait(false);
+        await ReplyRawThenAckAsync(requestId, token, envelopeBytes, ct).ConfigureAwait(false);
     }
 
     /// <summary>Sends the reply envelope, THEN acks — a crash between the two still delivers the response.</summary>
-    private Task ReplyThenAckAsync(string requestId, Output result, CancellationToken ct)
-        => ReplyRawThenAckAsync(requestId, HighwayJson.EncodeEnvelope(NodeName, result), ct);
+    private Task ReplyThenAckAsync(string requestId, string token, Output result, CancellationToken ct)
+        => ReplyRawThenAckAsync(requestId, token, HighwayJson.EncodeEnvelope(NodeName, result), ct);
 
     /// <summary>
     /// As <see cref="ReplyThenAckAsync"/>, but for an envelope that already exists — the
     /// cached response of a suppressed duplicate, which must be returned byte-for-byte
     /// rather than re-encoded.
     /// </summary>
-    private async Task ReplyRawThenAckAsync(string requestId, byte[] responseEnvelope, CancellationToken ct)
+    private async Task ReplyRawThenAckAsync(string requestId, string token, byte[] responseEnvelope, CancellationToken ct)
     {
         try
         {
@@ -190,7 +188,7 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
 
         try
         {
-            await Connection.AckAsync(_descriptor.Name, NodeName, requestId, ct).ConfigureAwait(false);
+            await Connection.AckAsync(token, ct).ConfigureAwait(false);
         }
         catch (HighwayTransportException ex)
         {

@@ -10,9 +10,13 @@ namespace Highway.Integration.Tests;
 /// Requirement 3 (identifier validation / delimiter safety).
 ///
 /// Classification rule a client implements:
-///   message starts with "ERR HW_"  → permanent failure
-///   bare "ERR Transaction failed." → transient (watch conflict) — retry
-///   anything else                  → permanent
+///   message starts with "ERR HW_"    → permanent failure
+///   message starts with "NOTPRIMARY" → failover — retry against the new primary
+///   anything else                    → permanent
+/// (Protocol 5.0 dropped the Garnet-era transient "ERR Transaction failed." — nothing emits it.)
+///
+/// Group names reach the broker inside <c>HW.SESSION</c>'s JSON (was <c>HW.SUBSCRIBE channel group</c>),
+/// so the group-position cases validate the subscription a session declares.
 /// </summary>
 public class ErrorContractTests : IDisposable
 {
@@ -54,13 +58,15 @@ public class ErrorContractTests : IDisposable
     [InlineData("HW.CALL", "", "req-1", "payload")]
     [InlineData("HW.CALL", "svc", "", "payload")]
     [InlineData("HW.REPLY", "", "payload", null)]
-    [InlineData("HW.DEQUEUE", "", "node-1", null)]
-    [InlineData("HW.DEQUEUE", "svc", "", null)]
-    [InlineData("HW.ACK", "", "node-1", "req-1")]
-    [InlineData("HW.ACK", "svc", "", "req-1")]
-    [InlineData("HW.ACK", "svc", "node-1", "")]
-    [InlineData("HW.SUBSCRIBE", "", "grp", null)]
-    [InlineData("HW.SUBSCRIBE", "ch", "", null)]
+    [InlineData("HW.SEND", "", "msg-1", "payload")]
+    [InlineData("HW.SEND", "q", "", "payload")]
+    [InlineData("HW.CLAIM", "SVC", "", "node-1")]
+    [InlineData("HW.CLAIM", "SVC", "svc", "")]
+    [InlineData("HW.CLAIM", "Q", "", "node-1")]
+    [InlineData("HW.CLAIM", "Q", "q", "")]
+    [InlineData("HW.SESSION", "", """{"subscriptions":[]}""", null)]
+    [InlineData("HW.SESSION", "node-1", """{"subscriptions":[{"channel":"","group":"grp"}]}""", null)]
+    [InlineData("HW.SESSION", "node-1", """{"subscriptions":[{"channel":"ch","group":""}]}""", null)]
     [InlineData("HW.UNSUBSCRIBE", "", "grp", null)]
     [InlineData("HW.UNSUBSCRIBE", "ch", "", null)]
     [InlineData("HW.PUBLISH", "", "payload", null)]
@@ -76,6 +82,45 @@ public class ErrorContractTests : IDisposable
     }
 
     // -------------------------------------------------------------------------
+    // HW_INVALID_TOKEN — a settle whose token does not parse (5.0). A token that
+    // parses but is not held is :0, not an error.
+    // -------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("HW.ACK", "")]
+    [InlineData("HW.ACK", "not-a-token")]
+    [InlineData("HW.ACK", "12")]
+    [InlineData("HW.TOUCH", "")]
+    [InlineData("HW.TOUCH", "x.1")]
+    [InlineData("HW.FAIL", "")]
+    [InlineData("HW.FAIL", "1.x")]
+    public void MalformedToken_EverySettleCommand_HwInvalidToken(string command, string token)
+    {
+        var message = ErrorOf(() =>
+        {
+            if (command == "HW.FAIL") _db.Execute(command, token, "SomeException", "d");
+            else _db.Execute(command, token);
+        });
+
+        message.Should().StartWith("ERR HW_INVALID_TOKEN");
+    }
+
+    [Theory]
+    [InlineData("HW.ACK")]
+    [InlineData("HW.TOUCH")]
+    [InlineData("HW.FAIL")]
+    public void WellFormedTokenNotHeld_AnswersZero_NotAnError(string command)
+    {
+        // Parses, but no claim ever carried it: a late settle is a race the client cannot avoid.
+        const string token = "999999.1";
+        var reply = command == "HW.FAIL"
+            ? _db.Execute(command, token, "SomeException", "d")
+            : _db.Execute(command, token);
+
+        ((long)reply).Should().Be(0);
+    }
+
+    // -------------------------------------------------------------------------
     // HW_INVALID_ARG — control characters (Requirement 3 AC5: at least group
     // and node positions, all four characters)
     // -------------------------------------------------------------------------
@@ -87,7 +132,7 @@ public class ErrorContractTests : IDisposable
     [InlineData("\u007f")]
     public void ControlChar_InGroupPosition_HwInvalidArg(string bad)
     {
-        var message = ErrorOf(() => _db.Execute("HW.SUBSCRIBE", "ch", $"a{bad}b"));
+        var message = ErrorOf(() => _db.Subscribe("ch", $"a{bad}b", "node-1"));
         message.Should().StartWith("ERR HW_INVALID_ARG");
     }
 
@@ -98,7 +143,7 @@ public class ErrorContractTests : IDisposable
     [InlineData("\u007f")]
     public void ControlChar_InNodePosition_HwInvalidArg(string bad)
     {
-        var message = ErrorOf(() => _db.Execute("HW.DEQUEUE", "svc", $"node{bad}1"));
+        var message = ErrorOf(() => _db.Execute("HW.CLAIM", "SVC", "svc", $"node{bad}1"));
         message.Should().StartWith("ERR HW_INVALID_ARG");
     }
 
@@ -111,12 +156,12 @@ public class ErrorContractTests : IDisposable
         // can desync further custom-command parsing on the same session (an
         // upstream Garnet parser quirk; unreachable by Highway clients, which
         // validate identifiers client-side and never send control characters).
-        var error = ErrorOf(() => _db.Execute("HW.SUBSCRIBE", "mirror.ch", "a\nb"));
+        var error = ErrorOf(() => _db.Subscribe("mirror.ch", "a\nb", "node-1"));
         error.Should().StartWith("ERR HW_INVALID_ARG");
 
         using var fresh = ConnectionMultiplexer.Connect(_server.ConnectionString);
         var freshDb = fresh.GetDatabase();
-        freshDb.Execute("HW.SUBSCRIBE", "mirror.ch", "real-group").ToString().Should().Be("OK");
+        freshDb.Subscribe("mirror.ch", "real-group", "node-1").ToString().Should().Be("OK");
 
         var count = (int)freshDb.Execute("HW.PUBLISH", "mirror.ch", "msg")!;
         count.Should().Be(1, "no phantom fan-out targets may exist");
@@ -181,12 +226,10 @@ public class ErrorContractTests : IDisposable
     [Fact]
     public void NoValidationFailure_EmitsBareTransactionFailed()
     {
-        // Requirement 2 AC7: ideally a forced watch conflict demonstrates the
-        // transient message. Watch conflicts require a concurrent mutation
-        // between Prepare's mirror read and lock acquisition, which cannot be
-        // forced deterministically from a single connection. We therefore assert
-        // the weaker invariant: no Highway validation path ever produces the
-        // bare string, which is what makes client classification total.
+        // Requirement 2 AC7, as amended by protocol 5.0: the Garnet-era transient
+        // "ERR Transaction failed." left the contract — nothing emits it — so every
+        // validation failure carries the HW_ prefix, which is what makes client
+        // classification total. The bare string stays asserted as a regression guard.
 
         // The newline case runs LAST on this connection: a rejected command
         // carrying a raw newline can desync subsequent custom-command parsing
@@ -195,8 +238,9 @@ public class ErrorContractTests : IDisposable
         {
             ErrorOf(() => _db.Execute("HW.CALL", "", "req", "p")),
             ErrorOf(() => _db.Execute("HW.CALL", "svc", "req", new string('x', 100))),
-            ErrorOf(() => _db.Execute("HW.SUBSCRIBE", new string('a', 257), "grp")),
-            ErrorOf(() => _db.Execute("HW.DEQUEUE", "svc", "n\node")),
+            ErrorOf(() => _db.Subscribe(new string('a', 257), "grp", "node-1")),
+            ErrorOf(() => _db.Execute("HW.ACK", "not-a-token")),
+            ErrorOf(() => _db.Execute("HW.CLAIM", "SVC", "svc", "n\node")),
         };
 
         messages.Should().AllSatisfy(m =>
@@ -216,19 +260,17 @@ public class ErrorContractTests : IDisposable
         ErrorOf(() => _db.Execute("HW.CALL", "clean.svc", "", "payload"));
         ErrorOf(() => _db.Execute("HW.CALL", "clean.svc", "req", new string('x', 100)));
 
-        var result = _db.Execute("HW.DEQUEUE", "clean.svc", "node-1");
-        result.IsNull.Should().BeTrue("rejected commands must not enqueue");
+        _db.ClaimSvc("clean.svc", "node-1").Should().BeNull("rejected commands must not enqueue");
     }
 
     [Fact]
     public void RejectedPublish_LeavesGroupQueueUntouched()
     {
-        _db.Execute("HW.SUBSCRIBE", "clean.ch", "grp");
+        _db.Subscribe("clean.ch", "grp", "node-1");
 
         ErrorOf(() => _db.Execute("HW.PUBLISH", "clean.ch", new string('x', 100)));
 
-        var result = _db.Execute("HW.QCLAIM", "clean.ch@grp", "node-1");
-        result.IsNull.Should().BeTrue("rejected publishes must not fan out");
+        _db.ClaimQ("clean.ch@grp", "node-1").Should().BeNull("rejected publishes must not fan out");
     }
 
     [Fact]
@@ -236,14 +278,14 @@ public class ErrorContractTests : IDisposable
     {
         ErrorOf(() => _db.Execute("HW.REPLY", "clean-req", new string('x', 100)));
 
-        var slot = _db.StringGet("hw:rep:clean-req");
+        var slot = _db.Result("clean-req");
         slot.HasValue.Should().BeFalse("rejected replies must not write the slot");
     }
 
     [Fact]
     public void RejectedSubscribe_LeavesGroupUnregistered()
     {
-        ErrorOf(() => _db.Execute("HW.SUBSCRIBE", "clean2.ch", "bad\ngroup"));
+        ErrorOf(() => _db.Subscribe("clean2.ch", "bad\ngroup", "node-1"));
 
         // Follow-up on a fresh connection (newline-in-arg session quirk, see
         // research.md Finding 6). A valid publish finds zero groups — the

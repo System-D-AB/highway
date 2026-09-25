@@ -4,6 +4,8 @@ using Highway.Server.Internal;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
 
+using Highway.Server.Storage.Boxes;
+
 namespace Highway.Server.Commands.Ported;
 
 /// <summary>
@@ -72,28 +74,25 @@ internal sealed class HwStatsCommand : HighwayCommand
         writer.FieldArray(fields);
     }
 
+    /// <summary>A work box's counters, or zeros when nothing was ever sent to or claimed from it (065: never a scan).</summary>
+    private static (long Ready, long InFlight, long Delayed, long Dead, int Workers) Counters(CommandContext ctx, BoxKeys.Kind kind, string name)
+    {
+        if (BoxCommandSupport.Find(ctx, kind, name) is not { } box) return default;
+        using var wb = BoxCommandSupport.Open(ctx, box, kind);
+        return (wb.Ready, wb.InFlight, wb.Delayed, wb.Dead, wb.Workers().Count);
+    }
+
     private static List<(string, string)> QueueStats(CommandContext ctx, IStoreSnapshot snap, string queue)
     {
-        var depth = ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue(queue)));
-        var deadLettered = ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.QueueDeadLetter(queue)));
-        var deferred = ctx.Store.SortedSetLength(snap, HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed(queue)));
-
-        var workers = ctx.Store.SetMembers(snap, HighwayKeyspace.SetPrefix(HighwayNames.QueueNodes(queue)));
-        long inFlight = 0;
-        foreach (var w in workers)
-        {
-            var node = Encoding.UTF8.GetString(w);
-            inFlight += ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.QueueProcessing(queue, node)));
-        }
-
+        var c = Counters(ctx, BoxKeys.Kind.Queue, queue);
         return
         [
             ("kind", "queue"),
-            ("depth", depth.ToString()),
-            ("workers", workers.Count.ToString()),
-            ("inFlight", inFlight.ToString()),
-            ("deferred", deferred.ToString()),
-            ("deadLettered", deadLettered.ToString()),
+            ("depth", c.Ready.ToString()),
+            ("workers", c.Workers.ToString()),
+            ("inFlight", c.InFlight.ToString()),
+            ("deferred", c.Delayed.ToString()),
+            ("deadLettered", c.Dead.ToString()),
         ];
     }
 
@@ -124,32 +123,24 @@ internal sealed class HwStatsCommand : HighwayCommand
         var serviceHosts = ctx.Store.SetMembers(snap, HighwayKeyspace.SetPrefix(HighwayNames.RegistrationService(name)));
         if (serviceHosts.Count > 0)
         {
-            var queueDepth = ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.ServiceQueue(name)));
-            var deadLettered = ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.ServiceDeadLetter(name)));
-            long inFlight = 0;
-            foreach (var h in serviceHosts)
-            {
-                var node = Encoding.UTF8.GetString(h);
-                inFlight += ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.ServiceProcessing(name, node)));
-            }
+            var c = Counters(ctx, BoxKeys.Kind.Service, name);
             return
             [
                 ("kind", "service"),
-                ("queueDepth", queueDepth.ToString()),
+                ("queueDepth", c.Ready.ToString()),
                 ("hosts", serviceHosts.Count.ToString()),
-                ("inFlight", inFlight.ToString()),
-                ("deadLettered", deadLettered.ToString()),
+                ("inFlight", c.InFlight.ToString()),
+                ("deadLettered", c.Dead.ToString()),
             ];
         }
 
-        // Channel form: sum backlog across its groups' derived queues.
         var groups = ctx.Store.SetMembers(snap, HighwayKeyspace.SetPrefix(HighwayNames.ChannelGroups(name)));
         long pending = 0, dead = 0;
         foreach (var g in groups)
         {
-            var derived = $"{name}@{Encoding.UTF8.GetString(g)}";
-            pending += ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue(derived)));
-            dead += ctx.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.QueueDeadLetter(derived)));
+            var c = Counters(ctx, BoxKeys.Kind.Queue, BoxCommandSupport.GroupQueue(name, Encoding.UTF8.GetString(g)));
+            pending += c.Ready;
+            dead += c.Dead;
         }
         return
         [

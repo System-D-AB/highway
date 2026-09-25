@@ -28,7 +28,6 @@ namespace Highway.Server.Commands.Ported;
 internal static class RegistrySupport
 {
     /// <summary>Minimum bytes of a well-formed RPC processing entry (i64 + u16 header).</summary>
-    private const int RpcProcessingHeaderSize = 10;
 
     // -------------------------------------------------------------------------
     // Membership-set reads (the mirror collapse, T3.3)
@@ -49,42 +48,6 @@ internal static class RegistrySupport
     // -------------------------------------------------------------------------
     // Node teardown (Registry)
     // -------------------------------------------------------------------------
-
-    /// <summary>
-    /// Requeues every unacknowledged request in <paramref name="nodeId"/>'s processing list for
-    /// <paramref name="service"/> back to the queue tail (attempt count carried), then clears
-    /// the list. Returns the number requeued.
-    ///
-    /// <para>A prune is a redelivery, so it counts (Envelope.NextAttempt) — otherwise a request
-    /// could escape MaxDeliveryAttempts forever via the dead-node path.</para>
-    /// </summary>
-    public static int RequeueNodeWork(IHighwayStore store, IStoreBatch batch, string service, string nodeId)
-    {
-        var procName = HighwayNames.ServiceProcessing(service, nodeId);
-        var entries = store.ListDrain(batch, HighwayKeyspace.ListPrefix(procName));
-        if (entries.Count == 0)
-            return 0;
-
-        var requeued = 0;
-        foreach (var entry in entries)
-        {
-            if (entry.Length < RpcProcessingHeaderSize)
-                continue; // malformed — re-queuing it would poison the queue
-
-            Envelope.DecodeRpcProcessingEntry(entry, out _, out var requestId, out var payload, out var attempts);
-            var revived = Envelope.EncodeRpcEntry(requestId.ToArray(), payload.ToArray(), Envelope.NextAttempt(attempts));
-            HwQSendCommand.PushTail(store, batch, HighwayNames.ServiceQueue(service), revived);
-            requeued++;
-        }
-
-        // ListDrain already emptied the processing list; also drop its seq counter range.
-        store.DeleteRange(batch, HighwayKeyspace.ListPrefix(procName));
-        return requeued;
-    }
-
-    /// <summary>Removes a node from one service's worker set (mirror gone — the set is authoritative).</summary>
-    public static void RemoveNodeFromService(IHighwayStore store, IStoreBatch batch, string service, string nodeId)
-        => SetRemove(store, batch, HighwayNames.ServiceNodes(service), nodeId);
 
     /// <summary>Deletes a node's registration record, its liveness key, and drops it from the registry node set.</summary>
     public static void RemoveRegistration(IHighwayStore store, IStoreBatch batch, string nodeId)
@@ -135,52 +98,49 @@ internal static class RegistrySupport
     }
 
     /// <summary>
-    /// Deletes a subscriber group and every key its queue owns, returning what was destroyed.
-    /// The derived queue name is <c>{channel}@{group}</c>. Retirement uses
-    /// <see cref="IHighwayStore.DeleteRange"/> per structure — a prefix is a contiguous range
-    /// on the ordered keyspace, so one range delete replaces Garnet's per-key DELETE loop
-    /// (037 §2, C4.6: the range is physically reclaimed at the next compaction).
-    ///
-    /// <para><b>Deleted, not dead-lettered</b> (017): the messages were addressed to this
-    /// subscriber alone and it has declared it will never exist again. Counted before deletion
-    /// so the loss is never silent (C4.3).</para>
-    /// </summary>
-    public static RetirementOutcome RetireGroup(
-        IHighwayStore store, IStoreSnapshot snap, IStoreBatch batch, string channel, string group)
-    {
-        var derived = $"{channel}@{group}";
-
-        // Counted before deletion: afterwards there is nothing left to count.
-        var messages = store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue(derived)));
-        var bytes = store.ReadByteCounter(snap, HighwayNames.QueueBytes(derived));
-
-        // The whole structure family for a derived group queue.
-        store.DeleteRange(batch, HighwayKeyspace.ListPrefix(HighwayNames.Queue(derived)));
-        store.DeleteRange(batch, HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed(derived)));
-        store.DeleteRange(batch, HighwayKeyspace.ListPrefix(HighwayNames.QueueDeadLetter(derived)));
-        store.DeleteRange(batch, HighwayKeyspace.SetPrefix(HighwayNames.QueueNodes(derived)));
-        store.DeleteRange(batch, HighwayKeyspace.ListPrefix(HighwayNames.QueueProcessing(derived, group)));
-        store.DeleteRange(batch, HighwayKeyspace.SetPrefix(HighwayNames.GroupMembers(channel, group)));
-        store.Delete(batch, HighwayKeyspace.Counter(HighwayNames.QueueBytes(derived)));
-        // Sequence allocators for the drained lists (physical-layout §5) — leave nothing behind.
-        store.Delete(batch, HighwayKeyspace.Counter(HighwayNames.ListSequence(HighwayNames.Queue(derived))));
-        store.Delete(batch, HighwayKeyspace.Counter(HighwayNames.ListSequence(HighwayNames.Queue(derived)) + ":low"));
-        store.Delete(batch, HighwayKeyspace.Counter(HighwayNames.ListSequence(HighwayNames.QueueDeadLetter(derived))));
-        store.Delete(batch, HighwayKeyspace.Counter(HighwayNames.ListSequence(HighwayNames.QueueProcessing(derived, group))));
-
-        // Unregister the group itself, or the next publish fans back into a just-deleted queue.
-        SetRemove(store, batch, HighwayNames.ChannelGroups(channel), group);
-
-        // Reverse index (node → channels) collapses to a set now (T3.3).
-        SetRemove(store, batch, HighwayNames.NodeChannels(group), channel);
-
-        return new RetirementOutcome(1, messages, bytes);
-    }
-
-    /// <summary>
     /// The channels a node subscribes to, from the <c>node:channels</c> set (was a mirror).
     /// Used by BYE PURGE to derive the (channel, group) targets it must retire.
     /// </summary>
     public static string[] ReadNodeChannels(IHighwayStore store, IStoreSnapshot snap, string nodeId)
         => ReadSet(store, snap, HighwayNames.NodeChannels(nodeId));
+    /// <summary>
+    /// The service names a catalog declares (<c>services[].name</c>). False when the JSON does not parse —
+    /// a catalog the server cannot read would leave the node undiscoverable, so it is refused loudly.
+    /// </summary>
+    public static bool TryParseCatalogServices(ReadOnlySpan<byte> catalog, out string[] services)
+    {
+        services = [];
+        try
+        {
+            var reader = new System.Text.Json.Utf8JsonReader(catalog);
+            using var document = System.Text.Json.JsonDocument.ParseValue(ref reader);
+            if (!document.RootElement.TryGetProperty("services", out var array)
+                || array.ValueKind != System.Text.Json.JsonValueKind.Array)
+                return true;   // valid JSON with no services — a pure caller
+            var names = new List<string>();
+            foreach (var entry in array.EnumerateArray())
+            {
+                if (entry.ValueKind == System.Text.Json.JsonValueKind.Object
+                    && entry.TryGetProperty("name", out var name)
+                    && name.ValueKind == System.Text.Json.JsonValueKind.String
+                    && name.GetString() is { Length: > 0 } value)
+                    names.Add(value);
+            }
+            services = [.. names];
+            return true;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The services in the catalog a node registered, or none.</summary>
+    public static string[] StoredCatalogServices(IHighwayStore store, IStoreSnapshot snap, string nodeId)
+    {
+        var record = store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationNode(nodeId)));
+        if (record is null || record.Length < NodeRegistration.HeaderSize) return [];
+        NodeRegistration.Decode(record, out _, out var catalog);
+        return TryParseCatalogServices(catalog, out var services) ? services : [];
+    }
 }

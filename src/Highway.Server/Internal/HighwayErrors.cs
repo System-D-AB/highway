@@ -36,6 +36,9 @@ internal static class HighwayErrors
 
     public const string InvalidArg = "HW_INVALID_ARG";
 
+    /// <summary>A claim token that does not parse (5.0). A token that parses but is no longer held is <c>:0</c>, not this.</summary>
+    public const string InvalidToken = "HW_INVALID_TOKEN";
+
     /// <summary>Payload exceeds <c>MaxPayloadBytes</c>.</summary>
     public const string PayloadTooLarge = "HW_PAYLOAD_TOO_LARGE";
 

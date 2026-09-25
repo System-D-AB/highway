@@ -7,7 +7,8 @@ namespace Highway.Integration.Tests;
 
 /// <summary>
 /// Feature 004.1 Task 12 — Requirement 7 AC1–AC4: reply-slot TTL,
-/// last-writer-wins replies. The backlog cases it once covered were removed with the
+/// last-writer-wins replies. Reply slots are read with <c>HW.RESULT</c> since protocol 5.0
+/// (was stock <c>GET</c> on <c>hw:rep:*</c>). The backlog cases it once covered were removed with the
 /// backlog itself (feature 014 follow-up).
 /// </summary>
 public class RetentionTests
@@ -20,11 +21,13 @@ public class RetentionTests
         var db = redis.GetDatabase();
 
         db.Execute("HW.REPLY", "ttl-req", "transient-response");
-        ((string)db.StringGet("hw:rep:ttl-req")!).Should().Be("transient-response");
+        server.Inspect.ReplySlotExists("ttl-req").Should().BeTrue("the reply is waiting");
 
         Thread.Sleep(TimeSpan.FromMilliseconds(1200));
 
-        db.StringGet("hw:rep:ttl-req").HasValue.Should().BeFalse(
+        server.Inspect.ReplySlotExists("ttl-req").Should().BeFalse(
+            "an unretrieved reply slot must expire after its TTL");
+        db.Result("ttl-req").HasValue.Should().BeFalse(
             "an unretrieved reply slot must be garbage-collected after its TTL (004 Req 4 AC5)");
     }
 
@@ -38,7 +41,7 @@ public class RetentionTests
         db.Execute("HW.REPLY", "lww-req", "first");
         db.Execute("HW.REPLY", "lww-req", "second");
 
-        ((string)db.StringGet("hw:rep:lww-req")!).Should().Be("second",
+        ((string)db.Result("lww-req")!).Should().Be("second",
             "the documented rule is last-writer-wins (004 Req 4 AC4)");
     }
 
@@ -61,10 +64,9 @@ public class RetentionTests
         db.Execute("HW.PUBLISH", "retention.ch", "orphan"u8.ToArray());
 
         // Subscribing afterwards starts empty — the message was not kept for anyone.
-        db.Execute("HW.SUBSCRIBE", "retention.ch", "late-group");
+        db.Subscribe("retention.ch", "late-group");
 
-        var received = db.Execute("HW.QCLAIM", "retention.ch@late-group", "node-1");
-        received.IsNull
-            .Should().BeTrue("a publish with no registered group reaches nobody");
+        db.ClaimQ("retention.ch@late-group", "node-1")
+            .Should().BeNull("a publish with no registered group reaches nobody");
     }
 }

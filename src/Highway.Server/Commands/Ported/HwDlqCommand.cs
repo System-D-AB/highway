@@ -4,6 +4,8 @@ using Highway.Server.Internal;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
 
+using Highway.Server.Storage.Boxes;
+
 namespace Highway.Server.Commands.Ported;
 
 /// <summary>
@@ -23,8 +25,8 @@ internal sealed class HwDlqCommand : HighwayCommand
     private const string TargetQueue = "Q";
 
     private string _action = null!;
-    private string _dlqName = null!;
-    private string _liveName = null!;
+    private BoxKeys.Kind _kind;
+    private string _name = null!;
     private int _count;
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
@@ -47,14 +49,12 @@ internal sealed class HwDlqCommand : HighwayCommand
         switch (kind)
         {
             case TargetService:
-                if (!TryReadIdentifier(input, ref idx, "service", ctx.Options.MaxIdentifierBytes, out var service)) return false;
-                _dlqName = HighwayNames.ServiceDeadLetter(service);
-                _liveName = HighwayNames.ServiceQueue(service);
+                if (!TryReadIdentifier(input, ref idx, "service", ctx.Options.MaxIdentifierBytes, out _name)) return false;
+                _kind = BoxKeys.Kind.Service;
                 break;
             case TargetQueue:
-                if (!TryReadDerivedIdentifier(input, ref idx, "queue", ctx.Options.MaxIdentifierBytes, out var queue)) return false;
-                _dlqName = HighwayNames.QueueDeadLetter(queue);
-                _liveName = HighwayNames.Queue(queue);
+                if (!TryReadDerivedIdentifier(input, ref idx, "queue", ctx.Options.MaxIdentifierBytes, out _name)) return false;
+                _kind = BoxKeys.Kind.Queue;
                 break;
             default:
                 return Fail(HighwayErrors.InvalidArg, $"unknown target '{kind}'; accepted forms are SVC <service> or Q <queue>");
@@ -82,44 +82,34 @@ internal sealed class HwDlqCommand : HighwayCommand
 
     protected override void Run(CommandContext ctx, RespWriter writer)
     {
-        using var _lock = ctx.Locks.Lock(_dlqName);
-        using var batch = ctx.Store.NewBatch();
+        // 065: dead letters live in the target's box, oldest first from a durable head — nothing already
+        // requeued or purged is ever re-walked. An unknown target answers empty / :0, never an error.
+        if (BoxCommandSupport.Find(ctx, _kind, _name) is not { } box)
+        {
+            if (_action == ActionPeek) writer.EmptyArray();
+            else writer.Integer(0);
+            return;
+        }
 
-        // Read the DLQ once; the head window is [0.._count). _dlqName is already the full logical
-        // name (Queue/Service dead-letter), so the list prefix is built directly. 061 A1: read-only —
-        // PEEK writes nothing, and REQUEUE / PURGE delete only the entries in the window (this used to
-        // drain the whole DLQ and re-push everything outside the window, even for a PEEK).
-        var all = ctx.Store.ListEntries(batch, HighwayKeyspace.ListPrefix(_dlqName));
-        var window = System.Math.Min(_count, all.Count);
-
+        using var _lock = BoxCommandSupport.Lock(ctx, box);
+        using var wb = BoxCommandSupport.Open(ctx, box, _kind);
         switch (_action)
         {
             case ActionPeek:
-                batch.Commit();   // nothing staged, nothing written
-                WritePeek(writer, all.Take(window).Select(e => e.Value).ToList());
+                WritePeek(writer, wb.PeekDead(_count).Select(e => e.Value).ToList());
                 break;
-
             case ActionRequeue:
             {
-                for (var i = 0; i < window; i++)
-                {
-                    DeadLetter.Decode(all[i].Value, out _, out _, out _, out var original);
-                    Envelope.DecodeRpcEntry(original, out var requestId, out var payload, out _);
-                    var revived = Envelope.EncodeRpcEntry(requestId.ToArray(), payload.ToArray(), attempts: 0);
-                    HwQSendCommand.PushTail(ctx.Store, batch, _liveName, revived);
-                    ctx.Store.Delete(batch, all[i].Key);
-                }
-                batch.Commit();
-                writer.Integer(window);
+                var moved = wb.RequeueDead(_count);
+                wb.Commit();
+                writer.Integer(moved);
                 break;
             }
-
-            default: // PURGE
+            default:
             {
-                for (var i = 0; i < window; i++)
-                    ctx.Store.Delete(batch, all[i].Key);
-                batch.Commit();
-                writer.Integer(window);
+                var removed = wb.PurgeDead(_count);
+                wb.Commit();
+                writer.Integer(removed);
                 break;
             }
         }

@@ -17,6 +17,31 @@ namespace Highway.Server.Tests.Commands;
 /// </summary>
 public class MembershipTests
 {
+    /// <summary>A 5.0 session carrying just a catalog (was the heartbeat registration form).</summary>
+    /// <summary>A queue's job schedules, read from its box (065) — the pre-065 job index is gone.</summary>
+    private static int Schedules(CommandHarness h, string queue)
+    {
+        var rt = new Highway.Server.Storage.Boxes.BoxRuntime();
+        using var batch = h.Store.NewBatch();
+        if (Highway.Server.Storage.Boxes.Catalog.Find(h.Store, batch, rt, Highway.Server.Storage.Boxes.BoxKeys.Kind.Queue, queue) is not { } box)
+            return 0;
+        using var wb = new Highway.Server.Storage.Boxes.WorkBox(h.Store, rt, box, tracksBytes: true, batch);
+        return wb.Schedules().Count;
+    }
+
+    private static string SessionOf(string catalogJson) => "{\"catalog\":" + catalogJson + "}";
+
+    /// <summary>
+    /// A group subscription, declared as 5.0 does it: a catalog-less HW.SESSION for the member node (was
+    /// HW.SUBSCRIBE). The pre-025 two-argument form — the group is the node — maps to node = group.
+    /// </summary>
+    private static byte[] Subscribe(CommandHarness h, string channel, string group, string? node = null)
+        => Subscribe(h, DateTime.UtcNow.Ticks, channel, group, node);
+
+    private static byte[] Subscribe(CommandHarness h, long now, string channel, string group, string? node = null)
+        => h.Run(new HwSessionCommand(), now, node ?? group,
+            "{\"subscriptions\":[{\"channel\":\"" + channel + "\",\"group\":\"" + group + "\"}]}");
+
     // ---- seeding helpers -----------------------------------------------------
 
     /// <summary>Seeds a node registration record with a given last-seen and catalog services.</summary>
@@ -47,7 +72,7 @@ public class MembershipTests
     public void Subscribe_RegistersGroup_AndAllMirrorsAreSets()
     {
         using var h = new CommandHarness();
-        var reply = h.Run(new HwSubscribeCommand(), "news", "billing", "node-1");
+        var reply = Subscribe(h, "news", "billing", "node-1");
         CommandHarness.AsText(reply).Should().Be("+OK\r\n");
 
         // The channel-groups set is authoritative — the old grplist mirror is gone.
@@ -62,7 +87,7 @@ public class MembershipTests
     public void Subscribe_WithoutNode_GroupIsTheNode()
     {
         using var h = new CommandHarness();
-        h.Run(new HwSubscribeCommand(), "news", "billing"); // no node arg (pre-025)
+        Subscribe(h, "news", "billing"); // no node arg (pre-025)
 
         Members(h.Store, HighwayNames.GroupMembers("news", "billing")).Should().BeEquivalentTo("billing");
         Members(h.Store, HighwayNames.NodeSubs("billing")).Should().BeEquivalentTo("news@billing");
@@ -72,8 +97,8 @@ public class MembershipTests
     public void Subscribe_IsIdempotent()
     {
         using var h = new CommandHarness();
-        h.Run(new HwSubscribeCommand(), "news", "billing", "node-1");
-        h.Run(new HwSubscribeCommand(), "news", "billing", "node-1");
+        Subscribe(h, "news", "billing", "node-1");
+        Subscribe(h, "news", "billing", "node-1");
 
         Members(h.Store, HighwayNames.ChannelGroups("news")).Should().BeEquivalentTo("billing");
         Members(h.Store, HighwayNames.GroupMembers("news", "billing")).Should().BeEquivalentTo("node-1");
@@ -83,8 +108,8 @@ public class MembershipTests
     public void Subscribe_TwoNodesBackOneGroup()
     {
         using var h = new CommandHarness();
-        h.Run(new HwSubscribeCommand(), "news", "billing", "node-1");
-        h.Run(new HwSubscribeCommand(), "news", "billing", "node-2");
+        Subscribe(h, "news", "billing", "node-1");
+        Subscribe(h, "news", "billing", "node-2");
 
         Members(h.Store, HighwayNames.ChannelGroups("news")).Should().BeEquivalentTo("billing");
         Members(h.Store, HighwayNames.GroupMembers("news", "billing")).Should().BeEquivalentTo("node-1", "node-2");
@@ -96,11 +121,11 @@ public class MembershipTests
     public void Unsubscribe_RetiresGroup_DestroysQueueAndUnregisters()
     {
         using var h = new CommandHarness();
-        h.Run(new HwSubscribeCommand(), "news", "billing", "node-1");
+        Subscribe(h, "news", "billing", "node-1");
         h.Run(new HwPublishCommand(), "news", "hello"); // one message into news@billing
 
         using (var snap = h.Store.Snapshot())
-            h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@billing"))).Should().Be(1);
+            new StoreInspector(h.Store).ListLength("hw:q:news@billing:q").Should().Be(1);
 
         var reply = h.Run(new HwUnsubscribeCommand(), "news", "billing");
         CommandHarness.AsText(reply).Should().Be("+OK\r\n");
@@ -109,7 +134,7 @@ public class MembershipTests
         Members(h.Store, HighwayNames.ChannelGroups("news")).Should().BeEmpty();
         Members(h.Store, HighwayNames.NodeChannels("billing")).Should().BeEmpty();
         using var after = h.Store.Snapshot();
-        h.Store.ListLength(after, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@billing"))).Should().Be(0);
+        new StoreInspector(h.Store).ListLength("hw:q:news@billing:q").Should().Be(0);
     }
 
     // ========================= HW.HEARTBEAT ==================================
@@ -121,7 +146,7 @@ public class MembershipTests
         var now = DateTime.UtcNow.Ticks;
         var catalog = Encoding.UTF8.GetString(BuildCatalog("orders", "billing"));
 
-        var reply = h.Run(new HwHeartbeatCommand(), now, "node-1", catalog);
+        var reply = h.Run(new HwSessionCommand(), now, "node-1", SessionOf(catalog));
         CommandHarness.AsText(reply).Should().Be("+OK\r\n");
 
         Members(h.Store, HighwayNames.RegistrationNodeList).Should().BeEquivalentTo("node-1");
@@ -134,7 +159,7 @@ public class MembershipTests
     {
         using var h = new CommandHarness();
         var reply = h.Run(new HwHeartbeatCommand(), "ghost");
-        CommandHarness.AsText(reply).Should().Be("+REGISTER\r\n");
+        CommandHarness.AsText(reply).Should().Be("+SESSION\r\n");
 
         using var snap = h.Store.Snapshot();
         h.Store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationNode("ghost"))).Should().BeNull();
@@ -182,7 +207,7 @@ public class MembershipTests
     {
         using var h = new CommandHarness();
         var now = DateTime.UtcNow.Ticks;
-        h.Run(new HwHeartbeatCommand(), now, "node-1", Encoding.UTF8.GetString(BuildCatalog("orders")));
+        h.Run(new HwSessionCommand(), now, "node-1", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders"))));
         h.Run(new HwHeartbeatCommand(), now + 1, "node-1");
 
         h.Run(new HwHeartbeatCommand(), now + 2, "node-1", "BYE");
@@ -196,10 +221,10 @@ public class MembershipTests
     {
         using var h = new CommandHarness();
         var now = DateTime.UtcNow.Ticks;
-        h.Run(new HwHeartbeatCommand(), now, "node-1", Encoding.UTF8.GetString(BuildCatalog("orders", "billing")));
+        h.Run(new HwSessionCommand(), now, "node-1", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders", "billing"))));
 
         // Redeploy: same node, only 'orders' now.
-        h.Run(new HwHeartbeatCommand(), now, "node-1", Encoding.UTF8.GetString(BuildCatalog("orders")));
+        h.Run(new HwSessionCommand(), now, "node-1", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders"))));
 
         Members(h.Store, HighwayNames.RegistrationService("orders")).Should().BeEquivalentTo("node-1");
         Members(h.Store, HighwayNames.RegistrationService("billing")).Should().BeEmpty("no longer hosted");
@@ -210,8 +235,8 @@ public class MembershipTests
     {
         using var h = new CommandHarness();
         var now = DateTime.UtcNow.Ticks;
-        h.Run(new HwHeartbeatCommand(), now, "node-1", Encoding.UTF8.GetString(BuildCatalog("orders")));
-        h.Run(new HwSubscribeCommand(), "news", "grp", "node-1"); // node also a subscriber
+        h.Run(new HwSessionCommand(), now, "node-1", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders"))));
+        Subscribe(h, "news", "grp", "node-1"); // node also a subscriber
 
         var reply = h.Run(new HwHeartbeatCommand(), now, "node-1", "BYE");
         CommandHarness.AsText(reply).Should().Be("+OK\r\n");
@@ -228,8 +253,8 @@ public class MembershipTests
     {
         using var h = new CommandHarness();
         var now = DateTime.UtcNow.Ticks;
-        h.Run(new HwHeartbeatCommand(), now, "node-1", Encoding.UTF8.GetString(BuildCatalog("orders")));
-        h.Run(new HwSubscribeCommand(), "news", "node-1", "node-1"); // group == node
+        h.Run(new HwSessionCommand(), now, "node-1", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders"))));
+        Subscribe(h, "news", "node-1", "node-1"); // group == node
         h.Run(new HwPublishCommand(), "news", "hello");
 
         var reply = h.Run(new HwHeartbeatCommand(), now, "node-1", "BYE", "PURGE");
@@ -239,7 +264,7 @@ public class MembershipTests
 
         Members(h.Store, HighwayNames.ChannelGroups("news")).Should().BeEmpty("purge destroyed the group");
         using var snap = h.Store.Snapshot();
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@node-1"))).Should().Be(0);
+        new StoreInspector(h.Store).ListLength("hw:q:news@node-1:q").Should().Be(0);
     }
 
     [Fact]
@@ -247,9 +272,9 @@ public class MembershipTests
     {
         using var h = new CommandHarness();
         var now = DateTime.UtcNow.Ticks;
-        h.Run(new HwHeartbeatCommand(), now, "node-1", Encoding.UTF8.GetString(BuildCatalog()));
-        h.Run(new HwSubscribeCommand(), "news", "billing", "node-1");
-        h.Run(new HwSubscribeCommand(), "news", "billing", "node-2"); // two members back one group
+        h.Run(new HwSessionCommand(), now, "node-1", SessionOf(Encoding.UTF8.GetString(BuildCatalog())));
+        Subscribe(h, "news", "billing", "node-1");
+        Subscribe(h, "news", "billing", "node-2"); // two members back one group
 
         var reply = h.Run(new HwHeartbeatCommand(), now, "node-1", "BYE", "PURGE");
         CommandHarness.AsText(reply).Should().StartWith("*3\r\n:0\r\n", "no group retired — a sibling remains");
@@ -269,7 +294,7 @@ public class MembershipTests
         var now = 10_000_000_000_000L;
 
         // live-1 seen just now; dead-1 seen a minute ago (stale). Both in the index.
-        h.Run(new HwHeartbeatCommand(), now, "live-1", Encoding.UTF8.GetString(BuildCatalog("orders")));
+        h.Run(new HwSessionCommand(), now, "live-1", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders"))));
         SeedRegistration(h.Store, "dead-1", now - TimeSpan.FromMinutes(1).Ticks, "orders");
         using (var b = h.Store.NewBatch())
         {
@@ -301,9 +326,9 @@ public class MembershipTests
         var reply = h.Run(new HwJobCommand(), "SET", "nightly", "cleanup", "every:900", "payload");
         CommandHarness.AsText(reply).Should().Be("+OK\r\n");
 
-        Members(h.Store, HighwayNames.JobIndex).Should().BeEquivalentTo("nightly");
+        Schedules(h, "nightly").Should().BeGreaterThan(0);
         using var snap = h.Store.Snapshot();
-        h.Store.SortedSetLength(snap, HighwayKeyspace.SortedSetPrefix(HighwayNames.JobSchedules("nightly")))
+        Schedules(h, "nightly")
             .Should().Be(1);
     }
 
@@ -316,7 +341,7 @@ public class MembershipTests
 
         // Still one schedule (replaced, not duplicated).
         using var snap = h.Store.Snapshot();
-        h.Store.SortedSetLength(snap, HighwayKeyspace.SortedSetPrefix(HighwayNames.JobSchedules("nightly")))
+        Schedules(h, "nightly")
             .Should().Be(1);
     }
 
@@ -329,7 +354,7 @@ public class MembershipTests
         var reply = h.Run(new HwJobCommand(), "DEL", "nightly", "cleanup");
         CommandHarness.AsText(reply).Should().Be(":1\r\n");
 
-        Members(h.Store, HighwayNames.JobIndex).Should().BeEmpty("last schedule gone");
+        Schedules(h, "nightly").Should().Be(0, "last schedule gone");
     }
 
     [Fact]
@@ -360,7 +385,7 @@ public class MembershipTests
         using var h = new CommandHarness();
         var reply = h.Run(new HwJobCommand(), "SET", "nightly", "cleanup", "not-a-schedule", "p");
         CommandHarness.AsText(reply).Should().StartWith("-ERR HW_INVALID_ARG");
-        Members(h.Store, HighwayNames.JobIndex).Should().BeEmpty();
+        Schedules(h, "nightly").Should().Be(0);
     }
 
     // ========================= HW.QCLAIM job firing ==========================
@@ -375,16 +400,16 @@ public class MembershipTests
 
         // every:1 → next occurrence is t0 + 1s. Claim at t0 + 2s: the schedule is due.
         var claimAt = t0 + TimeSpan.FromSeconds(2).Ticks;
-        var reply = h.Run(new HwQClaimCommand(), claimAt, "nightly", "worker-1");
+        var reply = h.Run(new HwClaimCommand(), claimAt, "Q", "nightly", "worker-1");
 
         // The fired occurrence is what the worker claims.
         var text = CommandHarness.AsText(reply);
-        text.Should().StartWith("*2\r\n", "the fired occurrence was claimed");
+        text.Should().StartWith("*1\r\n*3\r\n", "the fired occurrence was claimed");
         text.Should().Contain("occurrence-body");
 
         // Re-armed: still exactly one schedule, now at a future score.
         using var snap = h.Store.Snapshot();
-        h.Store.SortedSetLength(snap, HighwayKeyspace.SortedSetPrefix(HighwayNames.JobSchedules("nightly")))
+        Schedules(h, "nightly")
             .Should().Be(1);
     }
 
@@ -396,8 +421,8 @@ public class MembershipTests
         h.Run(new HwJobCommand(), t0, "SET", "nightly", "cleanup", "every:3600", "body");
 
         // Claim one second later — the hourly job is not due.
-        var reply = h.Run(new HwQClaimCommand(), t0 + TimeSpan.FromSeconds(1).Ticks, "nightly", "worker-1");
-        CommandHarness.AsText(reply).Should().Be("*-1\r\n", "nothing due, nothing queued");
+        var reply = h.Run(new HwClaimCommand(), t0 + TimeSpan.FromSeconds(1).Ticks, "Q", "nightly", "worker-1");
+        CommandHarness.AsText(reply).Should().Be("*0\r\n", "nothing due, nothing queued");
     }
 
     // ========================= HW.PUBLISH auto-retirement ====================
@@ -410,8 +435,8 @@ public class MembershipTests
         var now = 10_000_000_000_000L;
 
         // dead-grp backed by a node last seen 2h ago; live-grp backed by a fresh node.
-        h.Run(new HwSubscribeCommand(), now, "news", "dead-grp", "dead-node");
-        h.Run(new HwSubscribeCommand(), now, "news", "live-grp", "live-node");
+        Subscribe(h, now, "news", "dead-grp", "dead-node");
+        Subscribe(h, now, "news", "live-grp", "live-node");
         SeedRegistration(h.Store, "dead-node", now - TimeSpan.FromHours(2).Ticks, "svc");
         SeedRegistration(h.Store, "live-node", now, "svc");
 
@@ -421,8 +446,8 @@ public class MembershipTests
         // dead-grp retired and unregistered; live-grp still present with the message.
         Members(h.Store, HighwayNames.ChannelGroups("news")).Should().BeEquivalentTo("live-grp");
         using var snap = h.Store.Snapshot();
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@live-grp"))).Should().Be(1);
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@dead-grp"))).Should().Be(0);
+        new StoreInspector(h.Store).ListLength("hw:q:news@live-grp:q").Should().Be(1);
+        new StoreInspector(h.Store).ListLength("hw:q:news@dead-grp:q").Should().Be(0);
     }
 
     [Fact]
@@ -433,7 +458,7 @@ public class MembershipTests
         var now = 10_000_000_000_000L;
 
         // A subscriber that never registered a catalog: no record is NOT evidence of death.
-        h.Run(new HwSubscribeCommand(), now, "news", "grp", "node-x");
+        Subscribe(h, now, "news", "grp", "node-x");
 
         var reply = h.Run(new HwPublishCommand(), now, "news", "hello");
         CommandHarness.AsText(reply).Should().Be(":1\r\n", "the group survives — absence of a record is not death");
@@ -451,16 +476,16 @@ public class MembershipTests
 
         // dead-node registered and holding one claimed request; caller is fresh.
         h.Run(new HwCallCommand(), t0, "orders", "req-1", "payload");
-        h.Run(new HwDequeueCommand(), t0, "orders", "dead-node"); // dead-node claims req-1
-        h.Run(new HwHeartbeatCommand(), t0, "dead-node", Encoding.UTF8.GetString(BuildCatalog("orders")));
+        h.Run(new HwClaimCommand(), t0, "SVC", "orders", "dead-node"); // dead-node claims req-1
+        h.Run(new HwSessionCommand(), t0, "dead-node", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders"))));
 
         // Much later, a healthy worker dequeues. dead-node is now stale → pruned, its work requeued.
         var later = t0 + TimeSpan.FromMinutes(1).Ticks;
-        var reply = h.Run(new HwDequeueCommand(), later, "orders", "live-node");
+        var reply = h.Run(new HwClaimCommand(), later, "SVC", "orders", "live-node");
 
         // The requeued request is what live-node claims.
         var text = CommandHarness.AsText(reply);
-        text.Should().StartWith("*2\r\n");
+        text.Should().StartWith("*1\r\n*3\r\n");
         text.Should().Contain("req-1");
 
         // dead-node dropped from the worker set and the registry.

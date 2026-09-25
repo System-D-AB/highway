@@ -43,7 +43,7 @@ public class DurabilityTests : IDisposable
         {
             var db = redis.GetDatabase();
             db.Execute("HW.CALL", "dur.svc", "req-dur-1", "{\"n\":1}");
-            db.Execute("HW.SUBSCRIBE", "dur.ch", "grp");
+            db.Subscribe("dur.ch", "grp");
             db.Execute("HW.PUBLISH", "dur.ch", "msg-dur-1");
             db.Execute("HW.REPLY", "req-rep-1", "{\"ok\":true}");
         }
@@ -55,19 +55,18 @@ public class DurabilityTests : IDisposable
             var db = redis.GetDatabase();
 
             // Queued request survives, payload byte-identical
-            var deq = db.Execute("HW.DEQUEUE", "dur.svc", "node-1");
-            deq.IsNull.Should().BeFalse("queued RPC request must survive restart");
-            var deqArr = (RedisResult[])deq!;
-            ((string)deqArr[0]!).Should().Be("req-dur-1");
-            ((string)deqArr[1]!).Should().Be("{\"n\":1}");
+            var deq = db.ClaimSvc("dur.svc", "node-1");
+            deq.Should().NotBeNull("queued RPC request must survive restart");
+            deq!.Value.Id.Should().Be("req-dur-1");
+            deq.Value.PayloadText.Should().Be("{\"n\":1}");
 
             // Published message survives for the pre-restart group
-            var recv = db.Execute("HW.QCLAIM", "dur.ch@grp", "node-1");
-            recv.IsNull.Should().BeFalse("published message must survive restart");
-            ((string)((RedisResult[])recv!)[1]!).Should().Be("msg-dur-1");
+            var recv = db.ClaimQ("dur.ch@grp", "node-1");
+            recv.Should().NotBeNull("published message must survive restart");
+            recv!.Value.PayloadText.Should().Be("msg-dur-1");
 
             // Reply slot survives
-            var reply = db.StringGet("hw:rep:req-rep-1");
+            var reply = db.Result("req-rep-1");
             reply.HasValue.Should().BeTrue("reply slot must survive restart");
             ((string)reply!).Should().Be("{\"ok\":true}");
         }
@@ -81,7 +80,7 @@ public class DurabilityTests : IDisposable
 
         using (var redis = ConnectionMultiplexer.Connect(cs))
         {
-            redis.GetDatabase().Execute("HW.SUBSCRIBE", "grp.ch", "persistent-grp");
+            redis.GetDatabase().Subscribe("grp.ch", "persistent-grp");
         }
 
         server.Restart();
@@ -94,9 +93,9 @@ public class DurabilityTests : IDisposable
             var count = (int)db.Execute("HW.PUBLISH", "grp.ch", "after-restart")!;
             count.Should().Be(1, "the pre-restart group must survive and receive");
 
-            var recv = db.Execute("HW.QCLAIM", "grp.ch@persistent-grp", "node-1");
-            recv.IsNull.Should().BeFalse();
-            ((string)((RedisResult[])recv!)[1]!).Should().Be("after-restart");
+            var recv = db.ClaimQ("grp.ch@persistent-grp", "node-1");
+            recv.Should().NotBeNull();
+            recv!.Value.PayloadText.Should().Be("after-restart");
         }
     }
 
@@ -115,8 +114,8 @@ public class DurabilityTests : IDisposable
 
         using (var redis = ConnectionMultiplexer.Connect(cs))
         {
-            var result = redis.GetDatabase().Execute("HW.DEQUEUE", "mem.svc", "node-1");
-            result.IsNull.Should().BeTrue(
+            var result = redis.GetDatabase().ClaimSvc("mem.svc", "node-1");
+            result.Should().BeNull(
                 "memory-only state is intentionally lost across restart (004 Requirement 13 AC3)");
         }
     }

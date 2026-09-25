@@ -14,7 +14,7 @@ namespace Highway.Integration.Tests;
 ///
 /// <para>Both enforcement points: client-side scanning (tested in unit tests) and
 /// server-side command validation (tested here). A non-Highway client can issue
-/// <c>HW.QSEND</c> directly, so server-side alone is not enough.</para>
+/// <c>HW.SEND</c> directly, so client-side alone is not enough.</para>
 /// </summary>
 public class AtSignReservationTests : IDisposable
 {
@@ -53,31 +53,37 @@ public class AtSignReservationTests : IDisposable
     // -------------------------------------------------------------------------
 
     [Fact]
-    public void HwQSend_AtSignInQueueName_HwInvalidArg()
+    public void HwSend_AtSignInQueueName_HwInvalidArg()
     {
         var message = ErrorOf(() =>
-            _db.Execute("HW.QSEND", "orders@billing", "m-1", "body"u8.ToArray()));
+            _db.Send("orders@billing", "m-1", "body"u8.ToArray()));
         message.Should().StartWith("ERR HW_INVALID_ARG");
         message.Should().Contain("@");
     }
 
     [Fact]
-    public void HwQClaim_AtSignInQueueName_Succeeds()
+    public void HwClaimQ_AtSignInQueueName_Succeeds()
     {
-        // HW.QCLAIM accepts @ because derived group queues ({channel}@{group}) are
-        // consumed through this command (feature 018). Returns nil (empty queue).
-        var result = _db.Execute("HW.QCLAIM", "orders@billing", "node-1");
-        result.IsNull.Should().BeTrue("the queue is empty but the command must not reject the name");
+        // HW.CLAIM Q accepts @ because derived group queues ({channel}@{group}) are
+        // consumed through this command (feature 018). Returns an empty array (empty queue).
+        var result = _db.Execute("HW.CLAIM", "Q", "orders@billing", "node-1");
+        result.IsNull.Should().BeFalse("nothing due is an empty array in 5.0, not nil");
+        ((RedisResult[])result!).Should().BeEmpty("the queue is empty but the command must not reject the name");
     }
 
     [Fact]
-    public void HwQAck_AtSignInQueueName_Succeeds()
+    public void HwAck_GroupQueueClaim_Succeeds()
     {
-        // HW.QACK accepts @ because derived group queues ({channel}@{group}) are
-        // acknowledged through this command (feature 018). Returns 0 (not found)
-        // because no message was claimed, but the command must not reject the name.
-        var result = (int)_db.Execute("HW.QACK", "orders@billing", "node-1", "m-1");
-        result.Should().Be(0, "no message was claimed, but the name is valid");
+        // Derived group queues ({channel}@{group}) are acknowledged like any other claim
+        // (feature 018). Since 5.0 HW.ACK takes only the claim's token, so the '@' name is
+        // never re-validated on settle — the claim that produced the token is what accepted it.
+        _db.Subscribe("orders.placed", "billing");
+        _db.Execute("HW.PUBLISH", "orders.placed", "payload"u8.ToArray());
+
+        var claim = _db.ClaimQ("orders.placed@billing", "node-1");
+        claim.Should().NotBeNull();
+
+        _db.Ack(claim!.Value.Token).Should().Be(1, "the group-queue claim is held and settles");
     }
 
     // -------------------------------------------------------------------------
@@ -94,19 +100,19 @@ public class AtSignReservationTests : IDisposable
     }
 
     [Fact]
-    public void HwSubscribe_AtSignInChannelName_HwInvalidArg()
+    public void HwSessionSubscription_AtSignInChannelName_HwInvalidArg()
     {
         var message = ErrorOf(() =>
-            _db.Execute("HW.SUBSCRIBE", "events@group", "my-group"));
+            _db.Subscribe("events@group", "my-group", "node-1"));
         message.Should().StartWith("ERR HW_INVALID_ARG");
         message.Should().Contain("@");
     }
 
     [Fact]
-    public void HwSubscribe_AtSignInGroupName_HwInvalidArg()
+    public void HwSessionSubscription_AtSignInGroupName_HwInvalidArg()
     {
         var message = ErrorOf(() =>
-            _db.Execute("HW.SUBSCRIBE", "events", "my@group"));
+            _db.Subscribe("events", "my@group", "node-1"));
         message.Should().StartWith("ERR HW_INVALID_ARG");
         message.Should().Contain("@");
     }
@@ -118,14 +124,14 @@ public class AtSignReservationTests : IDisposable
     [Fact]
     public void ValidQueueName_WithoutAtSign_Succeeds()
     {
-        _db.Execute("HW.QSEND", "orders.placed", "m-1", "body"u8.ToArray())
+        _db.Send("orders.placed", "m-1", "body"u8.ToArray())
             .ToString().Should().Be("OK");
     }
 
     [Fact]
     public void ValidChannelName_WithoutAtSign_Succeeds()
     {
-        _db.Execute("HW.SUBSCRIBE", "orders.placed", "billing")
+        _db.Subscribe("orders.placed", "billing")
             .ToString().Should().Be("OK");
         var count = (int)_db.Execute("HW.PUBLISH", "orders.placed", "payload"u8.ToArray());
         count.Should().Be(1);
@@ -145,10 +151,10 @@ public class AtSignReservationTests : IDisposable
     }
 
     [Fact]
-    public void HwDequeue_AtSignInNodeId_HwInvalidArg()
+    public void HwClaim_AtSignInNodeId_HwInvalidArg()
     {
         var message = ErrorOf(() =>
-            _db.Execute("HW.DEQUEUE", "svc", "node@1"));
+            _db.Execute("HW.CLAIM", "SVC", "svc", "node@1"));
         message.Should().StartWith("ERR HW_INVALID_ARG");
         message.Should().Contain("@");
     }

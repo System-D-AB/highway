@@ -46,7 +46,7 @@ public class FailureEndToEndTests : IDisposable
 
         await using (await EngineNode.StartAsync(_server.ConnectionString, "e2e-node"))
         {
-            await db.ExecuteAsync("HW.QSEND", "e2e.poison", "order-77",
+            await db.SendAsync("e2e.poison", "order-77",
                 System.Text.Encoding.UTF8.GetBytes(
                     """{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{"Order":"order-77"}}"""));
 
@@ -57,7 +57,7 @@ public class FailureEndToEndTests : IDisposable
             {
                 if (_server.Inspect.ListLength("hw:q:e2e.poison:dlq") > 0) break;
                 await Task.Delay(150);
-                await db.ExecuteAsync("HW.QCLAIM", "e2e.poison", "sweeper");
+                await db.ClaimQAsync("e2e.poison", "sweeper");
             }
         }
 

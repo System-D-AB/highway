@@ -34,10 +34,12 @@ internal sealed class HwCallCommand : HighwayCommand
     {
         var entry = Envelope.EncodeRpcEntry(_requestIdBytes, _payloadBytes);
 
-        using var _lock = ctx.Locks.Lock(_service);
-        using var batch = ctx.Store.NewBatch();
-        HwQSendCommand.PushTail(ctx.Store, batch, HighwayNames.ServiceQueue(_service), entry);
-        batch.Commit();
+        // 065: the service's own box — resolved (created on first use) before its lock is taken.
+        var box = BoxCommandSupport.Ensure(ctx, Storage.Boxes.BoxKeys.Kind.Service, _service);
+        using var _lock = BoxCommandSupport.Lock(ctx, box);
+        using var wb = BoxCommandSupport.Open(ctx, box, Storage.Boxes.BoxKeys.Kind.Service);
+        wb.Enqueue(entry);
+        wb.Commit();
 
         writer.SimpleString("OK");
     }

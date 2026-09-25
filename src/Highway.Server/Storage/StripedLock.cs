@@ -49,6 +49,43 @@ public sealed class StripedLock : IDisposable
         return new Lease(_stripes[stripe]);
     }
 
+    /// <summary>
+    /// Acquires the locks for several names at once (065: a publish writes every group box in one batch).
+    /// Stripes are taken once each, in ascending order, so two multi-lockers can never deadlock and two
+    /// names sharing a stripe never self-deadlock (the stripes are not re-entrant).
+    /// </summary>
+    public IDisposable LockMany(IEnumerable<string> names)
+    {
+        var stripes = names.Select(StripeOf).Distinct().Order().ToArray();
+        var taken = new List<SemaphoreSlim>(stripes.Length);
+        try
+        {
+            foreach (var stripe in stripes)
+            {
+                _stripes[stripe].Wait();
+                taken.Add(_stripes[stripe]);
+            }
+        }
+        catch
+        {
+            foreach (var s in taken) s.Release();
+            throw;
+        }
+        return new MultiLease(taken);
+    }
+
+    private sealed class MultiLease(List<SemaphoreSlim> semaphores) : IDisposable
+    {
+        private List<SemaphoreSlim>? _semaphores = semaphores;
+
+        public void Dispose()
+        {
+            var held = Interlocked.Exchange(ref _semaphores, null);
+            if (held is null) return;
+            for (var i = held.Count - 1; i >= 0; i--) held[i].Release();
+        }
+    }
+
     /// <summary>Async variant, for a caller on an async path.</summary>
     public async ValueTask<IDisposable> LockAsync(string name, CancellationToken ct = default)
     {

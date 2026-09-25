@@ -79,7 +79,7 @@ public class ResilienceIntegrationTests : IDisposable
 
         using (var raw = ConnectionMultiplexer.Connect(_server.ConnectionString))
         {
-            var slot = raw.GetDatabase().StringGet("hw:rep:drain-req-1");
+            var slot = raw.GetDatabase().Result("drain-req-1");
             slot.HasValue.Should().BeTrue(
                 "graceful shutdown must drain in-flight work — the reply was written during the drain");
         }

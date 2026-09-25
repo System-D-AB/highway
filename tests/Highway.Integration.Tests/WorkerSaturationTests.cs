@@ -71,7 +71,7 @@ public sealed class SlowQueueProcessor : IProcess<SlowQueueMessage>
 /// that never parks cannot saturate a gate. Hence: exact counts, and an explicit assertion
 /// that a handler ran at all.</para>
 ///
-/// <para>Observability note: the processing list is the claim ledger. Its length is exactly
+/// <para>Observability note: the node's in-flight entries (the 4.x processing list) are the claim ledger. Its length is exactly
 /// "how many messages this node has taken responsibility for", so asserting on it measures the
 /// property directly rather than inferring it from timing.</para>
 /// </summary>
@@ -156,7 +156,7 @@ public class WorkerSaturationTests : IDisposable
 
         for (var i = 0; i < 4; i++)
         {
-            await db.ExecuteAsync("HW.QSEND", "sat.queue", $"satq-{i}",
+            await db.SendAsync("sat.queue", $"satq-{i}",
                 System.Text.Encoding.UTF8.GetBytes(
                     """{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{"Tag":"x"}}"""));
         }

@@ -7,6 +7,8 @@ using Highway.Abstractions.Observability;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
 
+using Highway.Server.Storage.Boxes;
+
 namespace Highway.Server.Commands.Ported;
 
 /// <summary>
@@ -91,99 +93,55 @@ internal sealed class HwJobCommand : HighwayCommand
         }
     }
 
+    // 065: a queue's schedules live in its box (schedules + a nextFire index), written under the box's
+    // lock — the same lock HW.CLAIM holds while firing them (before 3.0, SET locked a different name).
+
     private void RunSet(CommandContext ctx, RespWriter writer)
     {
-        var store = ctx.Store;
-
-        using var _lock = ctx.Locks.Lock(HighwayNames.JobSchedules(_queue));
-        using var snap = store.Snapshot();
-        using var batch = store.NewBatch();
-
-        var schedName = HighwayNames.JobSchedules(_queue);
-        var schedKey = HighwayKeyspace.SortedSetPrefix(schedName);
-
-        // Find an existing member for this job; preserve its lastFire across the update.
-        long lastFire = 0;
-        if (FindMember(store, snap, schedName, _job, out var existing))
-        {
-            JobScheduleRecord.Decode(existing, out _, out var oldExpr, out lastFire, out _, out _);
-            store.SortedSetRemove(batch, schedKey, existing);
-
-            if (!string.Equals(oldExpr, _expression, StringComparison.Ordinal))
-                _changeDetail = $"{oldExpr} => {_expression}";
-        }
-        else
-        {
-            _changeDetail = $"registered {_expression}";
-        }
-
-        var next = _parsed.NextOccurrence(new DateTime(ctx.NowTicks, DateTimeKind.Utc)).Ticks;
-        var record = JobScheduleRecord.Encode(_job, _expression, lastFire, next, _template);
-
-        store.SortedSetAdd(batch, schedKey, next, record);
-
-        // The job index is a plain set now (mirror gone, T3.3).
-        RegistrySupport.SetAdd(store, batch, HighwayNames.JobIndex, _queue);
-
-        batch.Commit();
+        var box = BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, _queue);
+        using var _lock = BoxCommandSupport.Lock(ctx, box);
+        using var wb = BoxCommandSupport.Open(ctx, box, BoxKeys.Kind.Queue);
+        var previous = wb.UpsertSchedule(_job, _expression, _parsed, _template, ctx.NowTicks);
+        wb.Commit();
+        _changeDetail = previous is null ? $"registered {_expression}"
+            : string.Equals(previous, _expression, StringComparison.Ordinal) ? null
+            : $"{previous} => {_expression}";
         writer.SimpleString("OK");
     }
 
     private void RunDel(CommandContext ctx, RespWriter writer)
     {
-        var store = ctx.Store;
-
-        using var _lock = ctx.Locks.Lock(HighwayNames.JobSchedules(_queue));
-        using var snap = store.Snapshot();
-        using var batch = store.NewBatch();
-
-        var schedName = HighwayNames.JobSchedules(_queue);
-        var schedKey = HighwayKeyspace.SortedSetPrefix(schedName);
-
-        _removed = FindMember(store, snap, schedName, _job, out var existing);
-        if (_removed)
+        if (BoxCommandSupport.Find(ctx, BoxKeys.Kind.Queue, _queue) is { } box)
         {
-            store.SortedSetRemove(batch, schedKey, existing);
-
-            // Drop the queue from the index set when its last schedule goes. Length is read
-            // from the snapshot, so it still counts the member we just staged for removal —
-            // remaining == 1 means this was the last.
-            var remaining = store.SortedSetLength(snap, schedKey);
-            if (remaining <= 1)
-                RegistrySupport.SetRemove(store, batch, HighwayNames.JobIndex, _queue);
+            using var _lock = BoxCommandSupport.Lock(ctx, box);
+            using var wb = BoxCommandSupport.Open(ctx, box, BoxKeys.Kind.Queue);
+            _removed = wb.RemoveSchedule(_job);
+            wb.Commit();
         }
-
-        batch.Commit();
         writer.Integer(_removed ? 1 : 0);
     }
 
-    private void RunList(CommandContext ctx, RespWriter writer)
+    private static void RunList(CommandContext ctx, RespWriter writer)
     {
-        var store = ctx.Store;
-        using var snap = store.Snapshot();
-
-        // Enumerate queues-with-schedules straight from the index set (no mirror, T3.3).
-        var queues = RegistrySupport.ReadSet(store, snap, HighwayNames.JobIndex);
-
         var rows = new List<IReadOnlyList<byte[]>>();
-        foreach (var queue in queues)
+        using var batch = ctx.Store.NewBatch();
+        foreach (var (_, queue, box) in Catalog.List(ctx.Store, batch, BoxKeys.Kind.Queue))
         {
-            var schedKey = HighwayKeyspace.SortedSetPrefix(HighwayNames.JobSchedules(queue));
-            foreach (var member in store.SortedSetRangeByScore(snap, schedKey, long.MinValue, long.MaxValue, 1024))
+            using var wb = BoxCommandSupport.Open(ctx, box, BoxKeys.Kind.Queue, batch);
+            foreach (var s in wb.Schedules())
             {
-                JobScheduleRecord.Decode(member, out var job, out var expr, out var lastFire, out var nextFire, out _);
                 rows.Add(
                 [
                     Encoding.UTF8.GetBytes(queue),
-                    Encoding.UTF8.GetBytes(job),
-                    Encoding.UTF8.GetBytes(expr),
-                    Encoding.UTF8.GetBytes(nextFire.ToString(CultureInfo.InvariantCulture)),
-                    Encoding.UTF8.GetBytes(lastFire.ToString(CultureInfo.InvariantCulture)),
+                    Encoding.UTF8.GetBytes(s.Job),
+                    Encoding.UTF8.GetBytes(s.Expression),
+                    Encoding.UTF8.GetBytes(s.NextFire.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    Encoding.UTF8.GetBytes(s.LastFire.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                 ]);
             }
         }
-
-        writer.ArrayOfArrays(rows);
+        if (rows.Count == 0) writer.EmptyArray();
+        else writer.ArrayOfArrays(rows);
     }
 
     protected override void AfterCommit(CommandContext ctx)
@@ -204,22 +162,5 @@ internal sealed class HwJobCommand : HighwayCommand
                     requestId: _job);
                 break;
         }
-    }
-
-    /// <summary>Scans the (small, topology-bounded) schedule set for a job by name.</summary>
-    private static bool FindMember(
-        IHighwayStore store, IStoreSnapshot snap, string schedName, string job, out byte[] member)
-    {
-        var schedKey = HighwayKeyspace.SortedSetPrefix(schedName);
-        foreach (var candidate in store.SortedSetRangeByScore(snap, schedKey, long.MinValue, long.MaxValue, 1024))
-        {
-            if (JobScheduleRecord.PeekName(candidate) == job)
-            {
-                member = candidate;
-                return true;
-            }
-        }
-        member = [];
-        return false;
     }
 }

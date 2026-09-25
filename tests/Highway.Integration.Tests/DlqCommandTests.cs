@@ -32,10 +32,10 @@ public class DlqCommandTests : IDisposable
         await db.ExecuteAsync("HW.CALL", Service, requestId, System.Text.Encoding.UTF8.GetBytes(payload));
         for (var i = 0; i < 4; i++)
         {
-            await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
+            await db.ClaimSvcAsync(Service, "node-a");
             await Task.Delay(70);
         }
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
+        await db.ClaimSvcAsync(Service, "node-a");
     }
 
     private long ListLength(string key) => _server.Inspect.ListLength(key);
@@ -90,11 +90,9 @@ public class DlqCommandTests : IDisposable
 
         // The attempt count was reset, so the request is deliverable again rather than
         // dead-lettering on its very next sweep.
-        var claimed = await db.ExecuteAsync("HW.DEQUEUE", Service, "node-b");
-        claimed.IsNull.Should().BeFalse("a requeued request must be claimable");
-
-        var arr = (RedisResult[])claimed!;
-        arr[0].ToString().Should().Be("requeue-1");
+        var claimed = await db.ClaimSvcAsync(Service, "node-b");
+        claimed.Should().NotBeNull("a requeued request must be claimable");
+        claimed!.Value.Id.Should().Be("requeue-1");
     }
 
     [Fact]
@@ -167,7 +165,7 @@ public class DlqCommandTests : IDisposable
         // HW.STATS resolves a name as a service only when the discovery index knows it,
         // so a host has to have registered. See Stats_OnAServiceWithNoRegisteredHost for
         // the gap this leaves.
-        await db.ExecuteAsync("HW.HEARTBEAT", "node-a",
+        await db.SessionAsync("node-a",
             $$"""{"services":[{"name":"{{Service}}","requestType":"R","responseType":"S"}],"channels":[]}""");
 
         await PoisonAsync(db, "stats-1");

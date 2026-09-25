@@ -98,20 +98,19 @@ public class CacheWireSurfaceTests
 
         var set = async () => await db.StringSetAsync("hw:cache:k", "v");
         (await set.Should().ThrowAsync<RedisServerException>())
-            .WithMessage("*not writable over the wire*", "a cache SET is refused when the cache is off");
+            .WithMessage("*not served*", "a cache SET is refused when the cache is off");
     }
 
     [Fact]
-    public async Task Enabled_IdempotencyAndReplyKeys_AreUnchanged()
+    public async Task Enabled_IdempotencyKeys_AreNotReachableRaw()
     {
         using var server = new HighwayTestServer(o => o.Cache.Enabled = true);
         var db = await ConnectAsync(server);
 
-        // Idempotency claim/record path still works alongside the cache family.
-        (await db.StringSetAsync("hw:idem:svc:req", "marker", TimeSpan.FromSeconds(30), When.NotExists))
-            .Should().BeTrue();
-        (await db.StringSetAsync("hw:idem:svc:req", "marker", TimeSpan.FromSeconds(30), When.NotExists))
-            .Should().BeFalse("the live idempotency marker blocks a second NX claim");
+        // 5.0: idempotency is HW.IDEM; its keys are not raw-writable even with the cache on.
+        var set = async () => await db.StringSetAsync("hw:idem:svc:req", "marker");
+        (await set.Should().ThrowAsync<RedisServerException>()).WithMessage("*served only for cache keys*");
+        (await db.ExecuteAsync("HW.IDEM", "BEGIN", "svc", "req", "30")).ToString().Should().Be("CLAIMED");
     }
 
     [Fact]
@@ -122,6 +121,6 @@ public class CacheWireSurfaceTests
 
         var set = async () => await db.StringSetAsync("some:random:key", "v");
         (await set.Should().ThrowAsync<RedisServerException>())
-            .WithMessage("*not writable over the wire*");
+            .WithMessage("*not reachable over the wire*");
     }
 }

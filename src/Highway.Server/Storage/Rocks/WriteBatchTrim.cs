@@ -24,7 +24,7 @@ internal static class WriteBatchTrim
     private const int HeaderSize = 12;
 
     /// <summary>
-    /// A copy of <paramref name="data"/>[..<paramref name="length"/>] without its operations below
+    /// A copy of <paramref name="batch"/> without its operations below
     /// <paramref name="startSeq"/>, re-headed at <paramref name="startSeq"/>. False when the batch cannot
     /// be parsed with certainty or does not contain <paramref name="startSeq"/>.
     /// </summary>

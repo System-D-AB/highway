@@ -33,8 +33,8 @@ public class BrokerStateTests
     private static async Task<QueueStateSnapshot> ReadQueuesAsync(HighwayTestServer server)
     {
         var db = ConnectionMultiplexer.Connect(server.ConnectionString).GetDatabase();
-        db.Execute("HW.QSEND", "bs.queue", "m-1", Envelope());
-        db.Execute("HW.QSEND", "bs.queue", "m-2", Envelope());
+        db.Send("bs.queue", "m-1", Envelope());
+        db.Send("bs.queue", "m-2", Envelope());
 
         var result = await server.ReadQueueStateAsync();
         return new QueueStateSnapshot(result.Unavailable, result.Rows);
@@ -133,7 +133,7 @@ public class BrokerStateTests
         using var server = new HighwayTestServer();
         var db = ConnectionMultiplexer.Connect(server.ConnectionString).GetDatabase();
 
-        db.Execute("HW.SUBSCRIBE", "bs.channel", "billing");
+        db.Subscribe("bs.channel", "billing");
         db.Execute("HW.PUBLISH", "bs.channel", Envelope());
 
         var result = await server.ReadQueueStateAsync();
@@ -147,7 +147,7 @@ public class BrokerStateTests
     {
         using var server = new HighwayTestServer();
         var db = ConnectionMultiplexer.Connect(server.ConnectionString).GetDatabase();
-        db.Execute("HW.QSEND", "bs.bytes", "m-1", Envelope());
+        db.Send("bs.bytes", "m-1", Envelope());
 
         var result = await server.ReadQueueStateAsync();
         var row = result.Rows.Single(r => r.Name == "bs.bytes");

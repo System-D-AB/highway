@@ -75,7 +75,7 @@ public class RespServerAuthTests
         await using var server = await StartWithUser("default", "s3cr3t");
         using var mux = await ConnectionMultiplexer.ConnectAsync(Config(server.Port, password: "s3cr3t"));
         mux.IsConnected.Should().BeTrue();
-        (await mux.GetDatabase().ExecuteAsync("HW.QSEND", "q", "m", "b")).ToString().Should().Be("OK");
+        (await mux.GetDatabase().ExecuteAsync("HW.SEND", "q", "m", "b")).ToString().Should().Be("OK");
     }
 
     [Fact]

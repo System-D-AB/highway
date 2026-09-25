@@ -20,92 +20,103 @@ namespace Highway.Server.Tests.Storage;
 /// </summary>
 public class InFlightChurnTests
 {
-    private static byte[][] F(params string[] t) => [.. t.Select(Encoding.UTF8.GetBytes)];
+    /// <summary>The pre-065 list push (a seq allocator + an ordered entry) — the list family still backs the registry.</summary>
+    private static void PushTail(IHighwayStore store, IStoreBatch batch, string listName, byte[] value)
+    {
+        var seq = store.Increment(batch, HighwayKeyspace.Counter(HighwayNames.ListSequence(listName)), 1) - 1;
+        store.ListRightPush(batch, HighwayKeyspace.ListEntry(listName, seq), value);
+    }
 
-    private sealed class NullBell : IDoorbell { public int Ring(string channel, ReadOnlySpan<byte> payload) => 0; }
+    /// <summary>The pre-065 head push (a descending low-water seq) — exercised by the head-hint model.</summary>
+    private static void PushHead(IHighwayStore store, IStoreBatch batch, string listName, byte[] value)
+    {
+        var seq = store.Increment(batch, HighwayKeyspace.Counter(HighwayNames.ListSequence(listName) + ":low"), -1);
+        store.ListLeftPush(batch, HighwayKeyspace.ListEntry(listName, seq), value);
+    }
 
-    private static (RocksDbStore Store, CommandDispatcher Dispatcher, string Dir) Broker()
+    private const long T0 = 638_000_000_000_000_000L;
+
+    private static (RocksDbStore Store, Highway.Server.Tests.Commands.CommandHarness H, string Dir) Broker(HighwayServerOptions? options = null)
     {
         var dir = ReplicationToolkitSurfaceTests.NewTempDir();
         var store = RocksDbStore.Open(dir);
-        var options = new HighwayServerOptions();
-        var dispatcher = new CommandDispatcher(
-            store, new StripedLock(), new NullBell(), new FlightRecorder(options.Observability), options, store.Replication);
-        return (store, dispatcher, dir);
+        return (store, new Highway.Server.Tests.Commands.CommandHarness(store, options ?? new HighwayServerOptions()), dir);
     }
 
-    private static List<byte[]> KeysUnder(RocksDbStore store, byte[] prefix)
+    private static List<(byte[] Key, byte[] Value)> InFlightRows(RocksDbStore store, uint box)
     {
         using var batch = store.NewBatch();
-        return [.. store.ListEntries(batch, prefix).Select(e => e.Key)];
+        var space = Highway.Server.Storage.Boxes.BoxKeys.Space(box, Highway.Server.Storage.Boxes.BoxKeys.InFlight);
+        return [.. store.Scan(batch, space, space, 1000)];
     }
 
     [Fact]
-    public void Ack_RemovesOnlyTheAckedEntry_AndLeavesTheOthersUnderTheirOwnKeys()
+    public void Ack_RemovesOnlyTheAckedClaim_AndLeavesTheOthersUntouched()
     {
-        var (store, d, dir) = Broker();
+        var (store, h, dir) = Broker();
         try
         {
+            var tokens = new List<string>();
             for (var i = 1; i <= 5; i++)
             {
-                d.Dispatch(F("HW.CALL", "svc.echo", "r" + i, "body"), new RespWriter());
-                d.Dispatch(F("HW.DEQUEUE", "svc.echo", "worker-1"), new RespWriter());
+                h.Run(new HwCallCommand(), T0, "svc.echo", "r" + i, "body");
+                tokens.Add(h.ClaimOne("SVC", "svc.echo", "worker-1", T0)!.Value.Token);
             }
-            var proc = HighwayKeyspace.ListPrefix(HighwayNames.ServiceProcessing("svc.echo", "worker-1"));
-            var before = KeysUnder(store, proc);
+            var box = uint.Parse(tokens[0].Split('.')[0]);
+            var before = InFlightRows(store, box);
             before.Should().HaveCount(5);
 
-            d.Dispatch(F("HW.ACK", "svc.echo", "worker-1", "r3"), new RespWriter());
+            Highway.Server.Tests.Commands.CommandHarness.AsText(h.Run(new HwAckCommand(), T0, tokens[2])).Should().Be(":1\r\n");
 
-            var after = KeysUnder(store, proc);
-            after.Should().HaveCount(4);
-            after.Should().BeEquivalentTo(before.Where((_, i) => i != 2), o => o.WithStrictOrdering(),
-                "the four survivors keep their keys and order — nothing is re-written (061 A1)");
+            var after = InFlightRows(store, box);
+            after.Select(r => Convert.ToHexString(r.Key) + Convert.ToHexString(r.Value))
+                .Should().Equal(before.Where((_, i) => i != 2).Select(r => Convert.ToHexString(r.Key) + Convert.ToHexString(r.Value)),
+                    "the four survivors keep their keys and bytes — an ack deletes one claim by key (061 A1, 065)");
         }
-        finally { store.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { h.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
     }
 
     [Fact]
     public void IdlePoll_WithCallsInFlight_WritesNothing()
     {
-        var (store, d, dir) = Broker();
+        var (store, h, dir) = Broker();
         try
         {
             for (var i = 1; i <= 8; i++)
             {
-                d.Dispatch(F("HW.CALL", "svc.echo", "r" + i, "body"), new RespWriter());
-                d.Dispatch(F("HW.DEQUEUE", "svc.echo", "worker-1"), new RespWriter());
+                h.Run(new HwCallCommand(), T0, "svc.echo", "r" + i, "body");
+                h.ClaimOne("SVC", "svc.echo", "worker-1", T0);
             }
             var sequence = store.Replication.Engine.GetLatestSequenceNumber();
 
             for (var i = 0; i < 20; i++)
-                d.Dispatch(F("HW.DEQUEUE", "svc.echo", "worker-1"), new RespWriter());   // empty queue, 8 in flight
+                h.ClaimOne("SVC", "svc.echo", "worker-1", T0 + i).Should().BeNull();   // empty queue, 8 in flight
 
             store.Replication.Engine.GetLatestSequenceNumber().Should().Be(sequence,
-                "an idle poll whose sweep finds nothing expired stages nothing, so nothing is written (061 A2)");
+                "an idle claim whose lease sweep finds nothing expired stages nothing, so nothing is written (061 A2)");
         }
-        finally { store.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { h.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
     }
 
     [Fact]
     public void DlqPeek_WritesNothing()
     {
-        var (store, d, dir) = Broker();
+        var (store, h, dir) = Broker(new HighwayServerOptions { Lease = TimeSpan.FromSeconds(10), MaxDeliveryAttempts = 1 });
         try
         {
-            using (var batch = store.NewBatch())
-            {
-                for (var i = 0; i < 5; i++)
-                    HwQSendCommand.PushTail(store, batch, HighwayNames.QueueDeadLetter("orders"), Encoding.UTF8.GetBytes("dead" + i));
-                batch.Commit();
-            }
+            var t = T0;
+            for (var i = 0; i < 5; i++) h.Run(new HwSendCommand(), t, "orders", "m" + i, "p");
+            for (var i = 0; i < 5; i++) h.ClaimOne("Q", "orders", "w", t);
+            h.ClaimOne("Q", "orders", "w", t += TimeSpan.FromSeconds(11).Ticks);   // attempt 1: redelivered
+            for (var i = 0; i < 5; i++) h.ClaimOne("Q", "orders", "w", t);
+            h.ClaimOne("Q", "orders", "w", t += TimeSpan.FromSeconds(11).Ticks).Should().BeNull("all five dead-lettered");
             var sequence = store.Replication.Engine.GetLatestSequenceNumber();
 
-            d.Dispatch(F("HW.DLQ", "PEEK", "Q", "orders"), new RespWriter());
+            Highway.Server.Tests.Commands.CommandHarness.AsText(h.Run(new HwDlqCommand(), t, "PEEK", "Q", "orders")).Should().StartWith("*5");
 
             store.Replication.Engine.GetLatestSequenceNumber().Should().Be(sequence, "PEEK is read-only (061 A1)");
         }
-        finally { store.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { h.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
     }
 
     [Theory]
@@ -138,13 +149,13 @@ public class InFlightChurnTests
                 if (roll < 40)
                 {
                     var value = "v" + counter++;
-                    HwQSendCommand.PushTail(store, batch, list, Encoding.UTF8.GetBytes(value));
+                    PushTail(store, batch, list, Encoding.UTF8.GetBytes(value));
                     if (!discard) model.Add(value);
                 }
                 else if (roll < 50)
                 {
                     var value = "h" + counter++;
-                    ConsumerSupport.PushHead(store, batch, list, Encoding.UTF8.GetBytes(value));
+                    PushHead(store, batch, list, Encoding.UTF8.GetBytes(value));
                     if (!discard) model.Insert(0, value);
                 }
                 else if (roll < 75)
@@ -219,14 +230,14 @@ public class InFlightChurnTests
                 {
                     using var batch = store.NewBatch();
                     for (var i = 0; i < 500; i++)
-                        HwQSendCommand.PushTail(store, batch, "churn", new byte[256]);
+                        PushTail(store, batch, "churn", new byte[256]);
                     batch.Commit();
                     using var drain = store.NewBatch();
                     store.ListDrain(drain, HighwayKeyspace.ListPrefix("churn"));
                     drain.Commit();
                 }
                 using var keep = store.NewBatch();
-                HwQSendCommand.PushTail(store, keep, "kept", Encoding.UTF8.GetBytes("survivor"));
+                PushTail(store, keep, "kept", Encoding.UTF8.GetBytes("survivor"));
                 keep.Commit();
             }
 
@@ -264,7 +275,7 @@ public class InFlightChurnTests
         {
             using (var batch = store.NewBatch())
             {
-                for (var i = 0; i < 100; i++) HwQSendCommand.PushTail(store, batch, "g", new byte[8]);
+                for (var i = 0; i < 100; i++) PushTail(store, batch, "g", new byte[8]);
                 batch.Commit();
             }
             using (var drain = store.NewBatch())
@@ -304,7 +315,7 @@ public class InFlightChurnTests
             const int popped = 5_000;
             using (var batch = store.NewBatch())
             {
-                for (var i = 0; i < popped + 3; i++) HwQSendCommand.PushTail(store, batch, "depth", new byte[8]);
+                for (var i = 0; i < popped + 3; i++) PushTail(store, batch, "depth", new byte[8]);
                 batch.Commit();
             }
             for (var i = 0; i < popped; i++)
@@ -324,7 +335,7 @@ public class InFlightChurnTests
             {
                 using (var poke = store.NewBatch())
                 {
-                    HwQSendCommand.PushTail(store, poke, "poke", new byte[8]);
+                    PushTail(store, poke, "poke", new byte[8]);
                     poke.Commit();
                 }
                 Thread.Sleep(50);

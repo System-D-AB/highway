@@ -3,6 +3,7 @@ using Highway.Server.Commands.Runtime;
 using Highway.Server.Internal;
 using Highway.Abstractions.Observability;
 using Highway.Server.Storage;
+using Highway.Server.Storage.Boxes;
 using Highway.Server.Storage.Layout;
 
 namespace Highway.Server.Commands.Ported;
@@ -73,104 +74,85 @@ internal sealed class HwPublishCommand : HighwayCommand
     {
         var store = ctx.Store;
 
-        using var _lock = ctx.Locks.Lock(_channel);
-        using var snap = store.Snapshot();
+        // 065: every group queue is its own box. Resolve them all first (catalog creation takes its own
+        // lock), then hold the channel and every group box together — in stripe order — so the fan-out is
+        // atomic and serializes against claims on those groups (before 3.0 publish locked only the channel
+        // while claims locked the group queue, and the two could race on the queue's sequence).
+        string[] groups;
+        using (var snap = store.Snapshot())
+            groups = ReadGroupNames(store, snap, _channel);
+        var boxes = groups.ToDictionary(g => g, g => BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, BoxCommandSupport.GroupQueue(_channel, g)));
+        using var _lock = ctx.Locks.LockMany([_channel, .. boxes.Values.Select(WorkBox.LockName)]);
 
-        // Group membership straight from the set — no mirror (T3.3). Members are the group names.
-        _groups = ReadGroupNames(store, snap, _channel);
-
+        using var snapshot = store.Snapshot();
+        _groups = ReadGroupNames(store, snapshot, _channel).Where(boxes.ContainsKey).ToArray();   // a group added since has no lock held: next publish
         using var batch = store.NewBatch();
-
-        // Per-channel monotone message id (the only Increment on the channel seq).
         _messageId = store.Increment(batch, HighwayKeyspace.Counter(HighwayNames.ChannelSeq(_channel)), 1);
         var messageIdBytes = Encoding.UTF8.GetBytes(_messageId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        var rpcEntry = Envelope.EncodeRpcEntry(messageIdBytes, _payloadBytes);
+        var entry = Envelope.EncodeRpcEntry(messageIdBytes, _payloadBytes);
 
-        if (_deliverAtTicks > ctx.NowTicks)
-        {
-            // Deferred: fan out into each group's delayed set. Delivered-now count is 0.
-            foreach (var group in _groups)
-            {
-                var derived = $"{_channel}@{group}";
-                store.SortedSetAdd(batch, HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed(derived)), _deliverAtTicks, rpcEntry);
-            }
-            batch.Commit();
-            _delivered = 0;
-            writer.Integer(0);
-            return;
-        }
+        var retired = new List<(BoxKeys.Kind, string, uint)>();
+        if (_groups.Length > 0 && ctx.Options.SubscriberRetirementThreshold > TimeSpan.Zero)
+            ClassifyAndRetireGroups(ctx, snapshot, batch, retired);
 
         if (_groups.Length == 0)
         {
-            // Nobody subscribed — delivered to nobody. That is what publish means.
             batch.Commit();
+            BoxCommandSupport.Forget(ctx, retired);
             _delivered = 0;
             writer.Integer(0);
             return;
         }
 
-        // Automatic retirement (017) rides on the publish: it already reads this channel's
-        // groups and is about to write to each. A group whose every backing node has stopped
-        // heartbeating past the threshold is retired first, so a dead subscriber cannot fail
-        // the budget check below for the living ones. Liveness evidence (member heartbeats),
-        // never a consumption gap — a group nobody consumed from is not dead.
-        if (ctx.Options.SubscriberRetirementThreshold > TimeSpan.Zero)
-            ClassifyAndRetireGroups(ctx, store, snap, batch);
-
-        if (_groups.Length == 0)
+        var targets = _groups.Select(g => BoxCommandSupport.Open(ctx, boxes[g], BoxKeys.Kind.Queue, batch)).ToList();
+        try
         {
-            // Every group was just retired — the message reaches nobody now.
-            batch.Commit();
-            _delivered = 0;
-            writer.Integer(0);
-            return;
-        }
-
-        // Check EVERY group's budget before writing ANY (018: all-or-none fan-out).
-        if (ctx.Options.MaxQueueBytes > 0)
-        {
-            foreach (var group in _groups)
+            if (ctx.Options.MaxQueueBytes > 0)
             {
-                var derived = $"{_channel}@{group}";
-                var used = store.ReadByteCounter(snap, HighwayNames.QueueBytes(derived));
-                if (used + rpcEntry.Length > ctx.Options.MaxQueueBytes)
+                for (var i = 0; i < targets.Count; i++)
                 {
-                    _refusedReason = $"group '{group}' at {used}/{ctx.Options.MaxQueueBytes} bytes";
+                    var used = targets[i].Bytes;
+                    if (used + entry.Length <= ctx.Options.MaxQueueBytes) continue;
+                    _refusedReason = $"group '{_groups[i]}' at {used}/{ctx.Options.MaxQueueBytes} bytes";
                     writer.Error(HighwayErrors.Format(
                         HighwayErrors.QueueFull,
-                        $"channel '{_channel}' refused: group '{group}' is at its limit " +
+                        $"channel '{_channel}' refused: group '{_groups[i]}' is at its limit " +
                         $"({used} of {ctx.Options.MaxQueueBytes} bytes). No group received this " +
                         "message - a publish reaches every registered group or none."));
-                    return; // batch disposed uncommitted → nothing written
+                    return;   // batch disposed uncommitted → nothing written
                 }
             }
-        }
 
-        foreach (var group in _groups)
+            var deferred = _deliverAtTicks > ctx.NowTicks;
+            foreach (var wb in targets)
+            {
+                if (deferred) wb.EnqueueDelayed(entry, _deliverAtTicks);
+                else wb.Enqueue(entry);
+            }
+            batch.Commit();
+            foreach (var wb in targets) wb.AfterCommit();
+            BoxCommandSupport.Forget(ctx, retired);
+
+            // A deferred publish has reached no group yet; it counts on promotion.
+            _delivered = deferred ? 0 : _groups.Length;
+            writer.Integer(_delivered);
+        }
+        finally
         {
-            var derived = $"{_channel}@{group}";
-            HwQSendCommand.PushTail(store, batch, HighwayNames.Queue(derived), rpcEntry);
-            store.AdjustByteCounter(batch, HighwayNames.QueueBytes(derived), rpcEntry.Length);
+            foreach (var wb in targets) wb.Dispose();
         }
-
-        batch.Commit();
-        _delivered = _groups.Length;
-        writer.Integer(_groups.Length);
     }
 
     /// <summary>
-    /// Classifies each group by its members' heartbeat staleness and retires the dead ones in
-    /// the caller's batch (017). A member with no registration record is NOT evidence of death
-    /// (a subscriber may never have registered a catalog); only a record that exists and has
-    /// gone stale counts. Groups past half the threshold become <see cref="_suspectGroups"/>.
-    /// Members come from the <c>grp:members</c> set (was a mirror); a group with no membership
-    /// predates 025 and its name is a node name (the 017 fallback).
+    /// Subscriber retirement (017): a group all of whose registered members have been silent past the
+    /// threshold is destroyed here, before the fan-out, and does not receive the message; one past half the
+    /// threshold is reported as suspect. A member with no registration record is not evidence of death.
     /// </summary>
-    private void ClassifyAndRetireGroups(CommandContext ctx, IHighwayStore store, IStoreSnapshot snap, IStoreBatch batch)
+    private void ClassifyAndRetireGroups(CommandContext ctx, IStoreSnapshot snap, IStoreBatch batch, List<(BoxKeys.Kind, string, uint)> retired)
     {
+        var store = ctx.Store;
         var threshold = ctx.Options.SubscriberRetirementThreshold;
         var halfThreshold = threshold / 2;
-
         var dead = new List<string>();
         var suspect = new List<string>();
 
@@ -183,15 +165,13 @@ internal sealed class HwPublishCommand : HighwayCommand
             var anyRecord = false;
             var allStale = true;
             var allPastHalf = true;
-
             foreach (var member in members)
             {
                 var record = store.Get(snap, HighwayKeyspace.Kv(HighwayNames.RegistrationNode(member)));
                 if (record is null || record.Length < NodeRegistration.HeaderSize)
-                    continue; // never registered — not evidence of death
-
+                    continue;
                 anyRecord = true;
-                var seen = RegistrySupport.SeenTicks(store, snap, member, record);   // 060: beat lives apart from the record
+                var seen = RegistrySupport.SeenTicks(store, snap, member, record);
                 if (!NodeRegistration.IsStale(seen, ctx.NowTicks, threshold)) allStale = false;
                 if (!NodeRegistration.IsStale(seen, ctx.NowTicks, halfThreshold)) allPastHalf = false;
             }
@@ -201,15 +181,13 @@ internal sealed class HwPublishCommand : HighwayCommand
         }
 
         _suspectGroups = [.. suspect];
-
         foreach (var group in dead)
         {
-            var destroyed = RegistrySupport.RetireGroup(store, snap, batch, _channel, group);
+            var destroyed = BoxCommandSupport.RetireGroup(ctx, batch, _channel, group, retired);
             _retiredGroups++;
             _retiredMessages += destroyed.Messages;
             _retiredBytes += destroyed.Bytes;
         }
-
         if (dead.Count > 0)
             _groups = [.. _groups.Where(g => !dead.Contains(g))];
     }

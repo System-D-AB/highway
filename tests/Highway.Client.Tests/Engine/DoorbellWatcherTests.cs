@@ -98,7 +98,6 @@ public class DoorbellWatcherTests
         await Task.Delay(50);
 
         // hw:door:rep is node-global — a node must ignore replies it did not request.
-        await _connection.DidNotReceive().GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
-        await _connection.DidNotReceive().DeleteReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _connection.DidNotReceive().TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 }

@@ -63,28 +63,28 @@ public class SessionStateIsolationTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        Assert.Throws<RedisServerException>(() => db.Execute("HW.SUBSCRIBE", "", "grp"));
+        Assert.Throws<RedisServerException>(() => db.Subscribe("", "grp"));
 
-        ((string)db.Execute("HW.SUBSCRIBE", "ch", "grp")!).Should().Be("OK");
+        ((string)db.Subscribe("ch", "grp")!).Should().Be("OK");
         ((long)db.Execute("HW.PUBLISH", "ch", "m")!).Should().Be(1);
     }
 
     /// <summary>
     /// The recorder made this visible: a claimed request ID left over from a
-    /// previous successful dequeue caused every subsequent NIL dequeue to
+    /// previous successful claim caused every subsequent empty claim to
     /// re-record a claim that never happened.
     /// </summary>
     [Fact]
-    public void NilDequeueAfterASuccessfulOne_RecordsNothingExtra()
+    public void EmptyClaimAfterASuccessfulOne_RecordsNothingExtra()
     {
         using var server = new HighwayTestServer();
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
         db.Execute("HW.CALL", "svc", "r1", "p");
-        db.Execute("HW.DEQUEUE", "svc", "node-1");
-        db.Execute("HW.DEQUEUE", "svc", "node-1").IsNull.Should().BeTrue();
-        db.Execute("HW.DEQUEUE", "svc", "node-1").IsNull.Should().BeTrue();
+        db.ClaimSvc("svc", "node-1").Should().NotBeNull();
+        db.ClaimSvc("svc", "node-1").Should().BeNull();
+        db.ClaimSvc("svc", "node-1").Should().BeNull();
 
         var claims = ((RedisResult[])db.Execute("HW.REPLAY", "svc")!)
             .Select(e =>
@@ -96,7 +96,7 @@ public class SessionStateIsolationTests
             })
             .Count(t => t == "RpcClaimed");
 
-        claims.Should().Be(1, "one request was claimed once; a nil dequeue claims nothing");
+        claims.Should().Be(1, "one request was claimed once; an empty claim claims nothing");
     }
 
     [Fact]
@@ -106,15 +106,14 @@ public class SessionStateIsolationTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.SUBSCRIBE", "ch", "grp");
+        db.Subscribe("ch", "grp");
         db.Execute("HW.PUBLISH", "ch", "m1");
         // Claim and ack the message via the derived queue
-        var claimed = db.Execute("HW.QCLAIM", "ch@grp", "node-1");
-        var msgId = (string)((RedisResult[])claimed!)[0]!;
-        db.Execute("HW.QACK", "ch@grp", "node-1", msgId);
-        // Next claim returns nil
-        db.Execute("HW.QCLAIM", "ch@grp", "node-1");
-        db.Execute("HW.QCLAIM", "ch@grp", "node-1");
+        var claimed = db.ClaimQ("ch@grp", "node-1");
+        db.Ack(claimed!.Value.Token).Should().Be(1);
+        // Next claims return nothing
+        db.ClaimQ("ch@grp", "node-1").Should().BeNull();
+        db.ClaimQ("ch@grp", "node-1").Should().BeNull();
 
         var received = ((RedisResult[])db.Execute("HW.REPLAY", "ch")!)
             .Select(e =>

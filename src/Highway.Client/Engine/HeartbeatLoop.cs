@@ -29,27 +29,23 @@ internal sealed class HeartbeatLoop
     private readonly string _nodeName;
     private readonly TimeSpan _interval;
     private readonly ILogger _logger;
-    private readonly byte[] _catalogJson;
+    private readonly SessionKeeper _session;
 
     public HeartbeatLoop(
         IHighwayConnection connection,
-        ICatalog catalog,
+        SessionKeeper session,
         string nodeName,
         TimeSpan interval,
         ILogger logger)
     {
         _connection = connection;
+        _session = session;
         _nodeName = nodeName;
         _interval = interval;
         _logger = logger;
-
-        // Serialized exactly once: the catalog cannot change for this node.
-        _catalogJson = JsonSerializer.SerializeToUtf8Bytes(
-            catalog.ToCatalogInfo(), HighwayJson.SerializerOptions);
     }
 
-    /// <summary>Catalog payload size, for diagnostics and tests.</summary>
-    public int CatalogBytes => _catalogJson.Length;
+    public int CatalogBytes => _session.CatalogBytes;
 
     /// <summary>
     /// Sends the registration form. The engine awaits this during startup, so a
@@ -63,13 +59,12 @@ internal sealed class HeartbeatLoop
     ///
     /// <para>Never throws: a node that cannot register is invisible, not broken.</para>
     /// </summary>
-    public Task RegisterAsync(CancellationToken ct = default) => TryRegisterAsync(ct);
 
     public async Task RunAsync(CancellationToken stopToken)
     {
         _logger.LogInformation(
             "Heartbeat starting for node '{Node}' (interval {Interval}, catalog {Bytes} bytes)",
-            _nodeName, _interval, _catalogJson.Length);
+            _nodeName, _interval, _session.CatalogBytes);
 
         while (!stopToken.IsCancellationRequested)
         {
@@ -85,11 +80,13 @@ internal sealed class HeartbeatLoop
             try
             {
                 var reply = await _connection.HeartbeatAsync(_nodeName, stopToken).ConfigureAwait(false);
-                if (reply == HeartbeatReply.ReRegisterRequired)
+                if (reply == HeartbeatReply.SessionRequired)
                 {
+                    // The broker lost this node's session (wiped, fresh, re-bootstrapped, or pruned):
+                    // declare all of it again — registration, subscriptions, jobs — at once.
                     _logger.LogInformation(
-                        "Server holds no registration for '{Node}' — re-registering", _nodeName);
-                    await TryRegisterAsync(stopToken).ConfigureAwait(false);
+                        "Broker holds no session for '{Node}' — re-establishing it", _nodeName);
+                    await _session.ReestablishAsync("broker answered +SESSION", stopToken).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)
@@ -129,23 +126,6 @@ internal sealed class HeartbeatLoop
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Departure announcement failed for '{Node}'; it will expire normally", _nodeName);
-        }
-    }
-
-    private async Task TryRegisterAsync(CancellationToken ct)
-    {
-        try
-        {
-            await _connection.RegisterAsync(_nodeName, _catalogJson, ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Shutting down.
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "Registration failed for '{Node}'; the next beat will retry via the re-register signal", _nodeName);
         }
     }
 }

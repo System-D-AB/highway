@@ -57,7 +57,7 @@ public class RespServerTlsTests
         using var mux = await ConnectionMultiplexer.ConnectAsync(config);
         mux.IsConnected.Should().BeTrue("SE.Redis with ssl=true must complete the TLS handshake and RESP handshake");
 
-        var reply = await mux.GetDatabase().ExecuteAsync("HW.QSEND", "secure-q", "m1", "body");
+        var reply = await mux.GetDatabase().ExecuteAsync("HW.SEND", "secure-q", "m1", "body");
         reply.ToString().Should().Be("OK");
     }
 
@@ -98,6 +98,6 @@ public class RespServerTlsTests
         var config = ConfigurationOptions.Parse($"localhost:{server.Port}");
         config.AbortOnConnectFail = true;
         using var mux = await ConnectionMultiplexer.ConnectAsync(config);
-        (await mux.GetDatabase().ExecuteAsync("HW.QSEND", "q", "m", "b")).ToString().Should().Be("OK");
+        (await mux.GetDatabase().ExecuteAsync("HW.SEND", "q", "m", "b")).ToString().Should().Be("OK");
     }
 }

@@ -111,8 +111,7 @@ public class FailureReporterTests
     {
         var connection = Substitute.For<IHighwayConnection>();
         connection
-            .FailAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
-                       Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .FailAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Throws(new InvalidOperationException("the broker is unreachable"));
 
         var log = new CapturingLogger();
@@ -121,7 +120,7 @@ public class FailureReporterTests
 
         // Must not throw. A consumer that dies because its diagnostics died is worse than one
         // with no diagnostics at all.
-        await reporter.ReportAsync(Target, "msg-1", original, "it will be redelivered");
+        await reporter.ReportAsync(Target, new ClaimedWork("tok-1", "msg-1", []), original, "it will be redelivered");
 
         // The original exception must still be visible - losing the diagnosis is survivable,
         // losing the thing being diagnosed is not.
@@ -130,23 +129,22 @@ public class FailureReporterTests
     }
 
     [Fact]
-    public async Task ASuccessfulReport_SendsTheWireKindForItsFamily()
+    public async Task ASuccessfulReport_NamesTheClaimByItsToken()
     {
         var connection = Substitute.For<IHighwayConnection>();
         connection
-            .FailAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
-                       Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .FailAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(true));
 
         var reporter = new FailureReporter(connection, NullLogger.Instance);
 
         await reporter.ReportAsync(
             new FailureTarget(FailureFamily.Channel, "orders.shipped", "billing"),
-            "42", new TimeoutException("t"), "acked anyway");
+            new ClaimedWork("17.42", "42", []), new TimeoutException("t"), "acked anyway");
 
+        // 5.0: the claim's token names it — no target grammar, scope or id on the wire.
         await connection.Received(1).FailAsync(
-            "Q", "orders.shipped", "billing", "42", "System.TimeoutException",
-            Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+            "17.42", "System.TimeoutException", Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

@@ -24,6 +24,13 @@ internal static class HighwayKeyspace
     private const byte TagSet = (byte)'s';    // membership sets
     private const byte TagCounter = (byte)'n'; // i64 counters (seq allocators, byte counters)
 
+    /// <summary>
+    /// Every family key lives inside the system box (065): <c>[box 0 : 4 bytes][space 0x10]</c> then the
+    /// family tag. Per-message queue structures live in their own boxes (<see cref="Boxes.BoxKeys"/>);
+    /// what stays here is the registry, pub/sub membership, reply slots, idempotency and the roster.
+    /// </summary>
+    internal static ReadOnlySpan<byte> FamiliesPrefix => [0, 0, 0, 0, 0x10];
+
     // A generous stack budget; KeyWriter grows to a pooled array only if a name is huge.
     private const int StackBudget = 256;
 
@@ -55,6 +62,7 @@ internal static class HighwayKeyspace
     {
         Span<byte> buffer = stackalloc byte[StackBudget];
         var writer = new KeyWriter(buffer);
+        writer.WriteBytes(FamiliesPrefix);
         writer.WriteByte(TagList);
         KeyEncoding.WriteString(name, ref writer);
         KeyEncoding.WriteSequence(seq, ref writer);
@@ -76,6 +84,7 @@ internal static class HighwayKeyspace
     {
         Span<byte> buffer = stackalloc byte[StackBudget];
         var writer = new KeyWriter(buffer);
+        writer.WriteBytes(FamiliesPrefix);
         writer.WriteByte(TagZset);
         KeyEncoding.WriteString(name, ref writer);
         KeyEncoding.WriteScore(score, ref writer);
@@ -87,6 +96,7 @@ internal static class HighwayKeyspace
     {
         Span<byte> buffer = stackalloc byte[StackBudget];
         var writer = new KeyWriter(buffer);
+        writer.WriteBytes(FamiliesPrefix);
         writer.WriteByte(TagZset);
         KeyEncoding.WriteString(name, ref writer);
         KeyEncoding.WriteScore(score, ref writer);
@@ -106,6 +116,7 @@ internal static class HighwayKeyspace
     {
         Span<byte> buffer = stackalloc byte[StackBudget];
         var writer = new KeyWriter(buffer);
+        writer.WriteBytes(FamiliesPrefix);
         writer.WriteByte(TagSet);
         KeyEncoding.WriteString(name, ref writer);
         writer.WriteBytes(member);
@@ -121,6 +132,7 @@ internal static class HighwayKeyspace
     {
         Span<byte> buffer = stackalloc byte[StackBudget];
         var writer = new KeyWriter(buffer);
+        writer.WriteBytes(FamiliesPrefix);
         writer.WriteByte(tag);
         KeyEncoding.WriteString(name, ref writer);
         return writer.ToArray();

@@ -23,7 +23,7 @@ public class ProducersTests
         CommandHarness.AsText(reply).Should().Be("+OK\r\n");
 
         using var snap = h.Store.Snapshot();
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.ServiceQueue("orders")))
+        new StoreInspector(h.Store).ListLength("hw:svc:orders:q")
             .Should().Be(1);
 
         h.Doorbell.Rings.Should().ContainSingle();
@@ -102,8 +102,8 @@ public class ProducersTests
         CommandHarness.AsText(reply).Should().Be(":2\r\n", "delivered to two groups");
 
         using var snap = h.Store.Snapshot();
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@billing"))).Should().Be(1);
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@shipping"))).Should().Be(1);
+        new StoreInspector(h.Store).ListLength("hw:q:news@billing:q").Should().Be(1);
+        new StoreInspector(h.Store).ListLength("hw:q:news@shipping:q").Should().Be(1);
 
         // Rings each group's derived doorbell.
         h.Doorbell.Rings.Select(r => r.Channel).Should().BeEquivalentTo(
@@ -139,9 +139,9 @@ public class ProducersTests
         CommandHarness.AsText(reply).Should().Be(":0\r\n", "nothing delivered now");
 
         using var snap = h.Store.Snapshot();
-        h.Store.SortedSetLength(snap, HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed("news@g1")))
+        new StoreInspector(h.Store).SortedSetCount("hw:q:news@g1:delayed")
             .Should().Be(1);
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@g1")))
+        new StoreInspector(h.Store).ListLength("hw:q:news@g1:q")
             .Should().Be(0);
         h.Doorbell.Rings.Should().BeEmpty("deferred publish wakes nobody");
     }
@@ -159,8 +159,8 @@ public class ProducersTests
 
         using var snap = h.Store.Snapshot();
         // All-or-none: neither group received it.
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@g1"))).Should().Be(0);
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("news@g2"))).Should().Be(0);
+        new StoreInspector(h.Store).ListLength("hw:q:news@g1:q").Should().Be(0);
+        new StoreInspector(h.Store).ListLength("hw:q:news@g2:q").Should().Be(0);
         h.Doorbell.Rings.Should().BeEmpty();
     }
 }

@@ -42,6 +42,10 @@ internal sealed class CommandDispatcher
     private readonly Highway.Server.Storage.Cache.IHighwayCacheStore? _cache;
     private readonly HighwayMetrics? _metrics;
     private readonly SweepThrottle _sweeps = new();   // 061 A2: one per server
+    private readonly Storage.Boxes.BoxRuntime _boxes = new();   // 065: catalog cache + time floors, one per server
+
+    /// <summary>The box runtime (065) — exposed for readers outside commands (broker state, inspection).</summary>
+    internal Storage.Boxes.BoxRuntime Boxes => _boxes;
 
     public CommandDispatcher(
         IHighwayStore store,
@@ -62,6 +66,8 @@ internal sealed class CommandDispatcher
         _cache = cache;
         _metrics = metrics;
         _commands = BuildRegistry();
+        // A new epoch is a new history: cached box ids and floors may describe the old one.
+        if (replication is not null) replication.OnEpochChanged += _boxes.Reset;
     }
 
     /// <summary>
@@ -104,107 +110,6 @@ internal sealed class CommandDispatcher
     /// Highway client touches a bare key rather than an <c>HW.*</c> command. Garnet served these as an
     /// ordinary key; the RESP server maps them onto the reply-slot store (<see cref="HighwayNames.ReplySlot"/>)
     /// so the client stays unmodified (037 R1 / D2).
-    /// </summary>
-    public const string ReplyKeyPrefix = "hw:rep:";
-
-    /// <summary>
-    /// Reads a reply slot by its wire key (<c>hw:rep:{requestId}</c>), honouring expiry
-    /// (<see cref="IHighwayStore.GetLive"/>). Returns null when absent or expired. The clock is read
-    /// once, here — the store never reads a wall clock (037 R5.1).
-    /// </summary>
-    public byte[]? ReadReplySlot(string wireKey)
-    {
-        var requestId = wireKey[ReplyKeyPrefix.Length..];
-        using var snap = _store.Snapshot();
-        return _store.GetLive(snap, HighwayKeyspace.Kv(HighwayNames.ReplySlot(requestId)), DateTime.UtcNow.Ticks);
-    }
-
-    /// <summary>Deletes a reply slot by its wire key (<c>hw:rep:{requestId}</c>) — the caller collecting its reply.</summary>
-    public void DeleteReplySlot(string wireKey)
-    {
-        var requestId = wireKey[ReplyKeyPrefix.Length..];
-        using var batch = _store.NewBatch();
-        _store.Delete(batch, HighwayKeyspace.Kv(HighwayNames.ReplySlot(requestId)));
-        batch.Commit();
-    }
-
-    /// <summary>
-    /// The client's idempotency keys (<c>hw:idem:{name}:{id}</c> — see
-    /// <c>HighwayConnection.IdempotencyKey</c>): the second and last place a Highway client
-    /// touches bare keys (<c>SET … PX … NX</c> to claim, <c>GET</c> to read a prior outcome,
-    /// <c>SET … PX</c> to record it, <c>DEL</c> to release). Garnet served these as ordinary
-    /// keys; the RESP server maps them onto the KV family so the client stays unmodified
-    /// (037 R1 / D2) — found by the 040 fixture swap's idempotency tests.
-    /// </summary>
-    public const string IdempotencyKeyPrefix = "hw:idem:";
-
-    private static byte[] IdemStoreKey(string wireKey)
-        => HighwayKeyspace.Kv(wireKey[3..]); // strip "hw:" — the same convention every name follows
-
-    /// <summary>
-    /// <c>SET</c> on an idempotency key. <paramref name="pxMilliseconds"/> maps to the KV
-    /// expiry (absolute, computed here — the store never reads a clock, 037 R5.1);
-    /// <paramref name="notExists"/> is the NX claim. Returns false when NX found a live value.
-    /// The per-key stripe serializes concurrent claims for the same id.
-    /// </summary>
-    public bool WriteIdempotencyKey(string wireKey, byte[] value, long? pxMilliseconds, bool notExists)
-    {
-        var now = DateTime.UtcNow.Ticks;
-        using var _ = _locks.Lock(wireKey);
-
-        if (notExists)
-        {
-            using var snap = _store.Snapshot();
-            if (_store.GetLive(snap, IdemStoreKey(wireKey), now) is not null) return false;
-        }
-
-        using var batch = _store.NewBatch();
-        if (pxMilliseconds is { } px)
-            _store.SetEx(batch, IdemStoreKey(wireKey), value, now + px * TimeSpan.TicksPerMillisecond);
-        else
-            _store.Set(batch, IdemStoreKey(wireKey), value);
-        batch.Commit();
-        return true;
-    }
-
-    /// <summary>Reads an idempotency key, honouring expiry. Null when absent or expired.</summary>
-    public byte[]? ReadIdempotencyKey(string wireKey)
-    {
-        using var snap = _store.Snapshot();
-        return _store.GetLive(snap, IdemStoreKey(wireKey), DateTime.UtcNow.Ticks);
-    }
-
-    /// <summary>
-    /// Remaining time-to-live of an idempotency key in milliseconds: -2 when absent or
-    /// expired, -1 when it has no expiry (Redis PTTL semantics). Reads the expiry out of
-    /// the KV framing; serves the suite's marker-expiry assertions.
-    /// </summary>
-    public long ReadIdempotencyTtlMs(string wireKey)
-    {
-        var now = DateTime.UtcNow.Ticks;
-        using var snap = _store.Snapshot();
-
-        // Raw read + the shared framing (no seam change): the framed header carries the
-        // absolute expiry; a plain value has none; an expired or absent key is gone.
-        var framed = _store.Get(snap, IdemStoreKey(wireKey));
-        if (framed is null || ExpiryFraming.Unwrap(framed, now) is null) return -2;
-        var expiresAt = ExpiryFraming.TryReadExpiry(framed);
-        return expiresAt is null ? -1 : Math.Max(0, (expiresAt.Value - now) / TimeSpan.TicksPerMillisecond);
-    }
-
-    /// <summary>Deletes an idempotency key — the client releasing a claim after a failure.</summary>
-    public void DeleteIdempotencyKey(string wireKey)
-    {
-        using var batch = _store.NewBatch();
-        _store.Delete(batch, IdemStoreKey(wireKey));
-        batch.Commit();
-    }
-
-    /// <summary>
-    /// The broker-local cache keys (<c>hw:cache:*</c>, feature 044): the third and last raw-key
-    /// family the server routes. Served only when the cache is enabled; it lives in a separate,
-    /// non-replicated store, so these methods never touch the replicated <see cref="IHighwayStore"/>.
-    /// The app key is the wire key with the <c>hw:cache:</c> prefix stripped.
     /// </summary>
     public const string CacheKeyPrefix = "hw:cache:";
 
@@ -297,7 +202,7 @@ internal sealed class CommandDispatcher
         var args = new byte[frame.Count - 1][];
         for (var i = 1; i < frame.Count; i++) args[i - 1] = frame[i];
 
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps, _boxes);
         var command = entry.Factory();
 
         // HW.CALL carries the RPC request/latency instruments (051 R1): time the server-side
@@ -326,22 +231,22 @@ internal sealed class CommandDispatcher
     {
         ["HW.CALL"]        = new(4,  () => new HwCallCommand()),
         ["HW.REPLY"]       = new(3,  () => new HwReplyCommand()),
-        ["HW.DEQUEUE"]     = new(3,  () => new HwDequeueCommand()),
-        ["HW.ACK"]         = new(4,  () => new HwAckCommand()),
-        ["HW.SUBSCRIBE"]   = new(-3, () => new HwSubscribeCommand()),
-        ["HW.UNSUBSCRIBE"] = new(3,  () => new HwUnsubscribeCommand()),
+        ["HW.RESULT"]      = new(2,  () => new HwResultCommand()),
+        ["HW.SEND"]        = new(-4, () => new HwSendCommand()),
         ["HW.PUBLISH"]     = new(-3, () => new HwPublishCommand()),
+        ["HW.CLAIM"]       = new(-4, () => new HwClaimCommand()),
+        ["HW.ACK"]         = new(2,  () => new HwAckCommand()),
+        ["HW.TOUCH"]       = new(2,  () => new HwTouchCommand()),
+        ["HW.FAIL"]        = new(4,  () => new HwFailCommand()),
+        ["HW.DLQ"]         = new(-3, () => new HwDlqCommand()),
+        ["HW.IDEM"]        = new(-4, () => new HwIdemCommand()),
+        ["HW.SESSION"]     = new(3,  () => new HwSessionCommand()),
         ["HW.HEARTBEAT"]   = new(-2, () => new HwHeartbeatCommand()),
+        ["HW.UNSUBSCRIBE"] = new(3,  () => new HwUnsubscribeCommand()),
+        ["HW.JOB"]         = new(-2, () => new HwJobCommand()),
         ["HW.DISCOVER"]    = new(2,  () => new HwDiscoverCommand()),
         ["HW.STATS"]       = new(-1, () => new HwStatsCommand()),
         ["HW.REPLAY"]      = new(-2, () => new HwReplayCommand()),
-        ["HW.DLQ"]         = new(-3, () => new HwDlqCommand()),
-        ["HW.QSEND"]       = new(-4, () => new HwQSendCommand()),
-        ["HW.QCLAIM"]      = new(3,  () => new HwQClaimCommand()),
-        ["HW.QACK"]        = new(4,  () => new HwQAckCommand()),
-        ["HW.FAIL"]        = new(7,  () => new HwFailCommand()),
-        ["HW.TOUCH"]       = new(5,  () => new HwTouchCommand()),
-        ["HW.JOB"]         = new(-2, () => new HwJobCommand()),
         ["HW.REPL.HELLO"]  = new(-4, () => new HwReplHelloCommand()),
         ["HW.REPL.PULL"]   = new(3,  () => new HwReplPullCommand()),
         ["HW.REPL.ACK"]    = new(3,  () => new HwReplAckCommand()),
@@ -379,7 +284,7 @@ internal sealed class CommandDispatcher
     /// up so standbys catch the tail before the stand-down.
     /// </summary>
     private static bool AllowedWhileDraining(string name)
-        => name is "HW.REPLY" or "HW.ACK" or "HW.QACK" or "HW.FAIL" or "HW.TOUCH"
+        => name is "HW.REPLY" or "HW.RESULT" or "HW.ACK" or "HW.FAIL" or "HW.TOUCH" or "HW.IDEM"
             or "HW.REPL.PULL" or "HW.REPL.ACK" or "HW.REPL.SNAPSHOT"
             || AllowedWhenNotWritable(name, ReplicaRole.Primary);
 

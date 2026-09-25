@@ -154,8 +154,8 @@ public class ReplicationTailTests
                 {
                     using var b = store.NewBatch();
                     for (var n = rng.Next(1, 4); n > 0; n--)
-                        HwQSendCommand.PushTail(store, b, $"w{worker}", new byte[rng.Next(1, 200)]);
-                    if (i % 5 == 0) store.ListLeftPop(b, Highway.Server.Storage.Layout.HighwayKeyspace.ListPrefix($"w{worker}"));
+                        store.Set(b, Highway.Server.Storage.Layout.HighwayKeyspace.Kv($"w{worker}:{i}:{n}"), new byte[rng.Next(1, 200)]);
+                    if (i % 5 == 0) store.Delete(b, Highway.Server.Storage.Layout.HighwayKeyspace.Kv($"w{worker}:{i - 1}:1"));
                     b.Commit();
                 }
             });
@@ -242,7 +242,7 @@ public class ReplicationTailTests
                 {
                     behind = feeder.Engine.GetLatestSequenceNumber();   // a replica's cursor sits on a batch boundary
                     using var b = store.NewBatch();
-                    HwQSendCommand.PushTail(store, b, "q" + (written % 7), payload);
+                    store.Set(b, Highway.Server.Storage.Layout.HighwayKeyspace.Kv("q" + written), payload);
                     b.Commit();
                 }
                 var latest = feeder.Engine.GetLatestSequenceNumber();

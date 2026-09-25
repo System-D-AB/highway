@@ -49,7 +49,7 @@ public class RespServerDoorbellTests
             (_, value) => received.TrySetResult(value.ToString()));
 
         // A separate command path enqueues — HW.QSEND rings hw:door:q:invoices post-commit.
-        await mux.GetDatabase().ExecuteAsync("HW.QSEND", "invoices", "m-42", "body");
+        await mux.GetDatabase().ExecuteAsync("HW.SEND", "invoices", "m-42", "body");
 
         var completed = await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(5)));
         completed.Should().Be(received.Task, "the subscriber must receive the doorbell within the timeout");
@@ -81,7 +81,7 @@ public class RespServerDoorbellTests
         var (server, _) = await StartAsync();
         await using var _server = server;
         using var mux = await ConnectionMultiplexer.ConnectAsync(Config(server.Port));
-        (await mux.GetDatabase().ExecuteAsync("HW.QSEND", "lonely", "m1", "b")).ToString().Should().Be("OK");
+        (await mux.GetDatabase().ExecuteAsync("HW.SEND", "lonely", "m1", "b")).ToString().Should().Be("OK");
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public class RespServerDoorbellTests
         await using var _server = server;
         using var mux = await ConnectionMultiplexer.ConnectAsync(Config(server.Port));
 
-        await mux.GetDatabase().ExecuteAsync("HW.QSEND", "invoices", "m1", "body");
+        await mux.GetDatabase().ExecuteAsync("HW.SEND", "invoices", "m1", "body");
         await mux.GetDatabase().ExecuteAsync("HW.CALL", "orders", "req-1", "payload");
         await mux.GetDatabase().ExecuteAsync("HW.REPLY", "req-1", "answer");
 
@@ -122,7 +122,7 @@ public class RespServerDoorbellTests
         muxB.Dispose(); // B vanishes
 
         using var producer = await ConnectionMultiplexer.ConnectAsync(Config(server.Port));
-        await producer.GetDatabase().ExecuteAsync("HW.QSEND", "shared", "m-1", "b");
+        await producer.GetDatabase().ExecuteAsync("HW.SEND", "shared", "m-1", "b");
 
         var completed = await Task.WhenAny(receivedA.Task, Task.Delay(TimeSpan.FromSeconds(5)));
         completed.Should().Be(receivedA.Task, "A still receives the doorbell even though B disconnected");

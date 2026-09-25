@@ -23,8 +23,11 @@ public class ClientMetricsTests
             {
                 InstrumentPublished = (inst, l) => { if (inst.Meter.Name == HighwayClientMetrics.MeterName) l.EnableMeasurementEvents(inst); },
             };
-            _listener.SetMeasurementEventCallback<long>((inst, m, tags, _) => Longs.Add((inst.Name, m, tags.ToArray())));
-            _listener.SetMeasurementEventCallback<double>((inst, _, _, _) => Doubles.Add(inst.Name));
+            // The meter is process-wide: while this listener runs it also receives measurements that
+            // tests running in parallel record on other threads. List<T> is not safe for concurrent
+            // adds — an unguarded Add lost one of this test's own two failovers under load.
+            _listener.SetMeasurementEventCallback<long>((inst, m, tags, _) => { lock (Longs) Longs.Add((inst.Name, m, tags.ToArray())); });
+            _listener.SetMeasurementEventCallback<double>((inst, _, _, _) => { lock (Doubles) Doubles.Add(inst.Name); });
             _listener.Start();
         }
 

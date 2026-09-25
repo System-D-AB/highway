@@ -38,8 +38,9 @@ public class FlightRecorderTests
         var db = redis.GetDatabase();
 
         db.Execute("HW.CALL", "orders.create", "req-1", "the-payload");
-        db.Execute("HW.DEQUEUE", "orders.create", "node-1");
-        db.Execute("HW.ACK", "orders.create", "node-1", "req-1");
+        var claim = db.ClaimSvc("orders.create", "node-1");
+        claim.Should().NotBeNull();
+        db.Ack(claim!.Value.Token).Should().Be(1);
 
         var events = Replay(db, "orders.create");
 
@@ -81,10 +82,10 @@ public class FlightRecorderTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.SUBSCRIBE", "orders.placed", "grp-1");
+        db.Subscribe("orders.placed", "grp-1");
         db.Execute("HW.PUBLISH", "orders.placed", "m1");
         db.Execute("HW.PUBLISH", "orders.placed", "m2");
-        db.Execute("HW.QCLAIM", "orders.placed@grp-1", "node-1");
+        db.ClaimQ("orders.placed@grp-1", "node-1");
 
         var events = Replay(db, "orders.placed").Select(Fields).ToList();
 
@@ -101,7 +102,7 @@ public class FlightRecorderTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "node-1", Catalog);   // registration — recorded
+        db.Register("node-1", Catalog);                  // registration (HW.SESSION) — recorded
         for (var i = 0; i < 10; i++)
             db.Execute("HW.HEARTBEAT", "node-1");        // liveness — noise
 
@@ -175,9 +176,9 @@ public class FlightRecorderTests
         var db = redis.GetDatabase();
 
         db.Execute("HW.CALL", "orders.create", "r1", "p");
-        db.Execute("HW.DEQUEUE", "orders.create", "node-a");
+        db.ClaimSvc("orders.create", "node-a");
         db.Execute("HW.CALL", "orders.create", "r2", "p");
-        db.Execute("HW.DEQUEUE", "orders.create", "node-b");
+        db.ClaimSvc("orders.create", "node-b");
 
         Replay(db, "orders.create", "LIMIT", "2").Should().HaveCount(2);
         Replay(db, "orders.create", "FROM", "-5min").Should().HaveCount(4);
@@ -257,7 +258,7 @@ public class FlightRecorderTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.HEARTBEAT", "node-1", RecorderNamedCatalog);
+        db.Register("node-1", RecorderNamedCatalog);
 
         Fields(db.Execute("HW.STATS", "recorder"))["kind"].Should().Be("recorder",
             "RECORDER is reserved, matched case-insensitively, and takes priority");

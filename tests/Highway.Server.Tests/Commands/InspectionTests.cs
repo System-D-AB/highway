@@ -15,15 +15,15 @@ public class InspectionTests
     private static void DeadLetterOne(CommandHarness h, string queue, string id)
     {
         var t = 1_000_000_000L;
-        h.Run(new HwQSendCommand(), t, queue, id, "payload");
+        h.Run(new HwSendCommand(), t, queue, id, "payload");
         // Claim + expire repeatedly until it exceeds MaxDeliveryAttempts (default 5).
         for (var attempt = 0; attempt < 7; attempt++)
         {
-            h.Run(new HwQClaimCommand(), t, queue, "node-A");
+            h.Run(new HwClaimCommand(), t, "Q", queue, "node-A");
             t += System.TimeSpan.FromMinutes(6).Ticks; // past the 5-min lease
         }
         // A final claim runs the sweep that dead-letters it.
-        h.Run(new HwQClaimCommand(), t, queue, "node-B");
+        h.Run(new HwClaimCommand(), t, "Q", queue, "node-B");
     }
 
     // ---------------- HW.STATS (the parity target) ----------------
@@ -32,9 +32,9 @@ public class InspectionTests
     public void Stats_Queue_ReportsDepthFromRangeCount()
     {
         using var h = new CommandHarness();
-        h.Run(new HwQSendCommand(), "invoices", "m1", "a");
-        h.Run(new HwQSendCommand(), "invoices", "m2", "b");
-        h.Run(new HwQSendCommand(), "invoices", "m3", "c");
+        h.Run(new HwSendCommand(), "invoices", "m1", "a");
+        h.Run(new HwSendCommand(), "invoices", "m2", "b");
+        h.Run(new HwSendCommand(), "invoices", "m3", "c");
 
         var reply = CommandHarness.AsText(h.Run(new HwStatsCommand(), "Q:invoices"));
 
@@ -47,9 +47,9 @@ public class InspectionTests
     public void Stats_Queue_InFlightCountsProcessingLists()
     {
         using var h = new CommandHarness();
-        h.Run(new HwQSendCommand(), "q", "m1", "a");
-        h.Run(new HwQSendCommand(), "q", "m2", "b");
-        h.Run(new HwQClaimCommand(), "q", "node-A"); // one in flight
+        h.Run(new HwSendCommand(), "q", "m1", "a");
+        h.Run(new HwSendCommand(), "q", "m2", "b");
+        h.Run(new HwClaimCommand(), "Q", "q", "node-A"); // one in flight
 
         var reply = CommandHarness.AsText(h.Run(new HwStatsCommand(), "Q:q"));
         reply.Should().Contain("inFlight").And.Contain("1");
@@ -96,7 +96,7 @@ public class InspectionTests
 
         // Peek is non-destructive: the DLQ still has the entry.
         using var snap = h.Store.Snapshot();
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.QueueDeadLetter("invoices")))
+        new StoreInspector(h.Store).ListLength("hw:q:invoices:dlq")
             .Should().Be(1);
     }
 
@@ -110,8 +110,8 @@ public class InspectionTests
         CommandHarness.AsText(reply).Should().Be(":1\r\n");
 
         using var snap = h.Store.Snapshot();
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.QueueDeadLetter("invoices"))).Should().Be(0);
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.Queue("invoices"))).Should().Be(1);
+        new StoreInspector(h.Store).ListLength("hw:q:invoices:dlq").Should().Be(0);
+        new StoreInspector(h.Store).ListLength("hw:q:invoices:q").Should().Be(1);
     }
 
     [Fact]
@@ -124,7 +124,7 @@ public class InspectionTests
         CommandHarness.AsText(reply).Should().Be(":1\r\n");
 
         using var snap = h.Store.Snapshot();
-        h.Store.ListLength(snap, HighwayKeyspace.ListPrefix(HighwayNames.QueueDeadLetter("invoices"))).Should().Be(0);
+        new StoreInspector(h.Store).ListLength("hw:q:invoices:dlq").Should().Be(0);
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public class InspectionTests
     {
         using var h = new CommandHarness();
         // A send records a QueueSent event under the queue name.
-        h.Run(new HwQSendCommand(), "invoices", "m1", "payload");
+        h.Run(new HwSendCommand(), "invoices", "m1", "payload");
 
         var reply = CommandHarness.AsText(h.Run(new HwReplayCommand(), "invoices"));
         // Array of event field arrays; the QueueSent event carries the requestId.

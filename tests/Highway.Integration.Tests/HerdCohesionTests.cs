@@ -97,12 +97,8 @@ public class HerdCohesionTests : IDisposable
         using var mux = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = mux.GetDatabase();
         var ids = new List<string>();
-        while (true)
-        {
-            var claimed = db.Execute("HW.QCLAIM", queue, "drain-worker");
-            if (claimed.IsNull) break;
-            ids.Add((string)((RedisResult[])claimed!)[0]!);
-        }
+        while (db.ClaimQ(queue, "drain-worker") is { } claimed)
+            ids.Add(claimed.Id);
         return ids;
     }
 

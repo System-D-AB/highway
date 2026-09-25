@@ -46,14 +46,12 @@ internal sealed class QueueWorkerLoop : SingleMessageWorkerLoop
     // eventually dead-letters if it can never succeed.
     protected override string FailureDisposition => "it will be redelivered";
 
-    protected override async Task<(string Id, byte[] Payload)?> ClaimAsync(CancellationToken stopToken)
-    {
-        var claimed = await Connection.QClaimAsync(_descriptor.Name, NodeName, stopToken).ConfigureAwait(false);
-        return claimed is null ? null : (claimed.Value.MessageId, claimed.Value.Payload);
-    }
+    protected override Task<ClaimedWork?> ClaimAsync(CancellationToken stopToken)
+        => Connection.ClaimAsync(WorkKind.Queue, _descriptor.Name, NodeName, stopToken);
 
-    protected override async Task ProcessAsync(string messageId, byte[] payload, CancellationToken ct)
+    protected override async Task ProcessAsync(ClaimedWork work, CancellationToken ct)
     {
+        var (token, messageId, payload) = work;
         object? message;
         try
         {
@@ -88,7 +86,7 @@ internal sealed class QueueWorkerLoop : SingleMessageWorkerLoop
                 case IdempotencyOutcome.Duplicate:
                     Logger.LogDebug("Suppressed a duplicate delivery of '{MessageId}' on queue '{Queue}'",
                         messageId, _descriptor.Name);
-                    await Connection.QAckAsync(_descriptor.Name, NodeName, messageId, ct).ConfigureAwait(false);
+                    await Connection.AckAsync(token, ct).ConfigureAwait(false);
                     return;
 
                 case IdempotencyOutcome.InProgress:
@@ -111,6 +109,6 @@ internal sealed class QueueWorkerLoop : SingleMessageWorkerLoop
                 .ConfigureAwait(false);
         }
 
-        await Connection.QAckAsync(_descriptor.Name, NodeName, messageId, ct).ConfigureAwait(false);
+        await Connection.AckAsync(token, ct).ConfigureAwait(false);
     }
 }

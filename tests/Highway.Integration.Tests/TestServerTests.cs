@@ -43,14 +43,13 @@ public class TestServerTests
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.SUBSCRIBE", "ch", "grp");
+        db.Subscribe("ch", "grp");
         db.Execute("HW.PUBLISH", "ch", "m1");
         db.Execute("HW.PUBLISH", "ch", "m2");
         db.Execute("HW.PUBLISH", "ch", "m3");
 
-        // Use HW.QCLAIM to verify messages were enqueued to the derived queue
-        var claimed = db.Execute("HW.QCLAIM", "ch@grp", "node-1");
-        claimed.IsNull.Should().BeFalse();
+        // Use HW.CLAIM Q to verify messages were enqueued to the derived queue
+        db.ClaimQ("ch@grp", "node-1").Should().NotBeNull();
     }
 
     [Fact]
@@ -88,8 +87,7 @@ public class TestServerTests
         using (var redis = ConnectionMultiplexer.Connect(server.ConnectionString))
         {
             var db = redis.GetDatabase();
-            var result = db.Execute("HW.DEQUEUE", "restart.svc", "node-1");
-            result.IsNull.Should().BeTrue("memory-only state is lost across restart");
+            db.ClaimSvc("restart.svc", "node-1").Should().BeNull("memory-only state is lost across restart");
         }
     }
 
@@ -111,11 +109,10 @@ public class TestServerTests
 
             using (var redis = ConnectionMultiplexer.Connect(connectionString))
             {
-                var result = redis.GetDatabase().Execute("HW.DEQUEUE", "durable.svc", "node-1");
-                result.IsNull.Should().BeFalse("AOF state must survive restart with a data directory");
-                var arr = (RedisResult[])result!;
-                ((string)arr[0]!).Should().Be("req-1");
-                ((string)arr[1]!).Should().Be("survivor");
+                var result = redis.GetDatabase().ClaimSvc("durable.svc", "node-1");
+                result.Should().NotBeNull("AOF state must survive restart with a data directory");
+                result!.Value.Id.Should().Be("req-1");
+                result.Value.PayloadText.Should().Be("survivor");
             }
         }
         finally
@@ -137,11 +134,11 @@ public class TestServerTests
 
         redisA.GetDatabase().Execute("HW.CALL", "iso.svc", "req-A", "payload-A");
 
-        var fromA = redisA.GetDatabase().Execute("HW.DEQUEUE", "iso.svc", "node-1");
-        var fromB = redisB.GetDatabase().Execute("HW.DEQUEUE", "iso.svc", "node-1");
+        var fromA = redisA.GetDatabase().ClaimSvc("iso.svc", "node-1");
+        var fromB = redisB.GetDatabase().ClaimSvc("iso.svc", "node-1");
 
-        fromA.IsNull.Should().BeFalse();
-        fromB.IsNull.Should().BeTrue("instances must not share state");
+        fromA.Should().NotBeNull();
+        fromB.Should().BeNull("instances must not share state");
     }
 
     // -------------------------------------------------------------------------

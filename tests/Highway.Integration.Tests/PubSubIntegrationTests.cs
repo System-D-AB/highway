@@ -74,11 +74,11 @@ public class PubSubIntegrationTests : IDisposable
         var groups = (long)(await db.ExecuteAsync("HW.PUBLISH", "orphan.ch", "nobody"u8.ToArray()));
         groups.Should().Be(0, "no group is registered");
 
-        await db.ExecuteAsync("HW.SUBSCRIBE", "orphan.ch", "arrives-later");
+        await db.SubscribeAsync("orphan.ch", "arrives-later");
 
-        var received = await db.ExecuteAsync("HW.QCLAIM", "orphan.ch@arrives-later", "node-1");
-        received.IsNull
-            .Should().BeTrue("a new group starts empty — use SendAsync when the work must wait");
+        var received = await db.ClaimQAsync("orphan.ch@arrives-later", "node-1");
+        received
+            .Should().BeNull("a new group starts empty — use SendAsync when the work must wait");
     }
 
     /// <summary>
@@ -86,7 +86,7 @@ public class PubSubIntegrationTests : IDisposable
     /// group outlives its process. Messages published while the node is down sit
     /// in that group's queue and drain when it comes back under the same NodeName.
     /// This also guards the 004.1 Requirement 1 fix from the client side — the
-    /// engine re-sends HW.SUBSCRIBE on every start, and that must not redeliver
+    /// engine re-declares its subscriptions (HW.SESSION) on every start, and that must not redeliver
     /// anything the node already consumed.
     /// </summary>
     [Fact]

@@ -88,7 +88,7 @@ public class QueueEndToEndTests : IDisposable
 
         var envelope = System.Text.Encoding.UTF8.GetBytes(
             """{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{"Tag":"waited"}}""");
-        await db.ExecuteAsync("HW.QSEND", "it.invoices", Guid.NewGuid().ToString("N"), envelope);
+        await db.SendAsync("it.invoices", Guid.NewGuid().ToString("N"), envelope);
 
         (_server.Inspect.ListLength("hw:q:it.invoices:q"))
             .Should().Be(1, "the message waits with nothing running");

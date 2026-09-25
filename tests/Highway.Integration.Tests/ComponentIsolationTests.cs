@@ -93,6 +93,7 @@ public class ComponentIsolationTests
         var loggerFactory = new CollectingLoggerFactory();
 
         using var server = new HighwayServerBuilder()
+            .Ephemeral()   // components only: never a default data directory
             .WithPort(port)
             .WithLoggerFactory(loggerFactory)
             .AddComponent(_ => new FailingComponent())
@@ -105,11 +106,10 @@ public class ComponentIsolationTests
         var db = redis.GetDatabase();
         db.Execute("HW.CALL", "isolation.svc", "req-1", "payload");
 
-        var result = db.Execute("HW.DEQUEUE", "isolation.svc", "node-1");
-        result.IsNull.Should().BeFalse("the broker must still serve RPC after a component fails to start");
+        var result = db.ClaimSvc("isolation.svc", "node-1");
+        result.Should().NotBeNull("the broker must still serve RPC after a component fails to start");
 
-        var arr = (RedisResult[])result!;
-        ((string)arr[0]!).Should().Be("req-1");
+        result!.Value.Id.Should().Be("req-1");
 
         // Assert the failure was logged
         loggerFactory.Messages.Should().Contain(m =>
@@ -124,6 +124,7 @@ public class ComponentIsolationTests
         var component = new TrackingComponent();
 
         var server = new HighwayServerBuilder()
+            .Ephemeral()   // components only: never a default data directory
             .WithPort(port)
             .AddComponent(_ => component)
             .Build();
@@ -147,6 +148,7 @@ public class ComponentIsolationTests
         var component = new TrackingComponent();
 
         var server = new HighwayServerBuilder()
+            .Ephemeral()   // components only: never a default data directory
             .WithPort(port)
             .AddComponent(_ => component)
             .Build();
@@ -165,6 +167,7 @@ public class ComponentIsolationTests
         var healthy = new TrackingComponent();
 
         using var server = new HighwayServerBuilder()
+            .Ephemeral()   // components only: never a default data directory
             .WithPort(port)
             .AddComponent(_ => new FailingComponent())
             .AddComponent(_ => healthy)

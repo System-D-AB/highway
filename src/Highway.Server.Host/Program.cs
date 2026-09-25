@@ -66,6 +66,9 @@ public static class Program
         if (parsed.Compact)
             return RunCompact(parsed, environment);
 
+        if (parsed.WipeData)
+            return RunWipeData(parsed, environment);
+
         if (parsed.Validate)
         {
             try
@@ -201,6 +204,44 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// <c>--wipe-data</c> (065 T6): empties the configured data directory for a fresh Highway 3.0 start,
+    /// keeping the node-local replication files (its epoch — its identity in the replica set). 3.0 does not
+    /// migrate 2.x data in place; this is the step between draining on 2.x and starting 3.0. The broker must
+    /// be stopped.
+    /// </summary>
+    private static int RunWipeData(HostArguments parsed, System.Collections.IDictionary? environment)
+    {
+        try
+        {
+            var loaded = ConfigurationLoader.Load(
+                parsed.ConfigPath ?? DiscoverConfigFile(), environment,
+                cliPort: parsed.Port, cliBindAddress: parsed.BindAddress, cliDataDir: parsed.DataDir);
+            var dataDir = loaded.Configuration.Server.DataDir;
+            if (string.IsNullOrWhiteSpace(dataDir) || loaded.Configuration.Server.Ephemeral)
+            {
+                Console.Error.WriteLine("Nothing to wipe: this broker is configured as ephemeral (no data directory).");
+                return ExitCodes.ConfigurationInvalid;
+            }
+
+            var removed = Highway.Server.HighwayStorageMaintenance.WipeData(dataDir);
+            Console.WriteLine($"Wiped {dataDir}: removed {removed} entr{(removed == 1 ? "y" : "ies")}; kept the node's replication files.");
+            Console.WriteLine("Every queued, in-flight, delayed and dead-lettered message in it is gone. Start the broker to begin empty.");
+            return ExitCodes.Success;
+        }
+        catch (ConfigurationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.ConfigurationInvalid;
+        }
+        catch (Exception ex) when (ex.Message.Contains("lock", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("The data directory is in use - stop the Highway broker (service) first, then run --wipe-data.");
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.Unexpected;
+        }
+    }
+
     private static void PrintVersion(TextWriter writer)
     {
         var assembly = typeof(Program).Assembly;
@@ -331,6 +372,7 @@ public static class Program
           --version                 print version, storage format and RID, then exit
           --validate                load and validate configuration, print it masked, exit
           --compact                 offline: compact the data directory (drops tombstones); stop the broker first
+          --wipe-data               offline: empty the data directory for a fresh 3.0 start (keeps replication identity); stop the broker first
           --config <path>           configuration file (default: discovery in CWD, config/, beside exe)
           --port <n>                override server.port
           --bind <addr>             override server.bindAddress

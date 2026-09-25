@@ -79,23 +79,23 @@ public class ReplicationPairTests : IDisposable
         });
 
         using var redis = ConnectionMultiplexer.Connect(primary.ConnectionString);
-        redis.GetDatabase().Execute("HW.QSEND", "repl.notes", "m-ack", "payload");
+        redis.GetDatabase().Send("repl.notes", "m-ack", "payload");
 
         // Caught up with EVERYTHING the primary holds — not merely "applied something": the replica's
-        // own HELLO/JOIN writes replicate first, so "> 0" could pass before the QSEND batch arrived.
+        // own HELLO/JOIN writes replicate first, so "> 0" could pass before the SEND batch arrived.
         // That race was hidden while every test connect paid a ~2 s failed IPv6 attempt (063).
         var primaryLatest = primary.Replication!.Engine.GetLatestSequenceNumber();
         await WaitForAsync(() =>
             replica.Replication is { } f && f.Engine.GetLatestSequenceNumber() >= primaryLatest);
 
         replica.Replication!.IsWritable.Should().BeFalse();
-        var qsendOnReplica = () =>
+        var sendOnReplica = () =>
         {
             using var r = ConnectionMultiplexer.Connect(replica.ConnectionString);
-            r.GetDatabase().Execute("HW.QSEND", "repl.notes", "x", "y");
+            r.GetDatabase().Send("repl.notes", "x", "y");
         };
         // G5: the refusal must redirect to the PRIMARY, not to the refusing replica.
-        qsendOnReplica.Should().Throw<RedisServerException>()
+        sendOnReplica.Should().Throw<RedisServerException>()
             .Which.Message.Should().StartWith("NOTPRIMARY").And.Contain($":{primary.Port}");
 
         var epoch = replica.Replication.Epoch;
@@ -109,11 +109,11 @@ public class ReplicationPairTests : IDisposable
         // trusting the sequence number (G10).
         using (var promoted = ConnectionMultiplexer.Connect(replica.ConnectionString))
         {
-            var claimed = (RedisResult[])promoted.GetDatabase().Execute("HW.QCLAIM", "repl.notes", "worker-1")!;
+            var claimed = promoted.GetDatabase().ClaimQ("repl.notes", "worker-1");
             claimed.Should().NotBeNull();
-            ((string)claimed[0]!).Should().Be("m-ack",
+            claimed!.Value.Id.Should().Be("m-ack",
                 "the message acked on the old primary and replicated must survive the failover");
-            ((string)claimed[1]!).Should().Be("payload");
+            claimed.Value.PayloadText.Should().Be("payload");
         }
 
         // Resurrection: the promoted node announced itself to the old primary (G3), so
@@ -125,12 +125,12 @@ public class ReplicationPairTests : IDisposable
         report.Should().Contain("the broker never merges");
 
         // And the demoted primary redirects clients to the node that announced (G5).
-        var qsendOnDemoted = () =>
+        var sendOnDemoted = () =>
         {
             using var p = ConnectionMultiplexer.Connect(primary.ConnectionString);
-            p.GetDatabase().Execute("HW.QSEND", "repl.notes", "late", "y");
+            p.GetDatabase().Send("repl.notes", "late", "y");
         };
-        qsendOnDemoted.Should().Throw<RedisServerException>()
+        sendOnDemoted.Should().Throw<RedisServerException>()
             .Which.Message.Should().StartWith("NOTPRIMARY").And.Contain($"127.0.0.1:{replica.Port}");
     }
 
@@ -413,7 +413,7 @@ public class ReplicationPairTests : IDisposable
         await WaitForAsync(() => replica.Replication!.HasSeenMaster);
 
         // While the master lives, a client verb on the standby is refused — no promotion.
-        var early = () => db.Execute("HW.QSEND", "repl.notes", "too-early", "x");
+        var early = () => db.Send("repl.notes", "too-early", "x");
         early.Should().Throw<RedisServerException>().Which.Message.Should().StartWith("NOTPRIMARY");
         replica.Replication!.Epoch.Should().Be(1);
 
@@ -421,7 +421,7 @@ public class ReplicationPairTests : IDisposable
         await WaitForAsync(() => replica.Replication.IsWillingForHerd());
 
         // The first accepted client verb IS the promotion.
-        db.Execute("HW.QSEND", "repl.notes", "after-arrival", "payload");
+        db.Send("repl.notes", "after-arrival", "payload");
         replica.Replication.IsWritable.Should().BeTrue();
         replica.Replication.Epoch.Should().Be(2);
         replica.Replication.Transitions.Should().Contain(t => t.Contains("reason=herd-arrival"));
@@ -456,7 +456,7 @@ public class ReplicationPairTests : IDisposable
 
         using var client = ConnectionMultiplexer.Connect(primary.ConnectionString);
         var db = client.GetDatabase();
-        db.Execute("HW.QSEND", "repl.notes", "pre-bye", "x");   // classifies the session as a herd client
+        db.Send("repl.notes", "pre-bye", "x");   // classifies the session as a herd client
 
         var goodbyeHeard = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         await client.GetSubscriber().SubscribeAsync(
@@ -473,7 +473,7 @@ public class ReplicationPairTests : IDisposable
 
         // New work refused during/after the drain; the node stands down at the deadline.
         await WaitForAsync(() => primary.Replication.Role == ReplicaRole.Demoted);
-        var late = () => db.Execute("HW.QSEND", "repl.notes", "post-bye", "x");
+        var late = () => db.Send("repl.notes", "post-bye", "x");
         late.Should().Throw<RedisServerException>().Which.Message.Should().StartWith("NOTPRIMARY");
 
         // The standby heard the narration on its own subscription: immediately willing.
@@ -560,19 +560,29 @@ public class ReplicationPairTests : IDisposable
             o.Replication.StartAsReplica = true;
             o.Replication.PrimaryServer = primary.ConnectionString;
             o.Replication.ReplicaId = "standby";
+            o.Cache.Enabled = true;
         });
 
         using var r = ConnectionMultiplexer.Connect(replica.ConnectionString);
         var db = r.GetDatabase();
 
-        // G7: the raw wire surface obeys the same writability rule as HW.* verbs.
-        var set = () => db.Execute("SET", "hw:idem:svc:req-1", "marker", "PX", "60000", "NX");
+        // G7: the idempotency and reply-slot surface obeys the same writability rule as every other
+        // HW.* verb. Before 5.0 this was stock SET/DEL on hw:idem:* / hw:rep:*; 5.0 moved both behind
+        // HW.IDEM / HW.RESULT, and each one writes (a claim marker; a take removes the slot).
+        var begin = () => db.Execute("HW.IDEM", "BEGIN", "svc", "req-1", "60");
+        begin.Should().Throw<RedisServerException>().Which.Message.Should().StartWith("NOTPRIMARY");
+
+        var take = () => db.Execute("HW.RESULT", "req-1");
+        take.Should().Throw<RedisServerException>().Which.Message.Should().StartWith("NOTPRIMARY");
+
+        // The raw wire writes that remain (the opt-in cache's keys) obey it too.
+        var set = () => db.Execute("SET", "hw:cache:k1", "v", "PX", "60000");
         set.Should().Throw<RedisServerException>().Which.Message.Should().StartWith("NOTPRIMARY");
 
-        var del = () => db.Execute("DEL", "hw:rep:req-1");
+        var del = () => db.Execute("DEL", "hw:cache:k1");
         del.Should().Throw<RedisServerException>().Which.Message.Should().StartWith("NOTPRIMARY");
 
         // Reads stay served on a replica.
-        db.StringGet("hw:idem:svc:req-1").IsNull.Should().BeTrue();
+        db.StringGet("hw:cache:k1").IsNull.Should().BeTrue();
     }
 }

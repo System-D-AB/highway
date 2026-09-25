@@ -29,7 +29,7 @@ internal static class WalTailSummary
     /// Returns an empty list when the tail is empty; a first line starting with
     /// <c>tail-undecodable</c> when the WAL no longer reaches back that far.
     /// </summary>
-    public static List<string> Describe(ReplicationSource source, ulong afterSeq)
+    public static List<string> Describe(ReplicationSource source, ulong afterSeq, Func<uint, string?>? boxName = null)
     {
         var entities = new Dictionary<string, EntityOps>(StringComparer.Ordinal);
         var undecoded = 0;
@@ -40,7 +40,7 @@ internal static class WalTailSummary
             foreach (var page in source.GetWalUpdates(afterSeq))
             {
                 batches++;
-                if (!TryDecodeBatch(page.Data, entities))
+                if (!TryDecodeBatch(page.Data, entities, boxName))
                     undecoded++;
             }
         }
@@ -59,7 +59,7 @@ internal static class WalTailSummary
         return lines;
     }
 
-    private static bool TryDecodeBatch(byte[] data, Dictionary<string, EntityOps> entities)
+    private static bool TryDecodeBatch(byte[] data, Dictionary<string, EntityOps> entities, Func<uint, string?>? boxName)
     {
         // WriteBatch rep: [8B LE sequence][4B LE count][records...]
         if (data.Length < 12) return false;
@@ -92,7 +92,7 @@ internal static class WalTailSummary
                 if (!TryReadSlice(data, ref pos, out _, out valueLen)) return false;
             }
 
-            var entity = EntityOf(data.AsSpan(keyStart, keyLen));
+            var entity = EntityOf(data.AsSpan(keyStart, keyLen), boxName);
             if (!entities.TryGetValue(entity, out var ops))
                 entities[entity] = ops = new EntityOps(entity);
 
@@ -105,15 +105,51 @@ internal static class WalTailSummary
     }
 
     /// <summary>
-    /// Renders a store key as <c>family name</c> — e.g. <c>queue orders.create</c> — by
-    /// undoing the 038 key encoding (family tag byte, then the escaped, 0x00 0x00-terminated
-    /// name component).
+    /// Renders a store key for the report (065 layout: <c>[box:4][space][rest]</c>). A work box's key reads as
+    /// <c>queue orders.create (in-flight)</c> — the box resolved to its kind and name through the local
+    /// catalog (<paramref name="boxName"/>), the space to what it holds. A system-box family key reads as
+    /// before: <c>family name</c> (registry, membership, replies, idempotency).
     /// </summary>
-    private static string EntityOf(ReadOnlySpan<byte> key)
+    private static string EntityOf(ReadOnlySpan<byte> key, Func<uint, string?>? boxName)
     {
-        if (key.Length < 2) return "(unrecognized key)";
+        if (key.Length < 5) return "(unrecognized key)";
+        var box = Boxes.BoxKeys.BoxOf(key);
+        var space = key[4];
 
-        var family = key[0] switch
+        if (box != Boxes.BoxKeys.SystemBox)
+        {
+            var owner = boxName?.Invoke(box) ?? $"box {box}";
+            var part = space switch
+            {
+                Boxes.BoxKeys.Ready => "ready",
+                Boxes.BoxKeys.InFlight => "in-flight",
+                Boxes.BoxKeys.Lease => "lease index",
+                Boxes.BoxKeys.Delayed => "delayed",
+                Boxes.BoxKeys.Dead => "dead letters",
+                Boxes.BoxKeys.Counters => "counters",
+                Boxes.BoxKeys.Workers => "workers",
+                Boxes.BoxKeys.Schedules or Boxes.BoxKeys.ScheduleIndex => "job schedules",
+                Boxes.BoxKeys.NodeIndex => "node index",
+                _ => $"space {space:X2}",
+            };
+            return $"{owner} ({part})";
+        }
+
+        switch (space)
+        {
+            case Boxes.BoxKeys.NameIndex or Boxes.BoxKeys.Meta or Boxes.BoxKeys.Allocator or Boxes.BoxKeys.CatalogVersion:
+                return "catalog";
+            case Boxes.BoxKeys.ExpiryIndex:
+                return "expiry index";
+            case Boxes.BoxKeys.Families:
+                break;
+            default:
+                return "(unrecognized key)";
+        }
+
+        var familyKey = key[5..];
+        if (familyKey.Length < 2) return "(unrecognized key)";
+        var family = familyKey[0] switch
         {
             (byte)'q' => "list",
             (byte)'z' => "ordered-set",
@@ -124,21 +160,14 @@ internal static class WalTailSummary
         };
         if (family is null) return "(unrecognized key)";
 
-        var name = new StringBuilder();
-        var i = 1;
-        while (i < key.Length)
+        try
         {
-            var b = key[i];
-            if (b == 0x00)
-            {
-                if (i + 1 < key.Length && key[i + 1] == 0xFF) { name.Append('\0'); i += 2; continue; }
-                break; // 0x00 0x00 terminator (or truncated) — name complete
-            }
-            name.Append((char)b);
-            i++;
+            return $"{family} {Layout.KeyEncoding.ReadString(familyKey[1..], out _)}";
         }
-
-        return $"{family} {name}";
+        catch (FormatException)
+        {
+            return $"{family} (unterminated name)";
+        }
     }
 
     private static bool TryReadVarint32(byte[] data, ref int pos, out uint value)

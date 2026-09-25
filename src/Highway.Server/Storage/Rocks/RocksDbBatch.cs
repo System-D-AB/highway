@@ -70,6 +70,19 @@ internal sealed class RocksDbBatch : IStoreBatch
         return keys;
     }
 
+    /// <summary>Live entries under <paramref name="prefix"/> from <paramref name="from"/> on, at most <paramref name="limit"/> (065).</summary>
+    internal List<(byte[] Key, byte[] Value)> EntriesFrom(byte[] prefix, byte[] from, int limit)
+    {
+        var entries = new List<(byte[], byte[])>();
+        if (limit <= 0) return entries;
+        foreach (var (key, value) in Merged(prefix, withValues: true, listHint: false, from))
+        {
+            entries.Add((key, value!));
+            if (entries.Count >= limit) break;
+        }
+        return entries;
+    }
+
     /// <summary>Every live entry under <paramref name="prefix"/>, in key order, with its value (061 A1).</summary>
     internal List<(byte[] Key, byte[] Value)> EntriesUnderPrefix(byte[] prefix, bool listHint = false)
     {
@@ -85,10 +98,10 @@ internal sealed class RocksDbBatch : IStoreBatch
     /// value and a staged delete hides the key. Lazy: abandoning the enumeration disposes the native
     /// iterator.
     /// </summary>
-    private IEnumerable<(byte[] Key, byte[]? Value)> Merged(byte[] prefix, bool withValues, bool listHint)
+    private IEnumerable<(byte[] Key, byte[]? Value)> Merged(byte[] prefix, bool withValues, bool listHint, byte[]? from = null)
     {
         byte[]? observed = null;
-        var seekFrom = prefix;
+        var seekFrom = from is not null && ByteArrayComparer.Instance.Compare(from, prefix) > 0 ? from : prefix;
         if (listHint && _store.TryGetHeadHint(prefix, out var hint))
         {
             observed = hint;
@@ -98,7 +111,8 @@ internal sealed class RocksDbBatch : IStoreBatch
         // The overlay is small (one command's writes); take its slice under the prefix.
         var staged = new List<KeyValuePair<byte[], byte[]?>>();
         foreach (var kv in Overlay)
-            if (RocksDbStore.StartsWith(kv.Key, prefix)) staged.Add(kv);
+            if (RocksDbStore.StartsWith(kv.Key, prefix) && ByteArrayComparer.Instance.Compare(kv.Key, seekFrom) >= 0)
+                staged.Add(kv);
 
         using var committed = _store.CommittedEntries(prefix, seekFrom, withValues).GetEnumerator();
         var hasCommitted = committed.MoveNext();

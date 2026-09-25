@@ -33,8 +33,14 @@ internal static class ReplicationApply
         if (sequenceNumber <= db.GetLatestSequenceNumber())
             return false;
 
+        Write(db, data);
+        return true;
+    }
+
+    /// <summary>One synced write of serialized batch bytes (a single batch, or a concatenated page — 066).</summary>
+    public static void Write(RocksDb db, ReadOnlySpan<byte> data)
+    {
         using var batch = new WriteBatch(data.ToArray());
         db.Write(batch, Sync);
-        return true;
     }
 }

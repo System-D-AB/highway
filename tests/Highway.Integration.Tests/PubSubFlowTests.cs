@@ -6,8 +6,8 @@ using Xunit;
 namespace Highway.Integration.Tests;
 
 /// <summary>
-/// Integration tests for the Pub/Sub command flow:
-/// HW.SUBSCRIBE → HW.PUBLISH → HW.QCLAIM → HW.QACK (on derived queue {channel}@{group})
+/// Integration tests for the Pub/Sub command flow (protocol 5.0):
+/// HW.SESSION (subscriptions) → HW.PUBLISH → HW.CLAIM Q → HW.ACK token (on derived queue {channel}@{group})
 /// </summary>
 public class PubSubFlowTests : IDisposable
 {
@@ -28,17 +28,17 @@ public class PubSubFlowTests : IDisposable
     }
 
     [Fact]
-    public void HwSubscribe_ReturnsOk()
+    public void HwSession_WithSubscription_ReturnsOk()
     {
-        var result = _db.Execute("HW.SUBSCRIBE", "orders.created", "audit-group");
+        var result = _db.Subscribe("orders.created", "audit-group");
         result.ToString().Should().Be("OK");
     }
 
     [Fact]
     public void HwPublish_WithSubscribers_ReturnsGroupCount()
     {
-        _db.Execute("HW.SUBSCRIBE", "events.topic", "group-a");
-        _db.Execute("HW.SUBSCRIBE", "events.topic", "group-b");
+        _db.Subscribe("events.topic", "group-a");
+        _db.Subscribe("events.topic", "group-b");
 
         var result = (int)_db.Execute("HW.PUBLISH", "events.topic", "{\"event\":\"test\"}");
 
@@ -53,13 +53,13 @@ public class PubSubFlowTests : IDisposable
     }
 
     [Fact]
-    public void HwQClaim_ReturnsPublishedMessages()
+    public void HwClaim_ReturnsPublishedMessages()
     {
         const string channel = "news.feed";
         const string group = "reader-group";
         var derivedQueue = $"{channel}@{group}";
 
-        _db.Execute("HW.SUBSCRIBE", channel, group);
+        _db.Subscribe(channel, group);
 
         _db.Execute("HW.PUBLISH", channel, "message-1");
         _db.Execute("HW.PUBLISH", channel, "message-2");
@@ -69,10 +69,9 @@ public class PubSubFlowTests : IDisposable
         var messages = new List<(string id, string payload)>();
         for (var i = 0; i < 3; i++)
         {
-            var result = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
-            result.IsNull.Should().BeFalse();
-            var arr = (RedisResult[])result!;
-            messages.Add(((string)arr[0]!, (string)arr[1]!));
+            var claim = _db.ClaimQ(derivedQueue, "node-1");
+            claim.Should().NotBeNull();
+            messages.Add((claim!.Value.Id, claim.Value.PayloadText));
         }
 
         messages.Should().HaveCount(3);
@@ -87,26 +86,36 @@ public class PubSubFlowTests : IDisposable
     }
 
     [Fact]
-    public void HwQAck_RemovesFromProcessing()
+    public void HwClaim_NothingDue_ReturnsEmptyArray()
+    {
+        _db.Subscribe("empty.ch", "g");
+
+        var reply = _db.Execute("HW.CLAIM", "Q", "empty.ch@g", "node-1");
+
+        reply.IsNull.Should().BeFalse("5.0 answers an empty array, not nil, when nothing is due");
+        ((RedisResult[])reply!).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void HwAck_RemovesFromProcessing()
     {
         const string channel = "ack.test";
         const string group = "ack-group";
         var derivedQueue = $"{channel}@{group}";
 
-        _db.Execute("HW.SUBSCRIBE", channel, group);
+        _db.Subscribe(channel, group);
         _db.Execute("HW.PUBLISH", channel, "payload-x");
 
         // Claim the message (moves to processing)
-        var claimed = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
-        claimed.IsNull.Should().BeFalse();
-        var msgId = (string)((RedisResult[])claimed!)[0]!;
+        var claimed = _db.ClaimQ(derivedQueue, "node-1");
+        claimed.Should().NotBeNull();
 
-        // QACK it
-        _db.Execute("HW.QACK", derivedQueue, "node-1", msgId);
+        // ACK it by its token
+        _db.Ack(claimed!.Value.Token).Should().Be(1);
 
-        // Second claim should return nil (nothing pending)
-        var secondClaim = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
-        secondClaim.IsNull.Should().BeTrue();
+        // Second claim finds nothing pending, and the token is no longer held
+        _db.ClaimQ(derivedQueue, "node-1").Should().BeNull();
+        _db.Ack(claimed.Value.Token).Should().Be(0);
     }
 
 
@@ -115,30 +124,28 @@ public class PubSubFlowTests : IDisposable
     {
         const string channel = "fanout.test";
 
-        _db.Execute("HW.SUBSCRIBE", channel, "group-x");
-        _db.Execute("HW.SUBSCRIBE", channel, "group-y");
+        _db.Subscribe(channel, "group-x");
+        _db.Subscribe(channel, "group-y");
 
         _db.Execute("HW.PUBLISH", channel, "shared-message");
 
         // Each group gets the message independently via derived queues
-        var resultX = _db.Execute("HW.QCLAIM", $"{channel}@group-x", "node-1");
-        var resultY = _db.Execute("HW.QCLAIM", $"{channel}@group-y", "node-1");
+        var resultX = _db.ClaimQ($"{channel}@group-x", "node-1");
+        var resultY = _db.ClaimQ($"{channel}@group-y", "node-1");
 
-        resultX.IsNull.Should().BeFalse();
-        resultY.IsNull.Should().BeFalse();
+        resultX.Should().NotBeNull();
+        resultY.Should().NotBeNull();
 
-        var payloadX = (string)((RedisResult[])resultX!)[1]!;
-        var payloadY = (string)((RedisResult[])resultY!)[1]!;
-        payloadX.Should().Be("shared-message");
-        payloadY.Should().Be("shared-message");
+        resultX!.Value.PayloadText.Should().Be("shared-message");
+        resultY!.Value.PayloadText.Should().Be("shared-message");
+        resultX.Value.Token.Should().NotBe(resultY.Value.Token, "each group's claim is its own lease");
 
-        // QACK from group-x doesn't affect group-y
-        var msgIdX = (string)((RedisResult[])resultX!)[0]!;
-        _db.Execute("HW.QACK", $"{channel}@group-x", "node-1", msgIdX);
+        // ACK from group-x doesn't affect group-y
+        _db.Ack(resultX.Value.Token).Should().Be(1);
 
         // group-y's message is still in its processing list (already claimed)
-        var resultYAgain = _db.Execute("HW.QCLAIM", $"{channel}@group-y", "node-1");
-        resultYAgain.IsNull.Should().BeTrue(); // no new messages; original is in processing
+        _db.ClaimQ($"{channel}@group-y", "node-1").Should().BeNull(); // no new messages; original is in processing
+        _db.Touch(resultY.Value.Token).Should().Be(1, "group-y's claim is still held");
     }
 
     [Fact]
@@ -149,7 +156,7 @@ public class PubSubFlowTests : IDisposable
         var derivedQueue = $"{channel}@{group}";
 
         // Subscribe and publish
-        _db.Execute("HW.SUBSCRIBE", channel, group);
+        _db.Subscribe(channel, group);
         _db.Execute("HW.PUBLISH", channel, "message-before-unsub");
 
         // Unsubscribe — clears group state
@@ -157,16 +164,8 @@ public class PubSubFlowTests : IDisposable
         unsubResult.ToString().Should().Be("OK");
 
         // Re-subscribe — should NOT see the old message (state was cleared)
-        _db.Execute("HW.SUBSCRIBE", channel, group);
+        _db.Subscribe(channel, group);
 
-        var result = _db.Execute("HW.QCLAIM", derivedQueue, "node-1");
-        result.IsNull.Should().BeTrue();
+        _db.ClaimQ(derivedQueue, "node-1").Should().BeNull();
     }
-
-    // -------------------------------------------------------------------------
-    // Feature 004.1 — Requirement 1: Idempotent re-subscribe
-    // -------------------------------------------------------------------------
-
-
-
 }

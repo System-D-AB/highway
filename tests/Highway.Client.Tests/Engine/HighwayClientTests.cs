@@ -84,7 +84,7 @@ public class HighwayClientTests
     {
         _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
-        _connection.GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         var response = await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 
@@ -97,7 +97,7 @@ public class HighwayClientTests
     {
         _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
-        _connection.GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 
@@ -111,7 +111,7 @@ public class HighwayClientTests
         var ids = new System.Collections.Concurrent.ConcurrentBag<string>();
         _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
             .Returns(ci => { ids.Add(ci.ArgAt<string>(1)); return Task.CompletedTask; });
-        _connection.GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         var client = CreateClient();
         await Task.WhenAll(Enumerable.Range(0, 25)
@@ -232,7 +232,7 @@ public class HighwayClientTests
     public async Task ExecuteAsync_FastFail_WithLiveHost_EnqueuesNormally()
     {
         EnableFastFail("node-1");
-        _connection.GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 
@@ -247,7 +247,7 @@ public class HighwayClientTests
         _connection.DiscoverAsync("test.hello", Arg.Any<CancellationToken>())
             .Returns<IReadOnlyList<(string, TimeSpan)>>(_ => throw new HighwayTransportException("down"));
         _internals.Discovery.Returns(new ServiceDiscoveryCache(_connection, TimeSpan.Zero));
-        _connection.GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 
@@ -260,7 +260,7 @@ public class HighwayClientTests
     {
         _options.FastFailEnabled = false;
         _internals.Discovery.Returns(new ServiceDiscoveryCache(_connection, TimeSpan.Zero));
-        _connection.GetReplySlotAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
+        _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 

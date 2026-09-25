@@ -40,8 +40,10 @@ internal sealed class HwReplyCommand : HighwayCommand
 
         using var _lock = ctx.Locks.Lock(_requestId);
         using var batch = ctx.Store.NewBatch();
-        ctx.Store.SetEx(batch, slotKey, _payloadBytes, expiresAt);
+        ExpirySupport.SetExpiring(ctx, batch, slotKey, _payloadBytes, expiresAt);   // 065 T5: indexed, so it is deleted when it expires
+        var floor = ExpirySupport.Sweep(ctx, batch);
         batch.Commit();
+        ExpirySupport.AfterCommit(ctx, floor);
 
         writer.SimpleString("OK");
     }

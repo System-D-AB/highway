@@ -79,7 +79,7 @@ public class HwReplRuntimeCommandTests
             db.Execute("HW.REPL.WITNESS").ToString().Should().Be("OK");
             db.Execute("HW.REPL.FENCE", "test").ToString().Should().Be("OK");
 
-            var call = () => db.Execute("HW.QSEND", "q", "m1", "payload");
+            var call = () => db.Execute("HW.SEND", "q", "m1", "payload");
             call.Should().Throw<RedisServerException>().Which.Message.Should().StartWith("NOTPRIMARY");
 
             var epoch = db.Execute("HW.REPL.PROMOTE", "unfence-via-promote");

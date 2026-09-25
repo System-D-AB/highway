@@ -11,7 +11,7 @@ namespace Highway.Integration.Tests;
 /// Feature 025 — <b>SubscriptionGroup names the logical consumer; NodeName names the process.</b>
 ///
 /// <para>Replicas sharing a group compete for one copy of each publish through the ordinary
-/// queue machinery (the claimant IS the group); distinct groups each receive their own copy;
+/// queue machinery (all claim from the group's derived queue); distinct groups each receive their own copy;
 /// a group dies only when its last member is gone. The default — group = NodeName — is
 /// 018's behavior unchanged, which the entire pre-existing suite already proves.</para>
 /// </summary>
@@ -152,9 +152,9 @@ public class SubscriptionGroupTests : IDisposable
     [Fact]
     public void Membership_IsRecorded_AndSharedMarkerKeyIsGroupScoped()
     {
-        _db.Execute("HW.SUBSCRIBE", "sgm.events", "sgm-g", "node-1");
-        _db.Execute("HW.SUBSCRIBE", "sgm.events", "sgm-g", "node-2");
-        _db.Execute("HW.SUBSCRIBE", "sgm.events", "sgm-g", "node-2"); // idempotent
+        _db.Subscribe("sgm.events", "sgm-g", "node-1");
+        _db.Subscribe("sgm.events", "sgm-g", "node-2");
+        _db.Subscribe("sgm.events", "sgm-g", "node-2"); // idempotent
 
         Members("sgm.events", "sgm-g").Should().Equal("node-1", "node-2");
 
@@ -163,11 +163,12 @@ public class SubscriptionGroupTests : IDisposable
     }
 
     [Fact]
-    public void TwoArgumentSubscribe_KeepsThePre025Identity()
+    public void DefaultGroup_IsTheNode_KeepsThePre025Identity()
     {
-        // An old client: no node argument. The group IS the node, so membership is {group} —
-        // meaning retirement and purge behave exactly as 017 shipped them.
-        _db.Execute("HW.SUBSCRIBE", "sgl.events", "sgl-old");
+        // The default (no SubscriptionGroup): the session's node IS the group, so membership is
+        // {group} — meaning retirement and purge behave exactly as 017 shipped them. (4.x also
+        // had a two-argument HW.SUBSCRIBE for this; 5.0's HW.SESSION always names the node.)
+        _db.Subscribe("sgl.events", "sgl-old", "sgl-old");
 
         Members("sgl.events", "sgl-old").Should().Equal("sgl-old");
     }
@@ -175,8 +176,8 @@ public class SubscriptionGroupTests : IDisposable
     [Fact]
     public void Purge_FromNonLastMember_PreservesTheGroup()
     {
-        _db.Execute("HW.SUBSCRIBE", "sgp.events", "sgp-g", "sgp-node-a");
-        _db.Execute("HW.SUBSCRIBE", "sgp.events", "sgp-g", "sgp-node-b");
+        _db.Subscribe("sgp.events", "sgp-g", "sgp-node-a");
+        _db.Subscribe("sgp.events", "sgp-g", "sgp-node-b");
         _db.Execute("HW.PUBLISH", "sgp.events", "{\"d\":1}");
 
         // First member departs forever: membership shrinks, nothing is destroyed.
@@ -186,8 +187,8 @@ public class SubscriptionGroupTests : IDisposable
         Members("sgp.events", "sgp-g").Should().Equal("sgp-node-b");
 
         // The sibling's pending message is untouched and claimable.
-        var claim = _db.Execute("HW.QCLAIM", "sgp.events@sgp-g", "sgp-g");
-        claim.IsNull.Should().BeFalse("the group's queue must survive a non-last member's purge");
+        var claim = _db.ClaimQ("sgp.events@sgp-g", "sgp-node-b");
+        claim.Should().NotBeNull("the group's queue must survive a non-last member's purge");
 
         // Last member departs: NOW the group dies, and says what it destroyed.
         var second = (RedisResult[])_db.Execute("HW.HEARTBEAT", "sgp-node-b", "BYE", "PURGE")!;
@@ -204,10 +205,10 @@ public class SubscriptionGroupTests : IDisposable
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
-        db.Execute("HW.SUBSCRIBE", "sgr.events", "sgr-g", "sgr-a");
-        db.Execute("HW.SUBSCRIBE", "sgr.events", "sgr-g", "sgr-b");
-        db.Execute("HW.HEARTBEAT", "sgr-a", "{\"services\":[],\"channels\":[]}");
-        db.Execute("HW.HEARTBEAT", "sgr-b", "{\"services\":[],\"channels\":[]}");
+        db.Subscribe("sgr.events", "sgr-g", "sgr-a");
+        db.Subscribe("sgr.events", "sgr-g", "sgr-b");
+        db.Register("sgr-a", "{\"services\":[],\"channels\":[]}");
+        db.Register("sgr-b", "{\"services\":[],\"channels\":[]}");
 
         // Past the threshold for A; B keeps beating. The group must survive on B's pulse.
         await Task.Delay(600);
@@ -229,8 +230,8 @@ public class SubscriptionGroupTests : IDisposable
     [Fact]
     public async Task Catalogue_ListsAGroupsMembers_AsItsHosts()
     {
-        _db.Execute("HW.SUBSCRIBE", "sgv.events", "sgv-g", "sgv-node-1");
-        _db.Execute("HW.SUBSCRIBE", "sgv.events", "sgv-g", "sgv-node-2");
+        _db.Subscribe("sgv.events", "sgv-g", "sgv-node-1");
+        _db.Subscribe("sgv.events", "sgv-g", "sgv-node-2");
         _db.Execute("HW.PUBLISH", "sgv.events", "{\"d\":1}");
 
         // The projection the dashboard renders (no dashboard tests, per standing instruction —

@@ -65,9 +65,10 @@ public class DeterminismTests
     {
         // Guard against a false-positive scanner: `new DateTime(ctx.NowTicks, ...)` is exactly
         // how a command turns the once-read clock into a DateTime, and must NOT be flagged.
+        // 065: schedule arithmetic moved into the job's box; the command's clock is passed in as nowTicks.
         var portedDir = LocatePortedSourceDir();
-        var job = File.ReadAllText(Path.Combine(portedDir, "HwJobCommand.cs"));
-        StripCommentsAndStrings(job).Should().Contain("new DateTime(ctx.NowTicks",
+        var box = File.ReadAllText(Path.Combine(portedDir, "..", "..", "Storage", "Boxes", "WorkBox.cs"));
+        StripCommentsAndStrings(box).Should().Contain("new DateTime(nowTicks",
             "the clock-derived DateTime construction is the sanctioned pattern");
     }
 
@@ -84,21 +85,21 @@ public class DeterminismTests
 
         // A worker claims one request, then never acks. Its lease will expire.
         h.Run(new HwCallCommand(), t0, "orders", "req-dead", "payload");
-        h.Run(new HwDequeueCommand(), t0, "orders", "worker-1"); // claim (attempts 0)
+        h.Run(new HwClaimCommand(), t0, "SVC", "orders", "worker-1"); // claim (attempts 0)
 
         // First sweep past the lease: attempts → 1, still ≤ limit, so it is requeued.
         var lease1 = t0 + TimeSpan.FromMinutes(6).Ticks;
-        h.Run(new HwDequeueCommand(), lease1, "orders", "worker-2"); // claims the requeued entry
+        h.Run(new HwClaimCommand(), lease1, "SVC", "orders", "worker-2"); // claims the requeued entry
 
         // Second sweep past the next lease: attempts → 2 > 1, so it dead-letters — the row we assert.
         var afterLease = lease1 + TimeSpan.FromMinutes(6).Ticks;
-        h.Run(new HwDequeueCommand(), afterLease, "orders", "worker-3");
+        h.Run(new HwClaimCommand(), afterLease, "SVC", "orders", "worker-3");
 
         using var snap = h.Store.Snapshot();
 
         // The dead-letter list holds a REAL dead-letter record, not a marker: decode it and it
         // is the original request's bytes wrapped in a dead-letter envelope.
-        var dlq = h.Store.ListDrain(NoCommitBatch(h.Store), HighwayKeyspace.ListPrefix(HighwayNames.ServiceDeadLetter("orders")));
+        var dlq = new StoreInspector(h.Store).ListEntries("hw:svc:orders:dlq");
         dlq.Should().ContainSingle("the sweep produced exactly one dead-letter row");
 
         DeadLetter.Decode(dlq[0], out var deadAtTicks, out var attempts, out _, out var original);
@@ -115,15 +116,15 @@ public class DeterminismTests
         var t0 = 10_000_000_000_000L;
 
         h.Run(new HwCallCommand(), t0, "orders", "req-1", "the-payload");
-        h.Run(new HwDequeueCommand(), t0, "orders", "worker-1"); // claims req-1
+        h.Run(new HwClaimCommand(), t0, "SVC", "orders", "worker-1"); // claims req-1
 
         // Sweep after the lease: the entry is requeued (attempts < limit), as a real queue row.
         var afterLease = t0 + TimeSpan.FromMinutes(6).Ticks;
-        var reply = h.Run(new HwDequeueCommand(), afterLease, "orders", "worker-2");
+        var reply = h.Run(new HwClaimCommand(), afterLease, "SVC", "orders", "worker-2");
 
         // worker-2 claims the requeued entry — the row exists and is the original request.
         var text = CommandHarness.AsText(reply);
-        text.Should().StartWith("*2\r\n");
+        text.Should().StartWith("*1\r\n*3\r\n", "one claimed row: token, id, payload");
         text.Should().Contain("req-1");
         text.Should().Contain("the-payload", "the requeued row carries the original payload bytes");
     }
@@ -143,7 +144,7 @@ public class DeterminismTests
             var t0 = 10_000_000_000_000L;
             h.Run(new HwCallCommand(), t0, "orders", "req-1", "payload-1");
             h.Run(new HwCallCommand(), t0, "orders", "req-2", "payload-2");
-            h.Run(new HwDequeueCommand(), t0 + 1000, "orders", "worker-1");
+            h.Run(new HwClaimCommand(), t0 + 1000, "SVC", "orders", "worker-1");
             return store.DumpData();
         }
 
@@ -186,7 +187,7 @@ public class DeterminismTests
         var t0 = 10_000_000_000_000L;
         h.Run(new HwCallCommand(), t0, "orders", "req-1", "payload-1");
         h.Run(new HwCallCommand(), t0, "orders", "req-2", "payload-2");
-        h.Run(new HwDequeueCommand(), t0 + 1000, "orders", "worker-1"); // claim: pop + processing push, one batch
+        h.Run(new HwClaimCommand(), t0 + 1000, "SVC", "orders", "worker-1"); // claim: pop + processing push, one batch
         return store.DumpData();
     }
 

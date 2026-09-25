@@ -10,7 +10,7 @@ namespace Highway.Integration.Tests;
 ///
 /// <para><b>The guarantee is "not before", not an alarm clock.</b> Promotion is driven by
 /// consumer activity rather than a server timer, so a message arrives on the first
-/// <c>HW.RECEIVE</c> after its delivery time — which in a running system is at most one
+/// <c>HW.CLAIM</c> after its delivery time — which in a running system is at most one
 /// backstop interval late, and in a channel with no consumer is not at all until one
 /// starts. These tests poll explicitly for that reason.</para>
 /// </summary>
@@ -30,15 +30,15 @@ public class DelayedDeliveryTests : IDisposable
 
     private static async Task<int> ReceiveCountAsync(IDatabase db)
     {
-        var result = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@{Group}", "node-1");
-        return result.IsNull ? 0 : 1;
+        var result = await db.ClaimQAsync($"{Channel}@{Group}", "node-1");
+        return result is null ? 0 : 1;
     }
 
     [Fact]
     public async Task DelayedMessage_IsNotDeliveredEarly_AndIsDeliveredAfter()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, Group);
+        await db.SubscribeAsync(Channel, Group);
 
         await db.ExecuteAsync("HW.PUBLISH", Channel, "later"u8.ToArray(),
             "AT", TicksIn(TimeSpan.FromMilliseconds(600)).ToString());
@@ -55,7 +55,7 @@ public class DelayedDeliveryTests : IDisposable
     public async Task PublishWithoutAt_IsUnchanged()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, Group);
+        await db.SubscribeAsync(Channel, Group);
 
         var groups = (long)(await db.ExecuteAsync("HW.PUBLISH", Channel, "now"u8.ToArray()));
         groups.Should().Be(1, "an ordinary publish still fans out immediately");
@@ -72,7 +72,7 @@ public class DelayedDeliveryTests : IDisposable
     public async Task DeliveryTimeInThePast_DeliversImmediately()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, Group);
+        await db.SubscribeAsync(Channel, Group);
 
         await db.ExecuteAsync("HW.PUBLISH", Channel, "overdue"u8.ToArray(),
             "AT", TicksIn(TimeSpan.FromMinutes(-5)).ToString());
@@ -89,19 +89,19 @@ public class DelayedDeliveryTests : IDisposable
     public async Task GroupSubscribingDuringTheDelay_DoesNotReceiveTheMessage()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, Group);
+        await db.SubscribeAsync(Channel, Group);
 
         await db.ExecuteAsync("HW.PUBLISH", Channel, "wait"u8.ToArray(),
             "AT", TicksIn(TimeSpan.FromMilliseconds(500)).ToString());
 
         // Subscribes after the publish, before the delivery time.
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, "late-joiner");
+        await db.SubscribeAsync(Channel, "late-joiner");
 
         await Task.Delay(700);
         await ReceiveCountAsync(db);   // any consumer's poll promotes for its own group
 
-        var late = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@late-joiner", "node-1");
-        late.IsNull.Should().BeTrue(
+        var late = await db.ClaimQAsync($"{Channel}@late-joiner", "node-1");
+        late.Should().BeNull(
             "a group registered after publish does not receive a delayed message (018 Decision 3)");
     }
 
@@ -109,7 +109,7 @@ public class DelayedDeliveryTests : IDisposable
     public async Task MultipleDelayedMessages_ArriveInDeliveryTimeOrder()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, Group);
+        await db.SubscribeAsync(Channel, Group);
 
         await db.ExecuteAsync("HW.PUBLISH", Channel, "third"u8.ToArray(),
             "AT", TicksIn(TimeSpan.FromMilliseconds(500)).ToString());
@@ -124,10 +124,9 @@ public class DelayedDeliveryTests : IDisposable
         var derivedQueue = $"{Channel}@{Group}";
         for (var i = 0; i < 3; i++)
         {
-            var result = await db.ExecuteAsync("HW.QCLAIM", derivedQueue, "node-1");
-            if (result.IsNull) break;
-            var arr = (RedisResult[])result!;
-            payloads.Add((string)arr[1]!);
+            var result = await db.ClaimQAsync(derivedQueue, "node-1");
+            if (result is not { } claim) break;
+            payloads.Add(claim.PayloadText);
         }
 
         payloads.Should().Equal(["first", "second", "third"],
@@ -141,7 +140,7 @@ public class DelayedDeliveryTests : IDisposable
             o.DataDir = Path.Combine(Path.GetTempPath(), $"hw-delay-{Guid.NewGuid():N}"));
 
         var db = (await ConnectionMultiplexer.ConnectAsync(durable.ConnectionString)).GetDatabase();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, Group);
+        await db.SubscribeAsync(Channel, Group);
         await db.ExecuteAsync("HW.PUBLISH", Channel, "durable"u8.ToArray(),
             "AT", TicksIn(TimeSpan.FromMilliseconds(700)).ToString());
 
@@ -150,8 +149,8 @@ public class DelayedDeliveryTests : IDisposable
         var after = (await ConnectionMultiplexer.ConnectAsync(durable.ConnectionString)).GetDatabase();
         await Task.Delay(900);
 
-        var result = await after.ExecuteAsync("HW.QCLAIM", $"{Channel}@{Group}", "node-1");
-        result.IsNull.Should().BeFalse("a delayed message must survive AOF recovery");
+        var result = await after.ClaimQAsync($"{Channel}@{Group}", "node-1");
+        result.Should().NotBeNull("a delayed message must survive a restart");
     }
 
     [Fact]

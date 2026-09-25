@@ -9,7 +9,7 @@ namespace Highway.Server.Commands.Ported;
 /// Two forms (042 T1 + 042-1a D2):
 ///
 /// <para><b>Replica:</b> <c>HW.REPL.HELLO &lt;replicaId&gt; &lt;lastAppliedSeq&gt; &lt;epoch&gt;
-/// [endpoint]</c> → <c>[primaryEpoch, minSeq]</c>. The optional endpoint names where the
+/// [endpoint] FORMAT &lt;n&gt;</c> → <c>[primaryEpoch, minSeq, format]</c>. The optional endpoint names where the
 /// caller is reachable — a promoting node announces itself with it, so a demoted
 /// primary's <c>-NOTPRIMARY</c> can redirect clients to the real primary.</para>
 ///
@@ -20,16 +20,23 @@ namespace Highway.Server.Commands.Ported;
 /// follows. Willingness is the contract predicate (<see cref="ReplicationFeeder.IsWillingForHerd"/>);
 /// answering it never promotes — promotion happens on the first accepted client verb
 /// (042-1c).</para>
+///
+/// <para><b>Peer (069 R1):</b> <c>HW.REPL.HELLO PEER &lt;nodeId&gt; &lt;lastSeenEpoch&gt;</c> answers
+/// exactly as the client form, but its connection is a peer session: it is not counted as a herd
+/// client, and it is not master contact. A standby that has lost its master asks its higher-priority
+/// peers this before it answers a client willing.</para>
 /// </summary>
 internal sealed class HwReplHelloCommand : HighwayCommand
 {
     private const string ClientForm = "CLIENT";
+    private const string PeerForm = "PEER";
 
     private bool _isClientForm;
     private string _replicaId = "";
     private ulong _lastApplied;
     private ulong _epoch;
     private string? _endpoint;
+    private int? _format;
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
     {
@@ -39,10 +46,11 @@ internal sealed class HwReplHelloCommand : HighwayCommand
             return Fail(HighwayErrors.InvalidArg, "replicaId is blank");
 
         var firstText = Encoding.UTF8.GetString(first);
-        if (firstText.Equals(ClientForm, StringComparison.OrdinalIgnoreCase))
+        var isPeer = firstText.Equals(PeerForm, StringComparison.OrdinalIgnoreCase);
+        if (isPeer || firstText.Equals(ClientForm, StringComparison.OrdinalIgnoreCase))
         {
-            _isClientForm = true;
-            if (!TryReadIdentifier(input, ref idx, "clientId", ctx.Options.MaxIdentifierBytes, out _replicaId))
+            _isClientForm = true;   // the peer form answers exactly as the client form
+            if (!TryReadIdentifier(input, ref idx, isPeer ? "nodeId" : "clientId", ctx.Options.MaxIdentifierBytes, out _replicaId))
                 return false;
             return TryReadUInt64(input, ref idx, "lastSeenEpoch", out _epoch);
         }
@@ -54,9 +62,21 @@ internal sealed class HwReplHelloCommand : HighwayCommand
             return false;
         if (!TryReadUInt64(input, ref idx, "epoch", out _epoch))
             return false;
-        var endpoint = input.Next(ref idx);
-        if (!endpoint.IsEmpty)
-            _endpoint = Encoding.UTF8.GetString(endpoint);
+        // Optional: <endpoint> and FORMAT <n> (065 T6), in either order.
+        for (var arg = input.Next(ref idx); !arg.IsEmpty; arg = input.Next(ref idx))
+        {
+            var text = Encoding.UTF8.GetString(arg);
+            if (text.Equals("FORMAT", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!int.TryParse(Encoding.ASCII.GetString(input.Next(ref idx)), out var format))
+                    return Fail(HighwayErrors.InvalidArg, "FORMAT requires the storage format number");
+                _format = format;
+            }
+            else
+            {
+                _endpoint = text;
+            }
+        }
         return true;
     }
 
@@ -71,8 +91,21 @@ internal sealed class HwReplHelloCommand : HighwayCommand
             return;
         }
 
+        // 065 T6: a replica applies this primary's WAL byte for byte, so it must store the same layout.
+        // A 2.x node (format 3) sends no FORMAT: it must never pull 3.0 batches into its old keyspace.
+        if (_format != HighwayServerBuilder.StorageFormatVersion)
+        {
+            writer.Error(HighwayErrors.Format(HighwayErrors.StorageFormat,
+                $"replica '{_replicaId}' stores format {(_format?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "3 (Highway 2.x)")}; " +
+                $"this primary stores format {HighwayServerBuilder.StorageFormatVersion}. A replica must run the same " +
+                "major version: upgrade it, run 'highways --wipe-data', and let it re-sync from this primary."));
+            return;
+        }
+
         var (epoch, minSeq) = feeder.Hello(_replicaId, _lastApplied, _epoch, _endpoint);
-        writer.TwoIntegers((long)epoch, (long)minSeq);
+        // The reply echoes this primary's format: a 2.x primary ignores FORMAT and answers two
+        // integers, and a 3.0 replica must not take that for consent (it would pull format-3 batches).
+        writer.ThreeIntegers((long)epoch, (long)minSeq, HighwayServerBuilder.StorageFormatVersion);
     }
 
     private void RunClientHandshake(CommandContext ctx, RespWriter writer, ReplicationFeeder feeder)

@@ -14,6 +14,9 @@ namespace Highway.Integration.Tests;
 /// requeue, and finally wraps it as a dead letter. The middle hop is the one worth testing —
 /// a one-worker test would pass even if the context were cached client-side, which would defeat
 /// the entire reason the state is held on the server.</para>
+///
+/// <para>Protocol 5.0: claims are <c>HW.CLAIM SVC</c> and each report names its claim by the token
+/// that claim returned, so a report can only land on the delivery it describes.</para>
 /// </summary>
 public class FailureContextTests : IDisposable
 {
@@ -43,6 +46,18 @@ public class FailureContextTests : IDisposable
         return map;
     }
 
+    /// <summary>Claims the next due request for <paramref name="node"/> (null when nothing is due).</summary>
+    private static Task<Wire5.Claim?> ClaimAsync(IDatabase db, string node) => db.ClaimSvcAsync(Service, node);
+
+    /// <summary>Claims <paramref name="requestId"/> for <paramref name="node"/> and reports a failure against that claim.</summary>
+    private static async Task ClaimAndFailAsync(IDatabase db, string node, string requestId, string type, string detail)
+    {
+        var claim = await ClaimAsync(db, node);
+        claim.Should().NotBeNull($"{requestId} must be claimable by {node} before it can fail");
+        claim!.Value.Id.Should().Be(requestId);
+        ((long)await db.ExecuteAsync("HW.FAIL", claim.Value.Token, type, detail)).Should().Be(1);
+    }
+
     /// <summary>
     /// <b>The test this feature exists for.</b> Two different workers fail the same message in
     /// two different ways; the dead letter has to report both the last failure and where it
@@ -56,25 +71,23 @@ public class FailureContextTests : IDisposable
             Encoding.UTF8.GetBytes("""{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{}}"""));
 
         // node-a claims it and reports a timeout, then dies without acknowledging.
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
-        await db.ExecuteAsync("HW.FAIL", "SVC", Service, "node-a", "req-1",
+        await ClaimAndFailAsync(db, "node-a", "req-1",
             "System.TimeoutException", """{"message":"the call timed out"}""");
         await Task.Delay(70);   // lease expires
 
         // node-b picks up the requeued message. If the sweep dropped the block here, the
         // failure history is already gone and nothing says so.
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-b");
-        await db.ExecuteAsync("HW.FAIL", "SVC", Service, "node-b", "req-1",
+        await ClaimAndFailAsync(db, "node-b", "req-1",
             "System.InvalidOperationException", """{"message":"invalid state"}""");
         await Task.Delay(70);
 
         // Exhaust the remaining attempts so it dead-letters.
         for (var i = 0; i < 4; i++)
         {
-            await db.ExecuteAsync("HW.DEQUEUE", Service, "node-b");
+            await ClaimAsync(db, "node-b");
             await Task.Delay(70);
         }
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-b");
+        await ClaimAsync(db, "node-b");
 
         var dead = await PeekOneAsync(db, Service);
 
@@ -94,14 +107,13 @@ public class FailureContextTests : IDisposable
         await db.ExecuteAsync("HW.CALL", Service, "req-2",
             Encoding.UTF8.GetBytes("""{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{}}"""));
 
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
-        await db.ExecuteAsync("HW.FAIL", "SVC", Service, "node-a", "req-2",
+        await ClaimAndFailAsync(db, "node-a", "req-2",
             "System.TimeoutException", """{"message":"one"}""");
 
         for (var i = 0; i < 6; i++)
         {
             await Task.Delay(70);
-            await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
+            await ClaimAsync(db, "node-a");
         }
 
         var dead = await PeekOneAsync(db, Service);
@@ -125,10 +137,10 @@ public class FailureContextTests : IDisposable
 
         for (var i = 0; i < 6; i++)
         {
-            await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
+            await ClaimAsync(db, "node-a");
             await Task.Delay(70);
         }
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
+        await ClaimAsync(db, "node-a");
 
         var dead = await PeekOneAsync(db, Service);
 
@@ -148,13 +160,12 @@ public class FailureContextTests : IDisposable
         const string body = """{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{"Amount":42}}""";
         await db.ExecuteAsync("HW.CALL", Service, "req-4", Encoding.UTF8.GetBytes(body));
 
-        await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
-        await db.ExecuteAsync("HW.FAIL", "SVC", Service, "node-a", "req-4", "SomeException", "detail");
+        await ClaimAndFailAsync(db, "node-a", "req-4", "SomeException", "detail");
 
         for (var i = 0; i < 6; i++)
         {
             await Task.Delay(70);
-            await db.ExecuteAsync("HW.DEQUEUE", Service, "node-a");
+            await ClaimAsync(db, "node-a");
         }
 
         var dead = await PeekOneAsync(db, Service);

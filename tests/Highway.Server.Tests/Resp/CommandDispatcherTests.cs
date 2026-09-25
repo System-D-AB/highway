@@ -32,12 +32,10 @@ public class CommandDispatcherTests
         var dispatcher = NewDispatcher(out var store);
         var writer = new RespWriter();
 
-        dispatcher.Dispatch(Frame("HW.QSEND", "invoices", "m1", "body"), writer);
+        dispatcher.Dispatch(Frame("HW.SEND", "invoices", "m1", "body"), writer);
 
         Encoding.UTF8.GetString(writer.ToArray()).Should().Be("+OK\r\n");
-        using var snap = store.Snapshot();
-        store.ListLength(snap, Highway.Server.Storage.Layout.HighwayKeyspace.ListPrefix(
-            Highway.Server.Storage.Layout.HighwayNames.Queue("invoices"))).Should().Be(1);
+        new StoreInspector(store).ListLength("hw:q:invoices:q").Should().Be(1);
     }
 
     [Fact]
@@ -58,13 +56,13 @@ public class CommandDispatcherTests
 
         var reply = Encoding.UTF8.GetString(writer.ToArray());
         reply.Should().StartWith("-ERR HW_INVALID_ARG unknown command 'HW.FLY'");
-        reply.Should().Contain("HW.QSEND", "the error names the served subset");
+        reply.Should().Contain("HW.SEND", "the error names the served subset");
     }
 
     [Theory]
     [InlineData("HW.DISCOVER")]                          // arity 2: too few (only name)
     [InlineData("HW.DISCOVER", "a", "b")]                // arity 2: too many
-    [InlineData("HW.QSEND", "q")]                        // arity -4: too few
+    [InlineData("HW.SEND", "q")]                        // arity -4: too few
     public void Dispatch_WrongArity_Errors(params string[] tokens)
     {
         var dispatcher = NewDispatcher(out _);
@@ -79,9 +77,9 @@ public class CommandDispatcherTests
         var dispatcher = NewDispatcher(out _);
         dispatcher.ServedCommands.Should().BeEquivalentTo(new[]
         {
-            "HW.CALL", "HW.REPLY", "HW.DEQUEUE", "HW.ACK", "HW.SUBSCRIBE", "HW.UNSUBSCRIBE",
-            "HW.PUBLISH", "HW.HEARTBEAT", "HW.DISCOVER", "HW.STATS", "HW.REPLAY", "HW.DLQ",
-            "HW.QSEND", "HW.QCLAIM", "HW.QACK", "HW.FAIL", "HW.TOUCH", "HW.JOB",
+            "HW.CALL", "HW.REPLY", "HW.RESULT", "HW.SEND", "HW.PUBLISH", "HW.CLAIM", "HW.ACK",
+            "HW.TOUCH", "HW.FAIL", "HW.DLQ", "HW.IDEM", "HW.SESSION", "HW.HEARTBEAT", "HW.UNSUBSCRIBE",
+            "HW.JOB", "HW.DISCOVER", "HW.STATS", "HW.REPLAY",
             "HW.REPL.HELLO", "HW.REPL.PULL", "HW.REPL.ACK",
             "HW.REPL.SNAPSHOT", "HW.REPL.PROMOTE", "HW.REPL.FENCE", "HW.REPL.STATUS", "HW.REPL.WITNESS",
             "HW.REPL.JOIN", "HW.REPL.GOODBYE",
@@ -111,8 +109,8 @@ public class CommandDispatcherTests
             totals[inst.Name] = totals.GetValueOrDefault(inst.Name) + m);
         listener.Start();
 
-        dispatcher.Dispatch(Frame("HW.QSEND", "invoices", "m1", "body"), new RespWriter());
-        dispatcher.Dispatch(Frame("HW.QCLAIM", "invoices", "worker1"), new RespWriter());
+        dispatcher.Dispatch(Frame("HW.SEND", "invoices", "m1", "body"), new RespWriter());
+        dispatcher.Dispatch(Frame("HW.CLAIM", "Q", "invoices", "worker1"), new RespWriter());
         dispatcher.Dispatch(Frame("HW.CALL", "orders.get", "r1", "body"), new RespWriter());
 
         totals.GetValueOrDefault("highway.messages.published").Should().Be(1);

@@ -1,18 +1,18 @@
 # The Highway Protocol
 
-**Protocol version 4.13** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
+**Protocol version 5.0** (Highway 3.0) — see the [changelog](#protocol-version--changelog); the RESP surface the broker serves is in [Served RESP Commands](#served-resp-commands).
 
 ## About
 
-This file is the complete and authoritative definition of the Highway wire protocol. Everything Highway adds to Garnet is here: every command, every reply shape, every error, every key, every stored byte layout, every doorbell channel, and the guarantees that span commands.
+This file is the complete and authoritative definition of the Highway wire protocol: every command, every reply shape, every error, every stored record layout, every doorbell channel, and the guarantees that span commands.
 
-**Scope.** Highway's extension surface only. Garnet's own command set is out of scope — except for the handful of stock commands a Highway client is *required* to issue, which are listed in [Stock Garnet Dependencies](#stock-garnet-dependencies). A client built from the `HW.*` commands alone cannot function.
+**Scope.** Highway's broker is its own RESP server (since feature 040). It serves the `HW.*` command set plus a small, exhaustive list of stock commands (`AUTH`, `PING`, `SUBSCRIBE` for doorbells, and the opt-in cache's `GET`/`SET`/…) — listed in [Served RESP Commands](#served-resp-commands). Since 5.0, **every Highway-owned structure is reached through an `HW.*` command**; no Highway state is read or written with stock key commands, so the storage layout is private to the broker.
 
-**Authority.** This file is the single authoritative definition of the protocol. Any earlier command table in the maintainer's internal product notes is superseded by it for anything implementation-facing; where they disagree, this file governs. The local feature working notes keep the *reasoning* behind each decision; this file is the reference for *what* the protocol is.
+**Authority.** This file is the single authoritative definition of the protocol. Where any other document disagrees, this file governs. The local feature working notes keep the *reasoning* behind each decision; this file is the reference for *what* the protocol is.
 
 **How this file stays true.** The [Command Index](#command-index) is parsed by `ProtocolConformanceTests` and checked against a running server in both directions — a command documented but not registered, registered but not documented, or registered with a different arity all fail the test suite. The rest of the file is prose and is the author's responsibility; a feature that changes the protocol is required to update this file in the same feature.
 
-**Reading order.** Implementing a client: [Transport & Framing](#transport--framing), then [Error Contract](#error-contract), then the command sections you need, then [Stock Garnet Dependencies](#stock-garnet-dependencies). Operating a server: [Key Schema](#key-schema) and [Server Options](#server-options).
+**Reading order.** Implementing a client: [Transport & Framing](#transport--framing), then [Error Contract](#error-contract), then [Work Commands](#work-commands) and [Session & Registry Commands](#session--registry-commands). Operating a server: [Storage Layout & Stored Records](#storage-layout--stored-records) and [Server Options](#server-options).
 
 ---
 
@@ -22,16 +22,14 @@ This file is the complete and authoritative definition of the Highway wire proto
 - [Command Index](#command-index)
 - [Transport & Framing](#transport--framing)
 - [Error Contract](#error-contract)
-- [RPC Commands](#rpc-commands)
-- [Pub/Sub Commands](#pubsub-commands)
-- [Registry Commands](#registry-commands)
-- [Observability Commands](#observability-commands)
-- [Queue Commands](#queue-commands)
+- [Work Commands](#work-commands)
+- [Session & Registry Commands](#session--registry-commands)
+- [Idempotency Commands](#idempotency-commands)
 - [Dead Letter Commands](#dead-letter-commands)
+- [Observability Commands](#observability-commands)
 - [Replication Commands](#replication-commands)
-- [Stock Garnet Dependencies](#stock-garnet-dependencies)
-- [Key Schema](#key-schema)
-- [Entry Framing](#entry-framing)
+- [Served RESP Commands](#served-resp-commands)
+- [Storage Layout & Stored Records](#storage-layout--stored-records)
 - [Doorbell Channels](#doorbell-channels)
 - [Invariants](#invariants)
 - [Server Options](#server-options)
@@ -40,14 +38,15 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.13**
+**Current version: 5.0**
 
-A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
+A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake. A 5.0 broker serves 5.0 clients (Highway 3.0 packages); 4.x clients are not supported.
 
 **Versioning rule.** The minor version increases for additive changes: a new command, a new optional argument, a new field appended to a self-describing reply, a new error code. The major version increases for anything that could break a conforming client: removing or renaming a command, changing argument order, changing an existing reply's shape, or changing what an existing error code means.
 
 | Version | Features | Change |
 |---|---|---|
+| 5.0 | 065, 067, 068, 069 | **Highway 3.0.** **Major.** *One work path:* `HW.CLAIM SVC\|Q <name> <node> [COUNT n]` replaces `HW.DEQUEUE` and `HW.QCLAIM` and answers rows of `[token, id, payload]` — an **empty array** (not a nil) when nothing is due. `HW.ACK`, `HW.TOUCH` and `HW.FAIL` take the claim's **token** (`HW.ACK <token>`, `HW.TOUCH <token>`, `HW.FAIL <token> <type> <detail>`) and answer `:1` held / `:0` not held; `HW.QACK` is removed. `HW.QSEND` is renamed `HW.SEND`. *Declarative session:* `HW.SESSION <node> <json>` declares a node's catalog (optional), group subscriptions and job schedules in one idempotent command, replacing the heartbeat registration form and `HW.SUBSCRIBE`; a liveness heartbeat for an unknown node answers `+SESSION` (was `+REGISTER`). `HW.JOB SET` remains as an operator command. *Highway state only through `HW.*`:* `HW.RESULT <requestId>` takes an RPC reply (was stock `GET`/`DEL hw:rep:*`); `HW.IDEM BEGIN\|END\|ABORT` is the `[Idempotent]` gate (was stock `SET NX`/`GET`/`DEL hw:idem:*`) — raw keys are now served only for the opt-in cache. *Errors:* adds `ERR HW_INVALID_TOKEN`; `ERR Transaction failed.` is no longer emitted. *Replication:* the replica form of `HW.REPL.HELLO` carries `FORMAT <n>` and its reply gains a third element, the primary's format; a mismatch is refused on both sides — the primary answers `ERR HW_STORAGE_FORMAT`, the replica stops pulling. Adds the peer form `HW.REPL.HELLO PEER <nodeId> <lastSeenEpoch>` (a standby defers to a live higher-priority peer before answering willing) and the equal-epoch tie-break on the replica form (069). *Storage format 4* (the box layout, 065): every structure in its own key range; a 2.x data directory is refused, never migrated. *Budgets:* a delayed publish now counts against, and can be refused by, each group's byte budget, as a delayed send always did. Expired reply slots and idempotency markers are now deleted, not merely hidden. |
 | 4.13 | 062 | **Replica pulls from memory.** `HW.REPL.PULL`'s reply shape is unchanged; its page is now defined precisely: the first batch begins at exactly `fromSeq + 1` (the replica's watermark + 1), and a WAL record that spans the cursor is trimmed to start there. A batch is one committed write or several merged by RocksDB's group commit, so batch boundaries may differ between pulls of the same range; sequences and contents do not. A record that cannot be trimmed with certainty is refused with `ERR HW_REPL_GAP`. Compatible with existing replicas. |
 | 4.12 | 059, 060 | **Idle write load.** Adds the key `hw:reg:seen:{nodeId}` (8-byte liveness timestamp). The `HW.HEARTBEAT` liveness form now writes only that key and **no longer rewrites** `hw:reg:node:{nodeId}` — the catalog is written once, at registration, instead of on every beat (and is no longer re-shipped to standbys per beat). Effective last-seen is the newer of the record header and the new key, so pre-4.12 records read correctly. Server-side: a commit that stages nothing (e.g. an empty `HW.QCLAIM`/`HW.DEQUEUE`) no longer issues a synced write. No command, argument or reply changes. Additive. |
 | 4.11 | 052 | **Readiness field.** The `HW.STATS` server form and `HW.REPL.STATUS` append `repl.ready` (bool) and `repl.readyReason` (`primary`/`replica`/`fenced`/`draining`/`bootstrapping`/`demoted`) — the same decision the new HTTP `GET /ready` endpoint serves, so readiness is legible on every channel. The health endpoints (`/health`, `/ready`, `/replication`) are HTTP, not RESP, and carry no wire command. Additive. |
@@ -78,25 +77,25 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 
 | Command | Arity | Forms | Summary |
 |---|---|---|---|
-| `HW.CALL` | 4 | 1 | Enqueue an RPC request and ring the service doorbell |
-| `HW.REPLY` | 3 | 1 | Write the caller's reply slot and ring the reply doorbell |
-| `HW.DEQUEUE` | 3 | 1 | Claim the next request for a node; sweeps expired leases and dead nodes |
-| `HW.ACK` | 4 | 1 | Acknowledge a claimed request |
+| `HW.CALL` | 4 | 1 | Enqueue an RPC request on a service and ring the service doorbell |
+| `HW.SEND` | -4 | 2 | Enqueue work for exactly one processor, now or at a future time. Refuses with `HW_QUEUE_FULL` at the byte limit |
 | `HW.PUBLISH` | -3 | 2 | Durable fan-out to every subscriber group, immediately or at a future time |
-| `HW.SUBSCRIBE` | -3 | 1 | Register a subscriber group, and optionally the node backing it |
-| `HW.UNSUBSCRIBE` | 3 | 1 | Remove a subscriber group and delete its state |
-| `HW.HEARTBEAT` | -2 | 4 | Register a catalog, prove liveness, depart, or retire permanently |
-| `HW.DISCOVER` | 2 | 1 | Live nodes hosting a service |
-| `HW.STATS` | -1 | 4 | Server, service, channel, or recorder counters |
-| `HW.REPLAY` | -2 | 1 | Recent recorded operations for one name |
+| `HW.CLAIM` | -4 | 2 | Claim the next due work from a service (`SVC`) or queue (`Q`) for a node; returns `[token, id, payload]` rows |
+| `HW.ACK` | 2 | 1 | Settle a claim by its token — it can never be redelivered |
+| `HW.TOUCH` | 2 | 1 | Renew a claim's lease by its token, without acknowledging |
+| `HW.FAIL` | 4 | 1 | Record why a handler failed on a claim, by its token, without acknowledging |
+| `HW.REPLY` | 3 | 1 | Write the caller's reply slot and ring the reply doorbell |
+| `HW.RESULT` | 2 | 1 | Take (read and remove) a waiting RPC reply |
 | `HW.DLQ` | -3 | 3 | Inspect, requeue, or purge dead letters |
-| `HW.QSEND` | -4 | 2 | Enqueue work for exactly one processor, now or at a future time. Refuses with `HW_QUEUE_FULL` at the byte limit |
-| `HW.QCLAIM` | 3 | 1 | Claim the next queued message for a worker; promotes deferred work and sweeps expired leases |
-| `HW.QACK` | 4 | 1 | Acknowledge a claimed queued message |
-| `HW.FAIL` | 7 | 2 | Record why a handler failed, without acknowledging the message |
-| `HW.JOB` | -2 | 3 | Register, remove, or list recurring-job schedules; firing rides `HW.QCLAIM` |
-| `HW.TOUCH` | 5 | 2 | Renew a claimed message's lease, without acknowledging it |
-| `HW.REPL.HELLO` | -4 | 2 | Replica form: register/resume a slot (optional announcing endpoint). CLIENT form: the herd handshake — master / willing / standby-with-redirect |
+| `HW.IDEM` | -4 | 3 | The `[Idempotent]` gate: claim, complete, or abort a delivery's run |
+| `HW.SESSION` | 3 | 1 | Declare a node's session: catalog (optional), group subscriptions, job schedules |
+| `HW.HEARTBEAT` | -2 | 3 | Prove liveness, depart, or retire permanently |
+| `HW.UNSUBSCRIBE` | 3 | 1 | Remove a subscriber group and destroy its queue |
+| `HW.JOB` | -2 | 3 | Register, remove, or list recurring-job schedules; firing rides `HW.CLAIM` |
+| `HW.DISCOVER` | 2 | 1 | Live nodes hosting a service |
+| `HW.STATS` | -1 | 4 | Server, service, channel, queue, or recorder counters |
+| `HW.REPLAY` | -2 | 1 | Recent recorded operations for one name |
+| `HW.REPL.HELLO` | -4 | 2 | Replica form: register/resume a slot, declaring the storage format (optional announcing endpoint). CLIENT form: the herd handshake — master / willing / standby-with-redirect. PEER form: the same answer to a standby probing its higher-priority peers |
 | `HW.REPL.PULL` | 3 | 1 | Pull a paged WAL batch from a sequence, stamped with the primary's epoch |
 | `HW.REPL.ACK` | 3 | 1 | Advance a replica slot's acked watermark |
 | `HW.REPL.SNAPSHOT` | -2 | 3 | Stream a checkpoint (`BEGIN` / `GET` / `END`), resumable by file and offset |
@@ -113,33 +112,37 @@ Every command Highway registers. Arity follows the Redis convention: a positive 
 
 ### RESP, not a new protocol
 
-Highway adds commands to Garnet; it does not change the wire format. Everything here is standard RESP, so `redis-cli`, RESP protocol analyzers, and StackExchange.Redis `Execute()` all work against a Highway server unmodified. Stock Garnet commands continue to work alongside Highway's, and Highway's keys are namespaced so they cannot collide with application data.
+Highway speaks standard RESP2, so `redis-cli`, RESP protocol analyzers, and StackExchange.Redis `Execute()` all work against a Highway broker unmodified. The broker is not a general Redis: it serves the `HW.*` commands and the short list in [Served RESP Commands](#served-resp-commands), and answers anything else with an error naming the served set.
 
 ### Arity convention
 
 Arity counts the command name itself:
 
 - **Positive** — the exact argument count. `HW.CALL` has arity 4: the name plus three arguments.
-- **Negative** — the minimum. `HW.RECEIVE` has arity -3: the name plus at least two arguments.
+- **Negative** — the minimum. `HW.SEND` has arity -4: the name plus at least three arguments.
 
-Garnet enforces arity before a command's own validation runs, so a wrong argument count produces Garnet's error message rather than one of Highway's codes. Note that a negative arity places **no upper bound**: extra arguments pass the arity check and are ignored by the command.
+The broker checks arity before a command's own validation runs, so a wrong argument count produces `ERR wrong number of arguments…` rather than one of Highway's codes. A negative arity places **no upper bound**: extra arguments pass the arity check, and a command rejects or ignores them as its section says.
 
 ### Identifiers
 
-Service names, channel names, group names, node IDs, request IDs and message IDs are *identifiers* and share one rule:
+Service names, channel names, group names, queue names, node IDs, request IDs, message IDs and job names are *identifiers* and share one rule:
 
 - non-empty;
 - at most `MaxIdentifierBytes` (default 256) bytes;
 - every byte `>= 0x20` and not `0x7F`;
-- **must not contain `@`** (reserved for derived group queue names `{channel}@{group}` as of protocol 4.0).
+- **must not contain `@`** — reserved for derived group queue names `{channel}@{group}` (since 4.0). A group queue is addressed by its derived name where a command takes a queue (`HW.CLAIM Q`, `HW.DLQ Q`, `HW.STATS Q:`), and nowhere else.
 
-No C0 control characters, no DEL, no `@`. Validation runs on raw bytes before any string decoding, so no key is ever derived from an invalid value. A violation is rejected with `HW_INVALID_ARG`.
+No C0 control characters, no DEL, no `@`. Validation runs on raw bytes before any string decoding, so no stored key is ever derived from an invalid value. A violation is rejected with `HW_INVALID_ARG`, naming the argument and why. Names inside `HW.SESSION`'s JSON obey the same rule and are reported the same way.
 
-**Why the rule exists.** Several internal keys are newline-delimited lists (see [Key Schema](#key-schema)). An identifier containing a newline would split into two entries and silently corrupt routing — a node could vanish from a worker set, or messages could fan out to a group no consumer drains. Banning the whole C0 range plus DEL is cheaper to reason about than banning newline alone and costs nothing for real identifiers.
+**Why the rule exists.** Identifiers become components of stored keys and of doorbell channel names; banning the whole C0 range plus DEL is cheaper to reason about than banning individual delimiters, and costs nothing for real identifiers.
 
 ### Payloads
 
 Payloads are **not** identifiers. They are opaque bytes, stored and returned byte-for-byte, subject only to a size cap (`MaxPayloadBytes`, default 5 MiB, configurable to a 15 MiB ceiling). Any byte value is permitted, including control characters and invalid UTF-8.
+
+### Claim tokens
+
+`HW.CLAIM` returns a **token** per claimed message; `HW.ACK`, `HW.TOUCH` and `HW.FAIL` take it back. A token is opaque ASCII — echo it verbatim, never construct or parse one. (Today it is `{box}.{sequence}`; that may change without a protocol version.) A token names exactly one claim: sequences are never reused, so after a lease expiry the redelivered message carries a new token and the old one answers `:0`. A token that does not parse is `ERR HW_INVALID_TOKEN`.
 
 ### The Highway envelope
 
@@ -157,12 +160,7 @@ The `HW.*` commands never inspect a payload, so the payload format is a client c
 | `body` | The application object, embedded as a nested JSON value. |
 | `tp` | **Optional.** W3C `traceparent` for distributed tracing (feature 002). |
 
-The `tp` field is optional in both directions and does **not** change the
-envelope version. `v` and `body` are the only required fields, and a reader
-ignores properties it does not recognise — verified both ways: an existing reader
-given an envelope carrying `tp` reads it correctly, and a new reader given one
-without simply finds it absent. A reader that does not understand `tp` must
-ignore it rather than reject the envelope.
+The `tp` field is optional in both directions and does **not** change the envelope version. `v` and `body` are the only required fields, and a reader ignores properties it does not recognise. A reader that does not understand `tp` must ignore it rather than reject the envelope.
 
 No polymorphic type metadata is ever written. The wire carries a service or channel name and a JSON shape, never CLR type identity.
 
@@ -175,75 +173,54 @@ This is the most important section for a client implementer: the whole retry pol
 ### The classification rule
 
 > A reply beginning `ERR HW_` is **permanent** — never retry.
-> The exact message `ERR Transaction failed.` is **transient** — safe to retry.
-> A reply beginning `NOTPRIMARY` is **failover** — reconnect to the advertised endpoint (feature 042). It is not `ERR HW_`-prefixed, so a client that only implements the two-class rule treats it as permanent; Highway.Client retries it against the other endpoint.
+> A reply beginning `NOTPRIMARY` is **failover** — reconnect to the advertised endpoint (feature 042) and retry there.
+> `NOAUTH`, `WRONGPASS` and `NOPERM` are **permanent**, and are configuration, not code.
+> A lost or reset connection is **transport** — retry with bounded backoff, failing over first when other endpoints are configured.
 > Anything else is **permanent**.
 
-That is the entire rule, and it is total.
-
-### Why the bare message is the retryable one
-
-`ERR Transaction failed.` is not Highway's message — it is Garnet's, emitted when a transaction aborts. For Highway commands the cause is a **watch-version conflict**: several commands read a key during their `Prepare` phase, which registers a watch, and the transaction is abandoned if that key changes before locks are taken. The command performs **no work at all**, which is exactly what makes retrying safe.
-
-Highway's own errors carry the `ERR HW_` prefix so the bare Garnet message stays unambiguous. Highway deliberately emits nothing that could be confused with it.
+That is the entire rule, and it is total. (Before 5.0 the bare `ERR Transaction failed.` was a retryable class, emitted by Garnet transactions; no 5.0 command emits it. A client may still treat it as retryable — nothing will send it.)
 
 ### Codes
 
 | Code | Meaning | Class |
 |---|---|---|
-| `ERR HW_INVALID_ARG <detail>` | An identifier is blank, contains a control character, exceeds the length cap, or is otherwise malformed (a non-numeric message ID; a second `HW.HEARTBEAT` argument that is neither `BYE` nor valid catalog JSON) | Permanent |
-| `ERR HW_PAYLOAD_TOO_LARGE <actual> > <limit>` | Payload above `MaxPayloadBytes`, or catalog above `MaxCatalogBytes` | Permanent |
-| `ERR HW_INVALID_COUNT <detail>` | `HW.RECEIVE` `COUNT` non-numeric, zero, negative, overflowing, or above `ReceiveMaxCount` | Permanent |
-| `NOAUTH <detail>` | The server requires authentication and none was presented | **Permanent** — configuration, not code |
-| `WRONGPASS <detail>` | The credentials were rejected | **Permanent** |
-| `NOPERM <detail>` | Authenticated, but not permitted to run the command | **Permanent** |
-| `ERR HW_STORAGE_FORMAT <detail>` | A queue holds entries written by a pre-013 Highway. The message names the key | Permanent — drain the queue or delete the data directory |
+| `ERR HW_INVALID_ARG <detail>` | An identifier is blank, contains a control character or `@`, exceeds the length cap, or an argument is otherwise malformed (an unknown keyword, a bad `AT`, a session JSON that does not parse). The detail names the argument | Permanent |
+| `ERR HW_INVALID_TOKEN <detail>` | A claim token that does not parse. A token that parses but is not held answers `:0`, not this | Permanent |
+| `ERR HW_PAYLOAD_TOO_LARGE <actual> > <limit>` | Payload above `MaxPayloadBytes`, catalog above `MaxCatalogBytes`, or a job template above `MaxPayloadBytes` | Permanent |
+| `ERR HW_INVALID_COUNT <detail>` | A `COUNT` or `LIMIT` that is non-numeric, zero, negative, overflowing, or above its cap | Permanent |
 | `ERR HW_QUEUE_FULL <detail>` | A queue is at its byte limit. The message names the queue (or, for a publish, the **group**) and the limit | Permanent — the caller must shed load, buffer, or alert. Retrying into a full queue holds a connection and hammers a broker already over budget |
+| `ERR HW_STORAGE_FORMAT <detail>` | Stored data this build cannot read: a pre-013 entry, or — on `HW.REPL.HELLO` — a replica declaring a different storage format (a 2.x node against a 3.0 primary) | Permanent — drain with the previous version, or wipe and re-sync |
 | `ERR HW_REPL_GAP <detail>` | A replica's pull cursor fell behind the retained WAL (042-1a). The detail names the requested and first-available sequences | Permanent for that cursor — the replica must re-sync via `HW.REPL.SNAPSHOT`; never retried as-is |
 | `ERR HW_PRIORITY_TAKEN <detail>` | A joining node announced a roster priority a live member already holds (042-1) | Permanent — an operator config error; the detail names the holder |
 | `ERR HW_INTERNAL <detail>` | An unexpected exception escaped a command handler | Permanent — a server bug |
-| `ERR Transaction failed.` | Garnet aborted the transaction; no work was performed | **Transient — retry** |
-| `NOTPRIMARY <endpoint> <epoch>` | This node is not writable (replica, fenced, or demoted). `<endpoint>` is where the client should go; `<epoch>` is this node's epoch | **Failover — retry on `<endpoint>`** (042). Not an `ERR HW_` prefix |
-| `ERR wrong number of arguments...` | Garnet's arity check, before the command runs | Permanent |
+| `NOTPRIMARY <endpoint> <epoch>` | This node is not writable (replica, fenced, draining for new work, or demoted). `<endpoint>` is where the client should go; `<epoch>` is this node's epoch | **Failover — retry on `<endpoint>`** (042). Not an `ERR HW_` prefix |
+| `NOAUTH <detail>` | The server requires authentication and none was presented | **Permanent** — configuration, not code |
+| `WRONGPASS <detail>` | The credentials were rejected | **Permanent** |
+| `NOPERM <detail>` | Authenticated, but not permitted to run the command | **Permanent** |
+| `ERR wrong number of arguments...` | The arity check, before the command runs | Permanent |
 
-**The authentication errors carry neither marker.** They are not `ERR HW_`-prefixed and are not the bare transient abort, so a client following the two-class rule literally has nowhere to put them. They are permanent: retrying a wrong password wastes the backoff budget and trips attempt counters on systems that keep them. They are worth their own exception type because the remedy differs from every other permanent failure — it is a configuration problem, not a code or network one.
+**The authentication errors carry no `ERR HW_` marker.** They are permanent, and worth their own exception type because the remedy differs from every other permanent failure — it is a configuration problem, not a code or network one. StackExchange.Redis surfaces `NOAUTH`/`WRONGPASS` raised during connection setup inside a *connection* exception, so a client that does not inspect the message chain will report a wrong password as an unreachable host and send its operator to check the network.
 
-Note that StackExchange.Redis surfaces `NOAUTH`/`WRONGPASS` raised during connection setup inside a *connection* exception, so a client that does not inspect the message chain will report a wrong password as an unreachable host and send its operator to check the network.
+**A command either commits entirely or changes nothing.** Every `HW.*` command stages its writes in one batch and commits it once; a rejected or failed command writes nothing. That is what makes a permanent error safe to report and move on from — there is no partial state to repair.
 
-`HW_INTERNAL` is permanent deliberately. Several commands rewrite a whole list (acknowledgement, the lease sweeps), so a mid-operation failure can leave partial state that retrying would compound rather than repair.
+### `+SESSION` is not an error
 
-### Which commands can abort transiently
-
-Only commands that read a key during `Prepare`. That is:
-
-| Can abort transiently | Cannot |
-|---|---|
-| `HW.DEQUEUE` | `HW.CALL` |
-| `HW.PUBLISH` | `HW.REPLY` |
-| `HW.DISCOVER` | `HW.ACK` |
-| `HW.STATS` | `HW.SUBSCRIBE` |
-| `HW.HEARTBEAT` — registration and departure forms | `HW.UNSUBSCRIBE` |
-| | `HW.HEARTBEAT` — liveness form |
-
-The right-hand column takes its locks without a prior read, so there is no watch to invalidate.
-
-A client may of course retry the bare message from any command — the classification is about safety, and no command performs partial work on this abort. The distinction matters for diagnosis: a transient abort from a command in the right-hand column would indicate something other than a watch conflict.
-
-### The `HW.PUBLISH` consequence
-
-A transient abort on `HW.PUBLISH` means the message reached **no group**. It was not partially delivered and not queued — it does not exist. A publisher that treats the failure as fire-and-forget silently loses the message.
-
-**A Highway client must retry a transient `HW.PUBLISH`.** This is the one place where not retrying costs data rather than latency.
-
-### `+REGISTER` is not an error
-
-The `HW.HEARTBEAT` liveness form can reply with the simple string `REGISTER`. This is a **normal reply**: the server holds no registration record for the node and needs its catalog. It must not be routed through error handling or classified by the rule above. See [`HW.HEARTBEAT`](#hwheartbeat).
+A liveness heartbeat for a node the broker holds no session for replies with the simple string `SESSION`. This is a **normal reply**: the broker needs the node's session declared again (`HW.SESSION`). It must not be routed through error handling or classified by the rule above. See [`HW.HEARTBEAT`](#hwheartbeat).
 
 ---
+## Work Commands
 
-## RPC Commands
+Highway moves three kinds of work, and 5.0 gives them one path:
 
-An RPC request flows: `HW.CALL` enqueues it → a worker claims it with `HW.DEQUEUE` → the worker writes the answer with `HW.REPLY` → the caller reads the reply slot with stock `GET`/`DEL` → the worker releases the claim with `HW.ACK`.
+- a **service** receives RPC requests (`HW.CALL`) and answers each with `HW.REPLY`;
+- a **queue** receives work for exactly one processor (`HW.SEND`), with no reply;
+- a **group queue** `{channel}@{group}` receives one copy of every message published to its channel (`HW.PUBLISH`) — a subscriber group *is* a queue (since 4.0).
+
+All three are claimed with `HW.CLAIM` and settled by token with `HW.ACK`, `HW.TOUCH` and `HW.FAIL`. Delivery is **at least once**: a claim that is not acknowledged before its lease expires is delivered again, with its attempt count incremented, until `MaxDeliveryAttempts`, after which it is dead-lettered (see [Dead Letter Commands](#dead-letter-commands)).
+
+A service and a queue may share a name without colliding — `HW.CLAIM SVC x` and `HW.CLAIM Q x` read different work.
+
+An RPC request flows: `HW.CALL` enqueues it → a worker claims it with `HW.CLAIM SVC` → the worker writes the answer with `HW.REPLY` → the caller takes the reply with `HW.RESULT` → the worker settles the claim with `HW.ACK`.
 
 ### HW.CALL
 
@@ -251,19 +228,130 @@ An RPC request flows: `HW.CALL` enqueues it → a worker claims it with `HW.DEQU
 HW.CALL <service> <requestId> <payload>   →   +OK
 ```
 
-Appends the request to the service's queue and rings the service doorbell.
+Appends the request to the service and rings the service doorbell.
 
 | | |
 |---|---|
 | **Arguments** | `service`, `requestId` — identifiers. `payload` — opaque, up to `MaxPayloadBytes`. |
 | **Reply** | `+OK` |
-| **Keys written** | `hw:svc:{service}:q` |
 | **Doorbell** | `hw:door:svc:{service}`, payload = `requestId` |
 | **Idempotency** | **Not idempotent.** Repeating enqueues a second request. The caller owns request-ID uniqueness. |
 
-Enqueuing to a service with no workers succeeds — the request waits durably. There is no registration check here; an unknown service name is a valid queue name.
+Calling a service with no workers succeeds — the request waits durably. There is no registration check; an unknown service name is a valid service. The `requestId` is the caller's correlation handle and names its reply slot. It is stored and returned unmodified.
 
-The `requestId` is the caller's correlation handle and determines its reply slot. It is stored and returned unmodified.
+### HW.SEND
+
+```
+HW.SEND <queue> <messageId> <payload>              →   +OK
+HW.SEND <queue> <messageId> <payload> AT <ticks>   →   +OK   (deferred)
+```
+
+Enqueues work for exactly one processor (was `HW.QSEND`, 014).
+
+| | |
+|---|---|
+| **Arguments** | `queue`, `messageId` — identifiers (so a send can never target a group queue). `payload` — opaque, up to `MaxPayloadBytes`. `AT <ticks>` — optional absolute .NET UTC delivery time. |
+| **Reply** | `+OK`, or `ERR HW_QUEUE_FULL` at `MaxQueueBytes` |
+| **Doorbell** | `hw:door:q:{queue}`, payload = `messageId`. **None for a deferred send**, which is in no worker's reach yet. |
+| **Idempotency** | Not idempotent. Repeating enqueues a second message. |
+
+**Sending never requires a running worker.** The message waits until one claims it.
+
+**The byte budget refuses rather than drops** (016). A queue counts the bytes of its ready and deferred messages; a send that would take it past `MaxQueueBytes` is refused and nothing is stored. Claimed messages do not count.
+
+**`AT` is absolute**, not a relative delay: the client computes `UtcNow + delay` and the broker stores what it was told, so a slow round trip cannot silently extend the delay and a restart cannot re-delay. A time in the past delivers immediately. The guarantee is **"not before", not an alarm clock**: a deferred message becomes claimable on the first `HW.CLAIM` of its queue after its time — promotion is driven by consumers polling, not by a timer in the broker, so a queue whose workers have all stopped promotes nothing until one starts (the message is not lost; it is not delivered either). Promotion is capped per claim; a larger due batch drains over successive claims.
+
+### HW.PUBLISH
+
+```
+HW.PUBLISH <channel> <payload>              →   :groupCount
+HW.PUBLISH <channel> <payload> AT <ticks>   →   :0            (deferred)
+```
+
+Appends the message to every registered group's queue, atomically.
+
+| | |
+|---|---|
+| **Arguments** | `channel` — identifier. `payload` — opaque, up to `MaxPayloadBytes`. `AT <ticks>` — optional absolute delivery time, as for `HW.SEND`. |
+| **Reply** | RESP integer: the number of groups the message reached. `0` means no group is registered, or that the message is deferred and has reached none yet. `ERR HW_QUEUE_FULL` naming the group when any group is at its budget. |
+| **Doorbell** | `hw:door:q:{channel}@{group}` per group, payload = `messageId`. None for a deferred publish. |
+| **Idempotency** | **Not idempotent.** Repeating publishes a second message with a new ID. |
+
+**All groups or none.** The fan-out is one commit. If any group's queue would pass `MaxQueueBytes`, the publish is refused whole — no group receives it — and the error names the full group. A deferred publish is budgeted too (5.0; before 5.0 a deferred publish bypassed the budget).
+
+Each message gets a channel-unique `messageId` from an incrementing counter; it is the `id` a group's claim returns.
+
+**Zero groups → nobody.** Publishing to a channel with no registered groups returns `0` and the message is **not stored**. Publish means "tell everyone who is listening"; a durable hand-off to whoever comes later is `HW.SEND` to a queue.
+
+**Groups are resolved at publish time.** A deferred message is placed in each group's queue as deferred at once; a group registering during the delay does not receive it.
+
+**Subscriber retirement** (017). Before fanning out, a publish retires any group all of whose registered members have been silent longer than `SubscriberRetirementThreshold` (a member with no registration record is not evidence of death), destroying its queue so one dead subscriber cannot block a channel at its byte budget. A group past half the threshold is reported as suspect in the flight recorder.
+
+### HW.CLAIM
+
+```
+HW.CLAIM SVC <service> <node> [COUNT <n>]   →   [[token, requestId, payload], ...]
+HW.CLAIM Q   <queue>   <node> [COUNT <n>]   →   [[token, messageId, payload], ...]
+```
+
+Claims the next due work, oldest first, for `node`. **An empty array means nothing is due** — never a nil (5.0).
+
+| | |
+|---|---|
+| **Arguments** | `SVC` or `Q`. `service` / `queue` — identifier; a `Q` name may be a derived group queue `{channel}@{group}`. `node` — identifier, recorded on the claim. `COUNT n` — optional, `1`..`ReceiveMaxCount`, default `1`. |
+| **Reply** | An array of three-element arrays `[token, id, payload]`, in delivery order, possibly empty. |
+| **Idempotency** | Not idempotent — each call claims distinct work. |
+
+A claim holds the work until it is acknowledged or its lease (`Lease`, default 5 minutes) expires. **Before handing out work, a claim does the recovery work for its target, in the same commit:**
+
+1. *(queues)* fire recurring jobs that are due (see [`HW.JOB`](#hwjob)) and promote deferred messages whose time has come;
+2. return every claim whose lease has expired to the queue with its attempt count incremented — or dead-letter it once it exceeds `MaxDeliveryAttempts`;
+3. *(services)* return the claims of every node whose registration has gone stale (older than `NodeExpiry`) to the queue with attempts incremented, and remove that node from discovery and the registry — dead-node recovery (006). A node with **no** registration record is not participating in the registry (heartbeats off) and is left to the lease sweep. Set `PruningEnabled = false` to disable dead-node recovery; lease recovery still runs.
+
+The lease sweep reads only claims whose lease has actually expired, so it costs nothing on a claim when nothing expired.
+
+A group queue's claims are recovered by lease alone — dead-node recovery never touches subscriber groups (see [Invariants](#invariants)).
+
+### HW.ACK
+
+```
+HW.ACK <token>   →   :1 removed   |   :0 not held
+```
+
+Settles a claim for good: after it the message can never be redelivered by any mechanism. `:0` means the token is not held — already acknowledged, recovered by a lease sweep and redelivered under a new token, or never issued. A late acknowledgement is a race the client cannot avoid, not an error to investigate; a **stale token never settles the redelivery** of the same message.
+
+`HW.REPLY` must be sent **before** `HW.ACK` — see [Invariants](#invariants).
+
+### HW.TOUCH
+
+```
+HW.TOUCH <token>   →   :1 renewed   |   :0 not held
+```
+
+Says "still working" about a claim. Without it, a handler that outlives `Lease` has its message redelivered **while it is still running** — a concurrent duplicate caused by nothing but slowness.
+
+| | |
+|---|---|
+| **Effect** | The claim's lease restarts now. Nothing else changes — not the attempt count, the payload, the byte counters, or its failure block |
+| **Idempotency** | Idempotent: renewing twice is renewing |
+
+**It does not acknowledge.** The claim stays held and every recovery path still applies. **Renewal is bounded by the client, not the server** (019): the server renews whenever asked; the client stops after `MaxProcessingTime` so a hung handler is still recovered.
+
+### HW.FAIL
+
+```
+HW.FAIL <token> <type> <detail>   →   :1 recorded   |   :0 not held
+```
+
+Records **why** a delivery failed, on the claimed entry. Without it a dead letter says only that something failed *n* times.
+
+| | |
+|---|---|
+| **`<type>`** | The exception type name, at most 65,535 bytes. A separate argument because the server maintains `firstType` from it |
+| **`<detail>`** | An opaque blob the server never interprets (kept only when the target's recorder capture is `Full`). Highway's own client sends JSON carrying the message, stack, node and timestamp |
+| **Idempotency** | Idempotent in effect: a second report replaces the block rather than appending |
+
+**It does not acknowledge.** The lease sweep recovers the message on exactly the schedule it would have; the failure block rides with it through redelivery and into its dead letter. `firstType` is empty unless the failure changed shape — it answers *"did this fail the same way every time?"* — and once set is never overwritten.
 
 ### HW.REPLY
 
@@ -271,309 +359,91 @@ The `requestId` is the caller's correlation handle and determines its reply slot
 HW.REPLY <requestId> <payload>   →   +OK
 ```
 
-Writes the reply slot and rings the reply doorbell.
+Writes the caller's reply slot and rings the reply doorbell.
 
 | | |
 |---|---|
 | **Arguments** | `requestId` — identifier. `payload` — opaque, up to `MaxPayloadBytes`. |
 | **Reply** | `+OK` |
-| **Keys written** | `hw:rep:{requestId}`, with TTL `ReplySlotTtl` (default 5 minutes) |
 | **Doorbell** | `hw:door:rep`, payload = `requestId` |
-| **Idempotency** | **Last-writer-wins.** A second reply overwrites the first and refreshes the TTL. Deterministic, never an error. |
+| **Idempotency** | **Last-writer-wins.** A second reply overwrites the first and restarts its expiry. |
 
-The reply slot is a plain main-store string. The caller retrieves it with stock `GET` and removes it with `DEL` — see [Stock Garnet Dependencies](#stock-garnet-dependencies). There is no `HW.*` command for retrieval.
+The slot expires after `ReplySlotTtl` (default 5 minutes). An uncollected reply is **deleted** when it expires (5.0; before 5.0 it was hidden from reads but stayed on disk).
 
-The TTL bounds leakage: a caller that times out and never collects its reply leaves a slot that expires on its own.
-
-### HW.DEQUEUE
+### HW.RESULT
 
 ```
-HW.DEQUEUE <service> <nodeId>   →   [requestId, payload]   |   nil array
+HW.RESULT <requestId>   →   payload   |   $-1 (nil bulk: no reply waiting)
 ```
 
-Atomically moves the oldest pending request into the calling node's processing list and returns it.
+Takes the reply for `requestId`: returns it and removes it, in one command (5.0; replaces stock `GET` + `DEL` on `hw:rep:{requestId}`). Two readers can never both collect one reply, and a reader that crashes after reading leaves nothing behind. A nil answer means the reply has not been written yet (the doorbell raced ahead of it) or has expired.
 
-| | |
-|---|---|
-| **Arguments** | `service`, `nodeId` — identifiers. |
-| **Reply** | A two-element array of bulk strings, or a **nil array** when nothing is available. |
-| **Keys** | Reads and writes `hw:svc:{service}:q`, `hw:svc:{service}:proc:{nodeId}`, `hw:svc:{service}:nodes`, `hw:svc:{service}:nodelist`; may touch other nodes' processing lists and registry keys during its sweeps. |
-| **Idempotency** | Not idempotent — each call claims a distinct request. |
-
-**The empty reply is a nil array (`*-1\r\n`), not a nil bulk string.** StackExchange.Redis surfaces it as `RedisResult.IsNull`. This is easy to mis-parse; a client that expects `$-1` will break.
-
-FIFO order is preserved, and exclusive key locks make concurrent dequeues on one service serialize, so competing consumers each claim a distinct request. A claimed request stays in the node's processing list until acknowledged.
-
-**Two sweeps run before the pop.**
-
-*Lease expiry* — an entry claimed longer ago than `Lease` (default 5 minutes) is returned to the queue tail for redelivery. This recovers work from a worker that is alive but stuck.
-
-*Dead-node pruning* — a node whose registration has gone stale has its **entire** processing list returned to the queue, and is removed from the service's worker set, the service's discovery index, and the registry. This recovers work from a worker that has died, and stops the worker set growing without bound.
-
-Only nodes that hold a registration record which is *stale* are pruned. A node with **no** registration record is not participating in the registry — a client may run with heartbeat disabled — and is left alone. Pruning on "no record" would requeue a healthy worker's in-flight work on every dequeue. Pruning never touches subscriber groups; see [Invariants](#invariants).
-
-Set `PruningEnabled = false` to disable dead-node pruning; lease expiry still runs.
-
-### HW.ACK
-
-```
-HW.ACK <service> <nodeId> <requestId>   →   +OK
-```
-
-Removes the request from the node's processing list.
-
-| | |
-|---|---|
-| **Arguments** | All three are identifiers. |
-| **Reply** | `+OK` |
-| **Keys written** | `hw:svc:{service}:proc:{nodeId}` |
-| **Idempotency** | **Idempotent.** An unknown or already-acknowledged request still returns `+OK`. |
-
-After acknowledgement the request cannot be redelivered by any mechanism. Acknowledging after a lease requeue also succeeds and removes any residue.
-
-`HW.REPLY` must be sent **before** `HW.ACK` — see [Invariants](#invariants).
+**The reply doorbell is node-global.** Every client subscribed to `hw:door:rep` is told of **every** reply on the broker. A client must ignore request IDs it did not issue, and in particular must never `HW.RESULT` a request it does not own — that takes another caller's reply and hangs that call until its timeout.
 
 ---
+## Session & Registry Commands
 
-## Pub/Sub Commands
+A node's **session** is everything the broker holds on its behalf: its registration (catalog, discovery index, liveness), its subscriber-group memberships, and its recurring-job schedules. 5.0 declares all of it with one idempotent command, `HW.SESSION`, and re-declares it whenever the broker has lost it — a wiped broker, a fresh node, a re-bootstrapped standby. Before 5.0 subscriptions and schedules were sent once, at client start, and a broker that lost them kept serving while a publish silently reached nobody and jobs never fired.
 
-Highway's pub/sub is durable and group-based, and is unrelated to Garnet's own `PUBLISH`/`SUBSCRIBE` (which Highway uses only for doorbells). A message is fanned out to every registered *group*; each group has its own independent copy.
+The registry records which nodes are alive and what each hosts. It powers fast-fail, dead-node recovery and operator visibility; it does **not** route work — distribution is competing consumers on `HW.CLAIM`.
 
-### HW.PUBLISH
-
-```
-HW.PUBLISH <channel> <payload>              →   :groupCount
-HW.PUBLISH <channel> <payload> AT <ticks>   →   :0            (delayed)
-```
-
-#### Delayed delivery
-
-`AT` takes an **absolute** delivery time as a .NET UTC tick count, not a relative delay. The client computes `UtcNow + delay` and the server stores what it was told, so a slow round trip cannot silently extend the delay — and, more importantly, AOF replay cannot re-delay from replay time. A stored relative delay would fabricate a new future on every recovery.
-
-A time already in the past delivers immediately rather than failing: clock skew between a client and the broker is normal, and refusing a publish over a few milliseconds of it would be worse than delivering slightly early relative to the client's clock.
-
-A delayed publish replies `:0` — the reply counts groups the message was *delivered* to, and nothing has been delivered yet. No doorbell is rung, because the message is in nobody's queue.
-
-**The guarantee is "not before", not an alarm clock.** A delayed message is held in each group's `hw:q:{channel}@{group}:delayed` sorted set and promoted into that group's queue by `HW.QCLAIM` — that is, **by consumer activity, not by a timer inside the broker**. Consequences a client implementer must know:
-
-- The message arrives on the first `HW.QCLAIM` after its delivery time, so practical resolution is bounded by how often consumers poll.
-- **A group queue whose workers have all stopped promotes nothing** until one starts. The message is not lost; it is not delivered either.
-- Promotion is capped at 256 messages per `HW.QCLAIM`; a larger due batch drains over successive polls.
-
-A background server timer would give tighter resolution and was rejected: it writes to the keyspace, so it needs its own transaction, its own failure handling and its own interaction with AOF replay, and it runs whether or not anyone is listening. Highway already recovers abandoned work lazily in exactly this shape.
-
-**Groups are resolved at publish time, not promotion time (018 semantic change R5.3).** The message is fanned out into each group's delayed set immediately. A group registering *during* the delay does not receive it. This matches C2.1's own wording — "every group registered at publish time" — and C2.4, which says pub/sub is not a store for messages nobody has subscribed to.
-
-There is no way to cancel or list pending delayed messages.
-
-
-Appends the message to every registered group's queue, atomically.
-
-| | |
-|---|---|
-| **Arguments** | `channel` — identifier. `payload` — opaque, up to `MaxPayloadBytes`. `AT <ticks>` — optional absolute delivery time, .NET UTC ticks. |
-| **Reply** | RESP integer: the number of groups the message reached. `0` means no group is registered, or that the message is deferred and has reached none yet. |
-| **Keys written** | `hw:ch:{channel}:seq`, then every `hw:q:{channel}@{group}:q`, or — when `AT` is in the future — every `hw:q:{channel}@{group}:delayed` |
-| **Doorbell** | `hw:door:q:{channel}@{group}` per group, payload = `messageId`. **None for a delayed publish**, which is in nobody's queue yet. |
-| **Idempotency** | **Not idempotent.** Repeating publishes a second message with a new ID. |
-
-Fan-out is atomic: all groups receive the message or none do. There is no partial delivery.
-
-Each message gets a channel-unique `messageId` from an incrementing counter. It is returned by `HW.RECEIVE` and used to acknowledge with `HW.RACK`.
-
-**Zero groups → nobody.** Publishing to a channel with no registered groups returns `0` and the message is **not stored**. Publish means "tell everyone who is listening"; if nobody is, there is nothing to tell and nothing to keep.
-
-Highway previously held such messages in a per-channel backlog that a future subscriber inherited. That produced a surprising rule — a group registering later received an arbitrary prefix of history, determined by when the *first* subscriber happened to start — and it existed only because nothing else could hold a message until someone could handle it. `HW.QSEND` and a queue now can, and are durable by design. See [Queue Commands](#queue-commands).
-
-**On transient abort the message was not delivered at all.** See [Error Contract](#error-contract).
-
-**Retry backoff is off by default.** A message returned to a group after a lease expiry goes into `hw:q:{channel}@{group}:delayed` — the same sorted set used for deferred delivery — and is promoted back to that group's queue alone. This is the same mechanism the queue engine uses for all retry backoff.
-
-**A delayed publish fans out to each group's delayed set at publish time.** Each group's `hw:q:{channel}@{group}:delayed` receives one copy, so there is no separate channel-level delayed set.
-
-### HW.SUBSCRIBE
+### HW.SESSION
 
 ```
-HW.SUBSCRIBE <channel> <group>          →   +OK
-HW.SUBSCRIBE <channel> <group> <node>   →   +OK      (025)
+HW.SESSION <node> <sessionJson>   →   +OK
 ```
-
-Registers a subscriber group — and, with the third argument, the node's **membership** in it.
-Creates the derived queue `{channel}@{group}` if the group is genuinely new.
-
-| | |
-|---|---|
-| **Arguments** | All identifiers. `node` optional (025): the subscribing node. **Absent means the group is the node** — the pre-025 identity, preserved so old clients keep their exact semantics. |
-| **Reply** | `+OK` |
-| **Keys written** | `hw:ch:{channel}:groups`, `hw:ch:{channel}:grplist`, `hw:reg:node:{group}:channels`; with `node`: `hw:grp:members:{channel}@{group}`, `hw:reg:node:{node}:subs` |
-| **Idempotency** | **Idempotent.** Re-subscribing an existing group or member returns `+OK` and adds nothing. |
-
-Group registration is durable and survives a restart when AOF is enabled.
-
-**A group may be backed by several nodes** (025): replicas of one logical subscriber each
-subscribe with the same `group` and their own `node`. They compete for the group's single
-copy of each message through the ordinary queue machinery — **the claimant is the group**,
-so all replicas share `hw:q:{channel}@{group}:proc:{group}`. Group liveness for automatic
-retirement is the youngest member's heartbeat; see [Invariants](#invariants).
-
-### HW.UNSUBSCRIBE
-
-```
-HW.UNSUBSCRIBE <channel> <group>   →   +OK
-```
-
-Removes the group and deletes its state.
-
-| | |
-|---|---|
-| **Arguments** | Both identifiers. |
-| **Reply** | `+OK` |
-| **Keys** | Removes from `hw:ch:{channel}:groups` and `hw:ch:{channel}:grplist`; **deletes** `hw:q:{channel}@{group}:q`, `:proc:*`, `:dlq`, `:delayed`, `:nodes`, `:nodelist` |
-| **Idempotency** | **Idempotent.** Unsubscribing an unknown group returns `+OK`. |
-
-**This deletes undelivered messages.** Everything queued for the group is discarded. That is why the .NET client never sends this command: a node's group is meant to outlive its process so a restart resumes pending messages. Send it only when a group is genuinely finished forever.
-
-A group removed this way is new again if it re-subscribes, and starts empty.
-
-### HW.RECEIVE
-
-```
-HW.RECEIVE <channel> <group>                →   [[messageId, payload], ...]
-HW.RECEIVE <channel> <group> COUNT <n>      →   [[messageId, payload], ...]
-HW.RECEIVE <channel> <group> <n>            →   [[messageId, payload], ...]
-```
-
-Moves up to `COUNT` messages from the group's queue into its processing list and returns them.
-
-| | |
-|---|---|
-| **Arguments** | `channel`, `group` — identifiers. `COUNT` optional, either `COUNT n` or a bare `n`. |
-| **Reply** | An array of two-element arrays. Each inner array is `[messageId, payload]`, both bulk strings; `messageId` is the decimal integer as text. Empty array when nothing is available — never an error. |
-| **Keys written** | `hw:ch:{channel}:grp:{group}:q`, `hw:ch:{channel}:grp:{group}:proc` |
-| **Idempotency** | Not idempotent — each call claims distinct messages. |
-
-`COUNT` defaults to `ReceiveDefaultCount` (10) and must be between 1 and `ReceiveMaxCount` (500). Outside that range, non-numeric, or overflowing → `HW_INVALID_COUNT`.
-
-**The reply is nested**: an outer array of pairs, not a flat list. A client that flattens it will mis-associate IDs and payloads.
-
-Received messages move to in-flight state and are not returned again — until their lease expires. A lease sweep runs first: a message received longer ago than `Lease` and never acknowledged is returned to the **head** of the group queue, so redelivery preserves ordering against newer messages.
-
-### HW.RACK
-
-```
-HW.RACK <channel> <group> <messageId>   →   +OK
-```
-
-Removes the message from the group's processing list.
-
-| | |
-|---|---|
-| **Arguments** | `channel`, `group` — identifiers. `messageId` — decimal integer as text; non-numeric → `HW_INVALID_ARG`. |
-| **Reply** | `+OK` |
-| **Keys written** | `hw:ch:{channel}:grp:{group}:proc` |
-| **Idempotency** | **Idempotent.** An unknown or already-acknowledged ID returns `+OK`. |
-
-Acknowledging in one group never affects another group's copy — the keys are per-group.
-
-`HW.RACK` must be sent only **after** dispatch completes — see [Invariants](#invariants).
-
----
-
-## Registry Commands
-
-The registry records which nodes are alive and what each hosts. It powers fast-fail and operator visibility. It does **not** participate in routing: work distribution is competing consumers on `HW.DEQUEUE`, unaffected by what the registry says.
-
-### HW.HEARTBEAT
-
-One command, three forms, selected by the second argument:
-
-```
-HW.HEARTBEAT <nodeId> <catalogJson>   →   +OK                  (registration)
-HW.HEARTBEAT <nodeId>                 →   +OK | +REGISTER      (liveness)
-HW.HEARTBEAT <nodeId> BYE             →   +OK                  (departure)
-```
-
-**Form selection.** Second argument absent → liveness. Exactly `BYE` → departure. Anything else → registration, and it must parse as catalog JSON. A second argument that is neither `BYE` nor valid JSON is rejected with `HW_INVALID_ARG`. The forms are unambiguous because a catalog is JSON and begins with `{`.
-
-**Why three forms rather than one.** A node's catalog is static for its lifetime. Sending it on every beat would put up to `MaxCatalogBytes` on the wire per node per interval and force a server-side parse to rebuild an index that never changes. Splitting the forms makes a steady-state beat a few bytes regardless of how many services a node hosts.
-
-#### Registration form
-
-```
-HW.HEARTBEAT <nodeId> <catalogJson>   →   +OK
-```
-
-Stores the catalog, rebuilds the node's entries in the discovery index, and refreshes liveness. Sent **once** per node lifetime, and again only when asked by `+REGISTER`.
-
-| | |
-|---|---|
-| **Arguments** | `nodeId` — identifier. `catalogJson` — up to `MaxCatalogBytes` (default 256 KiB). |
-| **Reply** | `+OK` |
-| **Keys written** | `hw:reg:node:{nodeId}`, `hw:reg:seen:{nodeId}`, `hw:reg:nodes`, `hw:reg:svc:{service}` per service |
-| **Idempotency** | **Idempotent.** Re-registering an unchanged catalog does not duplicate or grow state. |
-
-The catalog is stored **verbatim**. The server parses it only to derive service names for the index, and rejects an unparseable catalog with `HW_INVALID_ARG` — a catalog the server cannot read would leave the node permanently undiscoverable, so failing loudly is better than indexing nothing.
-
-The expected shape, from which only `services[].name` is read:
 
 ```json
 {
-  "services": [ { "name": "orders.create", "requestType": "...", "responseType": "..." } ],
-  "channels": [ { "name": "orders.placed", "subscriberCount": 1 } ],
-  "queues":   [ { "name": "invoices.generate", "messageType": "..." } ],
-  "uses":     { "services": ["payments.authorize"], "queues": [], "channels": [] }
+  "catalog":       { "services": [ { "name": "orders.create", "requestType": "...", "responseType": "..." } ],
+                     "channels": [ { "name": "orders.placed", "subscriberCount": 1 } ],
+                     "queues":   [ { "name": "invoices.generate", "messageType": "..." } ],
+                     "uses":     { "services": ["payments.authorize"], "queues": [], "channels": [] } },
+  "subscriptions": [ { "channel": "orders.placed", "group": "billing" } ],
+  "jobs":          [ { "queue": "invoices.generate", "job": "nightly",
+                       "expression": "daily:02:00", "template": "<base64 payload>" } ]
 }
 ```
 
-`queues` (014) and `uses` (024) are optional: catalogs written before those features omit
-them and still register. `uses` lists routes the node can **address** because it references
-their contracts — it is observability data only; the server derives nothing from it.
+| | |
+|---|---|
+| **Arguments** | `node` — identifier. `sessionJson` — at most `MaxCatalogBytes` + 16 × `MaxPayloadBytes`. |
+| **Reply** | `+OK`. `HW_INVALID_ARG` naming the problem (the JSON does not parse; a name fails the [identifier rule](#identifiers); a job expression is malformed); `HW_PAYLOAD_TOO_LARGE` for a catalog above `MaxCatalogBytes` or a template above `MaxPayloadBytes`. At most 1,024 subscriptions and 256 jobs. |
+| **Idempotency** | **Idempotent.** Declaring the same session again changes nothing. |
 
-An empty catalog (`{"services":[],"channels":[]}`) is valid and registers a node that hosts nothing — a pure caller.
+Everything present is applied; everything is optional:
 
-Re-registering a **changed** catalog removes index entries for services no longer hosted and adds the new ones, so a node redeployed under the same name leaves nothing stale.
+- **`catalog`** — registers the node exactly as the 4.x registration form did: the catalog is stored verbatim (the server reads only `services[].name`, to index discovery), the node joins the node list, and liveness starts now. A **changed** catalog re-indexes: services no longer hosted leave the index. **Omit it when the node does not send heartbeats**: a registered node that never beats looks dead, and dead-node recovery would take its work and retire its groups. Highway's client omits it with `HeartbeatEnabled = false`.
+- **`subscriptions`** — makes `node` a member of each `(channel, group)` (as `HW.SUBSCRIBE channel group node` did, 025). A group backed by several nodes shares one copy of each message: its members compete for it through the group queue. A group's liveness, for retirement, is its youngest member's.
+- **`jobs`** — registers or replaces each schedule on its queue, as `HW.JOB SET` does: last registration wins, `lastFire` is preserved. Jobs are **upsert-only**: a job dropped from the code is removed with `HW.JOB DEL`, never by omission.
+
+A client sends its session at start, again after every failover adoption, and at once whenever a heartbeat answers `+SESSION`.
+
+### HW.HEARTBEAT
+
+```
+HW.HEARTBEAT <nodeId>             →   +OK | +SESSION                 (liveness)
+HW.HEARTBEAT <nodeId> BYE         →   +OK                            (departure)
+HW.HEARTBEAT <nodeId> BYE PURGE   →   [groups, messages, bytes]      (retire forever)
+```
+
+**Form selection.** Second argument absent → liveness. `BYE` → departure; `BYE PURGE` → retirement. Anything else is `HW_INVALID_ARG` (5.0: registration moved to `HW.SESSION`).
 
 #### Liveness form
 
-```
-HW.HEARTBEAT <nodeId>   →   +OK   |   +REGISTER
-```
+Refreshes the node's liveness timestamp — an 8-byte write, independent of catalog size (4.12) — and nothing else. When the broker holds no registration for the node it replies **`+SESSION`** and writes nothing.
 
-Refreshes the node's liveness timestamp and nothing else. This is the steady-state beat.
+**`+SESSION` is correctness, not politeness.** A beat that simply recreated the timestamp would leave the node alive but undiscoverable — and, since 5.0 knows sessions carry subscriptions and schedules, unsubscribed and unscheduled too. Replying `+SESSION` makes a wiped or pruned registry self-healing: the client re-declares its whole session before its next beat.
 
-| | |
-|---|---|
-| **Arguments** | `nodeId` — identifier. |
-| **Reply** | `+OK` when refreshed. `+REGISTER` when the server holds no record for this node. |
-| **Keys** | Reads `hw:reg:node:{nodeId}` (to answer `+REGISTER`); writes only `hw:reg:seen:{nodeId}` (8 bytes) |
-| **Idempotency** | Idempotent. |
-
-No catalog parse, no index write, and the registration record is **not rewritten** — the catalog is written once, at registration (4.12). Cost is one small read and one 8-byte write, independent of catalog size; a standby receives 8 bytes per beat, not the catalog. A node's effective last-seen time is the newer of the record header's timestamp and `hw:reg:seen:{nodeId}`, so a record written before 4.12 (header only) reads correctly.
-
-**`+REGISTER` is correctness, not politeness.** Pruning deletes a node's registration record *and* its index entries. A beat that simply recreated the timestamp would leave the node alive but **undiscoverable** — serving a queue nobody is told about, with nothing to surface the fault. Replying `+REGISTER` when the record is absent makes a wiped registry self-healing.
-
-A client receiving `+REGISTER` must send the registration form promptly — before its next scheduled beat, so the undiscoverable window is one round trip rather than a full interval. This recovers from a memory-only server restart, pruning after a long pause, and registry loss to operator action.
-
-`+REGISTER` is a normal reply and must not be treated as an error.
+`+SESSION` is a normal reply and must not be treated as an error.
 
 #### Departure form
 
-```
-HW.HEARTBEAT <nodeId> BYE   →   +OK
-```
+Announces that the node is shutting down, so it leaves discovery immediately rather than after the expiry window. Returns the node's claims on every service it hosted to their queues (attempts incremented) and removes it from discovery and the registry — the same teardown dead-node recovery runs. **Subscriber groups are not touched** — see [Invariants](#invariants). Idempotent: departing an unknown node returns `+OK`. A node that is killed rather than stopped simply expires on the normal timeline.
 
-Announces that the node is shutting down, so it leaves discovery immediately rather than after the expiry window.
+#### Retirement form (017)
 
-| | |
-|---|---|
-| **Arguments** | `nodeId` — identifier. `BYE` — the reserved literal. |
-| **Reply** | `+OK` |
-| **Keys** | Registration, index, and per-service worker-set entries removed; unacknowledged RPC work requeued |
-| **Idempotency** | **Idempotent.** Departing an unknown node returns `+OK`. |
-
-This runs the **same teardown** as dead-node pruning: unacknowledged RPC requests return to their service queues, and the node is removed from every worker set, the discovery index, and the registry. **Subscriber groups are not touched** — see [Invariants](#invariants).
-
-Departure is a courtesy, not a requirement. A node that is killed rather than stopped simply expires on the normal timeline.
+`BYE` plus: the node is never coming back. For each group it belongs to, the membership is removed; a group whose **last** member this was is destroyed — its queue, deferred messages, claims and dead letters, in one range delete. Returns what it destroyed, `[groups, messages, bytes]`, so an irreversible act leaves a record. A group other members still back lives on.
 
 ### HW.DISCOVER
 
@@ -581,67 +451,121 @@ Departure is a courtesy, not a requirement. A node that is killed rather than st
 HW.DISCOVER <service>   →   [[nodeId, secondsSinceLastSeen], ...]
 ```
 
-Returns the live nodes hosting a service.
-
-| | |
-|---|---|
-| **Arguments** | `service` — identifier. |
-| **Reply** | An array of two-element arrays: `nodeId` and the age in whole seconds of that node's last beat, both bulk strings. Empty array for an unknown service or one whose hosts are all stale — never an error. |
-| **Keys** | Read-only. |
-| **Idempotency** | Read-only, trivially idempotent. |
-
-The age lets a caller reason about freshness rather than treating presence as binary.
-
-Stale nodes are filtered from results **even before they are pruned**, so a node that stops beating disappears from discovery promptly while its state is reclaimed later by `HW.DEQUEUE`. This command performs no mutation: pruning must requeue the node's RPC work, and that belongs where the queue keys are already locked.
-
-Discovery is a lookup, not a scan — the registration form maintains the index at write time, so no catalog is deserialized here.
+Returns the live nodes hosting a service: an array of `[nodeId, age-in-whole-seconds]` pairs, both bulk strings. Empty for an unknown service or one whose hosts are all stale — never an error. Stale nodes are filtered even before they are recovered. Read-only; a lookup, not a scan — the index is maintained at registration.
 
 ### HW.STATS
 
 ```
-HW.STATS                →   kind server  nodes N services N channels N … maxPayloadBytes N
-HW.STATS <service>      →   kind service queueDepth N hosts N inFlight N
-HW.STATS <channel>      →   kind channel groups N pending N backlog N
+HW.STATS                →   kind server   nodes N services N channels N … maxPayloadBytes N [repl.*]
+HW.STATS <service>      →   kind service  queueDepth N hosts N inFlight N deadLettered N
+HW.STATS <channel>      →   kind channel  groups N pending N deadLettered N
+HW.STATS Q:<queue>      →   kind queue    depth N workers N inFlight N deferred N deadLettered N
+HW.STATS RECORDER       →   kind recorder enabled 1 names N events N bytes N droppedCapacity N droppedBudget N failures N observerFailures N
 ```
 
-Operational counters. The reply is a **flat array of alternating field names and values**, all bulk strings — a shape that stays readable in `redis-cli`, parses without a schema, and extends by appending fields rather than changing shape.
+Operational counters. The reply is a **flat array of alternating field names and values**, all bulk strings — readable in `redis-cli`, parseable without a schema, extended by appending fields.
 
-| | |
-|---|---|
-| **Arguments** | Optional name — identifier when present. |
-| **Reply** | Flat field/value array, always beginning with `kind`. |
-| **Keys** | Read-only. |
-| **Idempotency** | Read-only; safe to poll on an interval. |
-
-**Form selection.** No argument → the server form. With a name, the name is a *service* if the discovery index knows it, otherwise it is reported as a *channel*. A name that is both resolves as a **service**; the `kind` field makes the resolution explicit rather than ambiguous. An unknown name returns zeroed counters with `kind channel` — never an error, because an operator querying a name that has seen no traffic deserves an answer.
+**Form selection.** No argument → server. `Q:<name>` → that queue (a group queue is `Q:{channel}@{group}`). `RECORDER` (reserved, case-insensitive) → the flight recorder. Any other name is a *service* if a live node's catalog hosts it, otherwise a *channel*; the `kind` field makes the resolution explicit. An unknown name returns zeroed counters, never an error. *(Known gap: a service name no live node hosts resolves as a channel.)*
 
 | Form | Fields |
 |---|---|
-| server | `nodes` (live registrations), `services` and `channels` (distinct names across live catalogs) |
-| service | `queueDepth` (pending requests), `hosts` (live nodes hosting it), `inFlight` (claimed but unacknowledged, across all nodes) |
-| channel | `groups` (registered subscriber groups), `pending` (undelivered across all groups), `backlog` (entries held for late subscribers) |
-| recorder | `enabled`, `names`, `events`, `bytes`, `droppedCapacity`, `droppedBudget`, `failures` |
+| server | `nodes` (live registrations), `services` and `channels` (distinct names across live catalogs), `groupsRetired`, `messagesDiscarded`, `sendsRefused`, `maxPayloadBytes` (4.10); a durable broker appends the `repl.*` fields (see [Replication Commands](#replication-commands)) |
+| service | `queueDepth` (waiting requests), `hosts` (live nodes hosting it), `inFlight` (claimed, not yet acknowledged), `deadLettered` |
+| channel | `groups` (registered subscriber groups), `pending` (waiting across all groups), `deadLettered` |
+| queue | `depth`, `workers` (nodes that have claimed), `inFlight`, `deferred`, `deadLettered` |
+| recorder | `enabled`, `names`, `events`, `bytes`, `droppedCapacity`, `droppedBudget`, `failures`, `observerFailures` |
 
-**The `RECORDER` form.** `HW.STATS RECORDER` reports flight-recorder health
-(feature 002). `RECORDER` is a **reserved name**, matched case-insensitively, and
-takes priority over a service or channel that happens to share it — the same kind
-of explicit resolution rule as service-beats-channel above.
+**Every count is exact and costs nothing to read** (5.0): each structure maintains its counters as it changes, so `HW.STATS` never scans stored data. Counters describe independently-mutating structures read at slightly different instants — fine for monitoring; do not build invariants on cross-field arithmetic.
+
+### HW.UNSUBSCRIBE
 
 ```
-HW.STATS RECORDER
-  -> kind recorder  enabled 1  names 12  events 84213  bytes 41224192
-     droppedCapacity 1902  droppedBudget 0  failures 0
+HW.UNSUBSCRIBE <channel> <group>   →   +OK
 ```
 
-Drop counters are cumulative since server start, so an operator can tell whether
-history is being lost rather than only how much is held. `droppedCapacity` counts
-events pushed out of a name's own buffer; `droppedBudget` counts reclamation
-forced by the server-wide memory budget. `failures` counts recording attempts
-that threw and were swallowed — non-zero means a bug worth reporting, never a
-lost operation. The form answers when the recorder is disabled, reporting
-`enabled 0` rather than an error.
+Removes the group from the channel and **destroys its queue** — every waiting, deferred, claimed and dead-lettered message, in one range delete. Idempotent: an unknown group returns `+OK`. Highway's client never sends it (a group is meant to outlive its process, so a restart resumes its backlog); it is an operator tool for a group that is finished forever. A group removed this way is new again if it is subscribed again, and starts empty.
 
-**No snapshot consistency.** Counters are read under the command's locks but describe independently-mutating structures. The reply is a set of point-in-time readings, not a coherent instant. Fine for monitoring; do not build invariants on cross-field arithmetic.
+### HW.JOB
+
+```
+HW.JOB SET <queue> <job> <expression> <template>   →   +OK
+HW.JOB DEL <queue> <job>                            →   :1 | :0
+HW.JOB LIST                                         →   [[queue, job, expression, nextFireTicks, lastFireTicks], ...]
+```
+
+Recurring-job schedule management (028). A schedule fires **exactly one** occurrence message onto its queue at each due time and re-arms — the firing happens inside `HW.CLAIM` on that queue, decided by the broker's clock on the poll path. **No timer runs in the broker.** Clients declare their schedules in `HW.SESSION`; `SET` remains for operators.
+
+| | |
+|---|---|
+| **Arguments** | `queue`, `job` — identifiers. `expression` — `daily:HH:mm`, `every:{seconds}` (≥ 1), or `cron:{m h dom mon dow}` (standard 5-field), all UTC. `template` — the occurrence payload, stored verbatim and replayed on every fire; up to `MaxPayloadBytes`. |
+| **Reply** | SET `+OK`; DEL `:1` removed / `:0` unknown (idempotent); LIST an array of 5-field rows. |
+| **Errors** | `HW_INVALID_ARG` for a malformed expression (the message names the accepted forms); `HW_PAYLOAD_TOO_LARGE`. Both permanent. |
+| **Idempotency** | **SET is last-registration-wins**: re-registering replaces expression and template, preserves `lastFire`, and records `JobScheduleChanged` naming both expressions when they differ. |
+
+**Fire semantics** (in `HW.CLAIM Q`): each due schedule enqueues one occurrence with id `job:{name}:{ticks}` and re-arms with `nextFire` computed **from now** — a schedule due five times while nothing polled fires once (catch-up-one). A queue at `MaxQueueBytes` refuses the fire without consuming it: `nextFire` is unchanged, `JobFireRefused` is recorded, and a later claim retries. A schedule that cannot be decoded is removed rather than retried forever, loudly (`JobScheduleRemoved`). *Exactly one fire, at-least-once processing*: the occurrence is an ordinary queue message.
+
+---
+
+## Idempotency Commands
+
+Delivery is at-least-once: a worker that runs a handler and dies before its acknowledgement lands will see the same message again. Only the worker knows the handler ran, so at-most-once **handler invocation** — `[Idempotent]` contracts — is a gate the worker consults before running, keyed by `(scope, id)`: the service or queue name, and the request or message id.
+
+### HW.IDEM
+
+```
+HW.IDEM BEGIN <scope> <id> <windowSeconds>           →   +CLAIMED | +BUSY | [DONE, result]
+HW.IDEM END   <scope> <id> <windowSeconds> <result>  →   +OK
+HW.IDEM ABORT <scope> <id>                           →   +OK
+```
+
+(5.0; replaces stock `SET NX EX` / `SETEX` / `GET` / `DEL` on `hw:idem:{scope}:{id}`.)
+
+1. **`BEGIN`** — atomically claims the right to run. `CLAIMED`: run the handler. `BUSY`: another attempt holds it, or held it when its process died — **do nothing**: do not run, reply or acknowledge; treating a stale claim as "probably crashed, run it again" defeats the mechanism, and the claim lapses with the window. `[DONE, result]`: a previous run completed — reply with **those exact bytes** and acknowledge; the caller must not be able to tell.
+2. **`END`** — after a successful run, replaces the claim with the result for the window.
+3. **`ABORT`** — releases the claim when the handler could not run at all (a transport failure before any work), so the redelivery is not blocked for the whole window over something that never ran.
+
+The window is not merely "how long duplicates are remembered": it is also how long a crashed run stays blocked — the right trade for a contract that has declared running twice worse than running late. Claims and results are deleted when their window ends.
+
+**This deduplicates redeliveries and nothing else.** A caller issuing the same logical request twice produces two request IDs, and nothing here relates them.
+
+---
+## Dead Letter Commands
+
+### HW.DLQ
+
+```
+HW.DLQ PEEK    SVC <service>          [COUNT n]   →   array of dead letters (non-destructive)
+HW.DLQ PEEK    Q   <queue>            [COUNT n]
+HW.DLQ REQUEUE SVC <service>          [COUNT n]   →   :n   (moved back to the live queue)
+HW.DLQ REQUEUE Q   <queue>            [COUNT n]
+HW.DLQ PURGE   SVC <service>          [COUNT n]   →   :n   (removed)
+HW.DLQ PURGE   Q   <queue>            [COUNT n]
+```
+
+`COUNT` defaults to `ReceiveDefaultCount` and is capped at `ReceiveMaxCount`.
+
+**Target grammar: `SVC` or `Q`.** A subscriber group's dead letters are accessed as `Q {channel}@{group}` — the derived queue name — because a group **is** a queue (feature 018). The `CH` form no longer exists.
+
+**How entries get here.** Nothing writes a dead letter directly. A claim arrives here when `HW.CLAIM`'s lease recovery finds it has exceeded `MaxDeliveryAttempts`, in the same commit that releases the claim. Each target keeps at most `MaxDeadLetterEntries`, oldest dropped first.
+
+**PEEK is non-destructive** and is listed first deliberately: the supported workflow is look, then decide. An operator who can only drain has to destroy the evidence in order to see it. Each entry is a flat field/value array — the same self-describing shape `HW.STATS` and `HW.REPLAY` use, so fields can be appended later without breaking readers:
+
+```
+deadLetteredAt  <ISO-8601 UTC>
+attempts        <n>
+reason          MAX_ATTEMPTS
+requestId       <id>            (SVC targets)
+messageId       <id>            (Q targets)
+payload         <bytes>
+```
+
+**REQUEUE resets the attempt count to zero and drops the failure block.** An operator requeues *after fixing something*; a message that immediately re-dead-letters has wasted the round trip. REQUEUE counts against the target's byte budget like any send. Requeue is always operator-initiated — Highway never re-feeds a dead-letter list automatically, because a queue that retries its own failures without limit is the defect this feature removes.
+
+**An unknown service or queue returns an empty array or `:0`, never an error**, matching `HW.DISCOVER` and `HW.STATS`.
+
+**Recorded events:** none. `HW.DLQ` is an operator command, and recording reads would drown the record — the same reasoning that keeps `HW.STATS` and `HW.REPLAY` out of the recorder. The *dead-lettering* itself is recorded, by the sweep that performed it.
+
+---
 
 ---
 
@@ -654,9 +578,9 @@ Highway records what it does. Two independent mechanisms, either disableable:
 
 ### The flight recorder is volatile
 
-**Its contents are lost when the server stops.** It holds events in ordinary process memory, not in the Garnet keyspace, and nothing about it enters the AOF.
+**Its contents are lost when the server stops.** It holds events in ordinary process memory, not in the store, and nothing about it is written to disk or replicated.
 
-That is deliberate. Storing events in the keyspace would put them in the AOF, where recovery would replay them with replay-time timestamps and fabricate history on every restart — and it would make a debugging aid compete with the actual queues for the same store. **Anyone needing a durable audit trail wants the activity/OpenTelemetry path**, exported continuously to a system built to retain it.
+That is deliberate. Storing events would make a debugging aid compete with the actual queues for the same store and replicate a volatile diagnostic to every standby. **Anyone needing a durable audit trail wants the activity/OpenTelemetry path**, exported continuously to a system built to retain it.
 
 Recording is **best-effort**: a failure to record never fails, delays, or alters the operation being recorded.
 
@@ -668,26 +592,25 @@ A name is a service name, a channel name, a node ID, or one of the reserved name
 
 | Name | Source | Cardinality |
 |---|---|---|
-| service name | `HW.CALL`, `HW.DEQUEUE`, `HW.ACK` | number of services |
-| channel name | `HW.PUBLISH`, `HW.SUBSCRIBE`, `HW.UNSUBSCRIBE`, `HW.RECEIVE`, `HW.RACK` | number of channels |
-| node ID | `HW.HEARTBEAT` registration / `BYE` | number of nodes |
+| service or queue name | `HW.CALL`, `HW.SEND`, `HW.CLAIM`, `HW.ACK`, `HW.FAIL` | number of services and queues |
+| channel name | `HW.PUBLISH`, `HW.UNSUBSCRIBE`, subscriptions declared by `HW.SESSION` | number of channels |
+| node ID | `HW.SESSION` registration, `HW.HEARTBEAT BYE` | number of nodes |
 | `hw.replies` | `HW.REPLY` — **reserved** | one |
 
 | Command | Event | Note |
 |---|---|---|
 | `HW.CALL` | `RpcEnqueued` | |
-| `HW.DEQUEUE` | `RpcClaimed` | a nil dequeue records nothing |
+| `HW.CLAIM SVC` / `HW.CLAIM Q` | `RpcClaimed` / `QueueClaimed` | one per claimed message; an empty claim records nothing |
 | `HW.REPLY` | `RpcReplied` | recorded under the reserved name **`hw.replies`**, not under a service. `HW.REPLY`'s arguments are a request ID and a payload, so the service that produced the reply is not on the wire and the command cannot know it. Query `HW.REPLAY hw.replies` and correlate by `requestId` |
-| `HW.ACK` | `RpcAcknowledged` | |
+| `HW.ACK` | `RpcAcknowledged` / `QueueAcknowledged` | by the claim's service or queue |
+| `HW.SEND` | `QueueSent` / `SendRefused` | |
+| `HW.FAIL` | `DeliveryFailed` | `errorCode` carries the exception type |
 | `HW.PUBLISH` | `Published` | `count` carries the group count |
-| `HW.SUBSCRIBE` / `HW.UNSUBSCRIBE` | `GroupRegistered` / `GroupRemoved` | |
-| `HW.JOB SET` / `HW.JOB DEL` | `JobScheduleChanged` / `JobScheduleRemoved` | `errorCode` carries the change detail |
-| `HW.QCLAIM` (fire) | `JobFired`, `JobFireRefused` | `requestId` = occurrence id; `errorCode` = job name |
-| `HW.RECEIVE` | `MessagesReceived` | one event per **batch**; `count` carries the batch size |
-| `HW.RACK` | `MessageAcknowledged` | |
-| `HW.DEQUEUE` sweep | `RpcDeadLettered` | a request exhausted its attempts; `count` carries the attempt count, `errorCode` the reason |
-| `HW.RECEIVE` sweep | `MessageDeadLettered` | as above, for one channel group |
-| `HW.HEARTBEAT` registration / `BYE` | `NodeRegistered` / `NodeDeparted` | |
+| `HW.SESSION` subscription / `HW.UNSUBSCRIBE` | `GroupRegistered` / `GroupRemoved` | |
+| `HW.JOB SET` or `HW.SESSION` job / `HW.JOB DEL` | `JobScheduleChanged` / `JobScheduleRemoved` | `errorCode` carries the change detail |
+| `HW.CLAIM Q` (fire) | `JobFired`, `JobFireRefused` | `requestId` = occurrence id; `errorCode` = job name |
+| `HW.CLAIM` recovery | `RpcDeadLettered` / `QueueDeadLettered` | a claim exhausted its attempts; `count` carries the attempt count, `errorCode` the reason |
+| `HW.SESSION` registration / `HW.HEARTBEAT BYE` | `NodeRegistered` / `NodeDeparted` | |
 | `HW.HEARTBEAT` liveness | **nothing** | fires every few seconds per node; recording it would evict real history to store the fact that nothing happened |
 | `HW.DISCOVER`, `HW.STATS`, `HW.REPLAY` | **nothing** | read-only; recording reads would drown the record, and querying it would record the query |
 
@@ -717,7 +640,7 @@ Returns one name's recorded operations in chronological order.
 |---|---|
 | **Arguments** | `name` — identifier. The rest are optional keyword arguments in any order. |
 | **Reply** | An array of flat field/value arrays, one per event. Empty array when the name is unknown, disabled, or has nothing in range — never an error. |
-| **Keys** | **None.** The recorder is not in the keyspace, so this is read-only with respect to Garnet and cannot contend with traffic. |
+| **Store** | **None.** The recorder is not in the store, so this cannot contend with traffic. |
 | **Idempotency** | Read-only. |
 
 `FROM` and `TO` accept either an ISO-8601 timestamp or a **relative offset** — `-30s`, `-5min`, `-1h`, `-2d` — which is what an operator actually types during an incident. Units accepted: `s`/`sec`/`secs`, `m`/`min`/`mins`, `h`/`hr`/`hrs`, `d`/`day`/`days`. Omitting them defaults to a recent window (`ReplayDefaultWindow`, default 5 minutes) ending now.
@@ -736,7 +659,7 @@ messageId    (empty for RPC events; a channel sequence number for pub/sub)
 payloadSize  512
 errorCode    (empty on success; e.g. HW_INVALID_ARG when rejected)
 statusCode   (empty unless the operation produced a client-facing status)
-count        (group count for a publish, batch size for a receive)
+count        (group count for a publish; attempts for a dead letter)
 payload      (empty unless the name is captured at Full)
 ```
 
@@ -824,198 +747,6 @@ Metrics add no command, reply or error to the wire, so they carry **no protocol 
 
 ---
 
-## Dead Letter Commands
-
-### HW.DLQ
-
-```
-HW.DLQ PEEK    SVC <service>          [COUNT n]   →   array of dead letters (non-destructive)
-HW.DLQ PEEK    Q   <queue>            [COUNT n]
-HW.DLQ REQUEUE SVC <service>          [COUNT n]   →   :n   (moved back to the live queue)
-HW.DLQ REQUEUE Q   <queue>            [COUNT n]
-HW.DLQ PURGE   SVC <service>          [COUNT n]   →   :n   (removed)
-HW.DLQ PURGE   Q   <queue>            [COUNT n]
-```
-
-`COUNT` defaults to `ReceiveDefaultCount` and is capped at `ReceiveMaxCount`.
-
-**Target grammar: `SVC` or `Q`.** A subscriber group's dead letters are accessed as `Q {channel}@{group}` — the derived queue name — because a group **is** a queue (feature 018). The `CH` form no longer exists.
-
-**How entries get here.** Nothing writes to a dead-letter list directly. An entry arrives when `HW.DEQUEUE`'s lease sweep or `HW.QCLAIM`'s sweep finds it has exceeded `MaxDeliveryAttempts`, and moves it out of the live queue in the same transaction that removes it from the processing list.
-
-**PEEK is non-destructive** and is listed first deliberately: the supported workflow is look, then decide. An operator who can only drain has to destroy the evidence in order to see it. Each entry is a flat field/value array — the same self-describing shape `HW.STATS` and `HW.REPLAY` use, so fields can be appended later without breaking readers:
-
-```
-deadLetteredAt  <ISO-8601 UTC>
-attempts        <n>
-reason          MAX_ATTEMPTS
-requestId       <id>            (SVC targets)
-messageId       <id>            (Q targets)
-payload         <bytes>
-```
-
-**REQUEUE resets the attempt count to zero.** An operator requeues *after fixing something*; a message that immediately re-dead-letters has wasted the round trip. Requeue is always operator-initiated — Highway never re-feeds a dead-letter list automatically, because a queue that retries its own failures without limit is the defect this feature removes.
-
-**An unknown service or queue returns an empty array or `:0`, never an error**, matching `HW.DISCOVER` and `HW.STATS`.
-
-**Recorded events:** none. `HW.DLQ` is an operator command, and recording reads would drown the record — the same reasoning that keeps `HW.STATS` and `HW.REPLAY` out of the recorder. The *dead-lettering* itself is recorded, by the sweep that performed it.
-
----
-
-## Queue Commands
-
-A **queue** is a named, durable, competing-consumer work list: exactly one worker processes each message, and the sender does not wait for a result. Mechanically it is RPC minus the reply — the same queue, lease, attempt counting and dead-lettering, with no reply slot.
-
-**Queues have their own key space** (`hw:q:`), so a queue and a service may share a name without colliding. A queue never appears in `HW.DISCOVER` and carries no response type.
-
-### HW.QSEND
-
-```
-HW.QSEND <queue> <messageId> <payload>              →   +OK
-HW.QSEND <queue> <messageId> <payload> AT <ticks>   →   +OK   (deferred)
-```
-
-| | |
-|---|---|
-| **Arguments** | `queue`, `messageId` — identifiers. `payload` — opaque, up to `MaxPayloadBytes`. `AT <ticks>` — optional absolute .NET UTC delivery time. |
-| **Reply** | `+OK` |
-| **Keys written** | `hw:q:{queue}:q`, or `hw:q:{queue}:delayed` when `AT` is in the future |
-| **Doorbell** | `hw:door:q:{queue}`, payload = `messageId`. **None for a deferred send**, which is in no worker's reach yet. |
-| **Idempotency** | Not idempotent. Repeating enqueues a second message. |
-
-**Sending never requires a running worker.** The message waits until one claims it. That is the whole point of a queue, and the capability whose absence leads people to misuse `HW.PUBLISH`.
-
-`AT` is absolute rather than a relative delay so AOF replay cannot re-delay from replay time — the same reasoning as `HW.PUBLISH`. A time in the past delivers immediately.
-
-### HW.QCLAIM
-
-```
-HW.QCLAIM <queue> <nodeId>   →   [messageId, payload]   |   *-1 (nil, queue empty)
-```
-
-| | |
-|---|---|
-| **Reply** | Two-element array, or a nil array when there is nothing to claim |
-| **Keys written** | `hw:q:{queue}:q`, `:proc:{nodeId}`, `:delayed`, `:dlq`, `:nodes`, `:nodelist` |
-| **Idempotency** | Not idempotent — each call claims a different message. |
-
-Before serving, it **promotes** deferred messages whose time has passed, then **sweeps expired leases** across every known worker: an entry past its lease returns to the queue with its attempt count incremented, or is dead-lettered once it exceeds `MaxDeliveryAttempts`. This is the same shared implementation `HW.DEQUEUE` uses, not a second copy.
-
-Unlike `HW.DEQUEUE` there is no dead-node prune — a queue has no service registry, so an abandoned claim is recovered by the lease sweep alone.
-
-**Competing consumers by default.** Every worker calling this shares the work; there is no group name and no coupling to node identity.
-
-### HW.QACK
-
-```
-HW.QACK <queue> <nodeId> <messageId>   →   :1 removed   |   :0 not found
-```
-
-Until this arrives the message remains in the worker's processing list and will be redelivered once its lease expires — that is what makes delivery at least once. Acknowledging an unknown message returns `:0` rather than an error: a worker retrying an acknowledgement is doing the right thing.
-
-### HW.JOB
-
-```
-HW.JOB SET <queue> <job> <expression> <template>   →   +OK
-HW.JOB DEL <queue> <job>                            →   :1 | :0
-HW.JOB LIST                                         →   [[queue, job, expression, nextFireTicks, lastFireTicks], ...]
-```
-
-Recurring-job schedule management (feature 028). A schedule fires **exactly one** occurrence
-message onto its queue at each due time and re-arms — but the firing itself happens inside
-`HW.QCLAIM`'s promotion sweep, not here: due-ness is decided by the broker's clock on the
-poll path, exactly as delayed delivery is. **No timer runs in the broker.**
-
-| | |
-|---|---|
-| **Arguments** | `queue`, `job` — identifiers. `expression` — `daily:HH:mm`, `every:{seconds}` (≥ 1), or `cron:{m h dom mon dow}` (standard 5-field), all UTC. `template` — the occurrence payload, stored verbatim and replayed on every fire; up to `MaxPayloadBytes`. |
-| **Reply** | SET `+OK`; DEL `:1` removed / `:0` unknown (idempotent); LIST an array of 5-field rows. |
-| **Errors** | `HW_INVALID_ARG` for a malformed expression (the message names the accepted forms); `HW_PAYLOAD_TOO_LARGE`. Both permanent. |
-| **Keys** | `hw:job:{queue}:schedules`, `hw:job:index` |
-| **Idempotency** | **SET is last-registration-wins**: re-registering replaces expression and template, preserves `lastFire`, and records `JobScheduleChanged` naming both expressions when they differ. |
-
-**Fire semantics** (in `HW.QCLAIM`): each due schedule enqueues one occurrence with id
-`job:{name}:{ticks}` and re-arms with `nextFire` computed **from now** — a schedule due five
-times while nothing polled fires once (catch-up-one). A queue at `MaxQueueBytes` refuses the
-fire without consuming it: `nextFire` is unchanged, `JobFireRefused` is recorded, and a later
-poll retries. A schedule whose record cannot be decoded is removed rather than retried
-forever, loudly (`JobScheduleRemoved`).
-
-*Exactly one fire, at-least-once processing.* The fired occurrence is an ordinary queue
-message with ordinary redelivery semantics; the exactly-once claim applies to the enqueue,
-never to the handler.
-
-### HW.FAIL
-
-```
-HW.FAIL SVC <service> <node>  <requestId>  <type> <detail>   →   :1 recorded   |   :0 not found
-HW.FAIL Q   <queue>   <node>  <messageId>  <type> <detail>
-```
-
-Records **why** a delivery failed. Without it a dead letter says only that something failed *n* times, and an operator has to correlate logs across every worker to learn what threw.
-
-| | |
-|---|---|
-| **Target grammar** | `SVC` or `Q`. A subscriber group is targeted as `Q {channel}@{group}` — the derived queue name — because a group **is** a queue (feature 018). One command serves both families. |
-| **`<type>`** | The exception type name. A separate argument, not a field inside `<detail>`, because the server itself needs it to maintain `firstType` — and reading it out of a JSON blob would mean parsing JSON inside a transaction on the failure path. |
-| **`<detail>`** | An opaque blob the server never interprets. Highway's own client sends JSON carrying the message, stack, node and timestamp. |
-| **Idempotency** | Idempotent in effect: a second report for the same message replaces the block rather than appending one. |
-
-**It does not acknowledge.** The message stays in the processing list and the lease sweep recovers it on exactly the schedule it would have. Reporting is orthogonal to delivery: a client that reports a failure has not finished with the message, it has explained itself.
-
-**A message that is no longer in the processing list returns `:0`.** Already acknowledged, already swept, or never claimed — all the same answer. A late report is a race the client cannot avoid, not an error to investigate.
-
-### HW.TOUCH
-
-```
-HW.TOUCH SVC <service> <node> <requestId>   →   :1 renewed   |   :0 not found
-HW.TOUCH Q   <queue>   <node> <messageId>
-```
-
-Says "still working" about a message this node has claimed. Without it, a handler that outlives
-`Lease` has its message requeued **while it is still running** — a concurrent duplicate caused
-by nothing but slowness, not by a failure.
-
-| | |
-|---|---|
-| **Target grammar** | The `SVC` / `Q` forms `HW.FAIL` and `HW.DLQ` already parse. A subscriber group's queue is a queue (4.0), so `{channel}@{group}` needs no third form |
-| **Effect** | The entry's claim timestamp becomes now. Nothing else changes — not the attempt count, not the payload, not the byte counters, not its position in the list |
-| **Idempotency** | Idempotent: renewing twice is renewing |
-
-**It does not acknowledge.** The message stays claimed and every recovery path still applies.
-
-**The failure block survives renewal.** An entry that already reported a failure keeps its
-`firstType` — the trailer is carried across the rewrite rather than rebuilt from decoded parts.
-
-**A message that is no longer in the processing list returns `:0`.** Already acknowledged,
-already swept, never claimed — all the same answer. A late renewal is a race the client cannot
-avoid, not an error to investigate.
-
-**Renewal is bounded by the client, not the server.** The server renews whenever asked; the
-client stops after `MaxProcessingTime` so a hung handler is still recovered. Unbounded renewal
-would delete lease recovery — a deadlocked handler would hold its message forever, never
-redelivered, never dead-lettered, never visible.
-
-#### The failure block
-
-An optional **trailer** on any entry framing:
-
-```
-<entry, framed as documented above>  [block][u32 blockLen][u32 magic 0xFE15FA11]
-
-block := [u16 typeLen][type][u16 firstTypeLen][firstType][u32 detailLen][detail]
-```
-
-Read from the **end**, which is what makes it additive: every framing above ends with "payload is the rest", so there is nowhere to put a length without moving bytes that already exist in storage. An entry written without a block decodes byte-for-byte as it always did.
-
-It rides on **every** framing, not only the processing ones. The lease sweep re-encodes a processing entry as a queue entry when it requeues; if the queue framing could not carry the block, `firstType` would be lost on the first redelivery, silently.
-
-`firstType` is **empty unless the failure changed shape**. It answers *"did this fail the same way every time?"* — a copy of `type` would answer nothing. Once set it is never overwritten.
-
-A payload would have to *end* with the eight trailer bytes to be misread as carrying a block. Payloads are JSON envelopes, whose last byte is `}` (0x7D); the magic's last byte is deliberately not that, and the declared length is bounds-checked as well.
-
----
-
 ## Replication Commands
 
 The primary ships its WAL to warm-standby replicas over RESP. Pull is replica-driven and stateless per request — the replica owns its cursor; the primary owns slots. Replicas serve no `HW.*` client traffic. See [Replication & Failover](design/replication-and-failover.md) for the failover control model — client-herd mastership, the handshake, the roster.
@@ -1032,18 +763,21 @@ A node that is not writable (role `Replica`, `Fenced`, or `Demoted`) refuses mut
 
 `HW.STATS`, `HW.DISCOVER`, `HW.REPLAY`, `HW.REPL.HELLO`, and the `HW.REPL.STATUS` / `PROMOTE` / `FENCE` / `WITNESS` / `GOODBYE` admin forms still run. A fenced primary additionally still serves `PULL` / `ACK` / `SNAPSHOT` so a replica can catch up.
 
-**During a GOODBYE drain** (042-1) the quiescing master serves the **completion** verbs — `HW.REPLY`, `HW.ACK`, `HW.QACK`, `HW.FAIL`, `HW.TOUCH` — plus reads, the raw reply-slot/idempotency surface, and WAL shipping, while refusing new work (`HW.CALL`, `HW.QSEND`, `HW.PUBLISH`, claims, subscriptions, job admin) with `-NOTPRIMARY`, so in-flight drains and the herd converges.
+**During a GOODBYE drain** (042-1) the quiescing master serves the **completion** verbs — `HW.REPLY`, `HW.RESULT`, `HW.ACK`, `HW.FAIL`, `HW.TOUCH`, `HW.IDEM` — plus reads and WAL shipping, while refusing new work (`HW.CALL`, `HW.SEND`, `HW.PUBLISH`, `HW.CLAIM`, `HW.SESSION`, job admin) with `-NOTPRIMARY`, so in-flight work drains and the herd converges.
 
 The server-wide `HW.STATS` form appends `repl.role`, `repl.epoch`, `repl.endpoint`, `repl.priority`, `repl.fenced`, `repl.slots`, `repl.minAcked`, `repl.latestSeq`, `repl.lastPromotion`, `repl.lastPromotionReason`, `repl.reconciliation`, `repl.drops`, `repl.ready`, `repl.readyReason` (052), and per-slot `repl.slot.N.{id,acked,state,lag}` fields. (Self-describing and append-only — a reader ignores fields it does not know, and 050/052 added others: `repl.redundancy`, `repl.leadershipSince`, `repl.clients`, `repl.draining`, `repl.resyncRequired`.)
 
 ### HW.REPL.HELLO
 
 ```
-HW.REPL.HELLO <replicaId> <lastAppliedSeq> <epoch> [endpoint]   →   [primaryEpoch, minSeq]
+HW.REPL.HELLO <replicaId> <lastAppliedSeq> <epoch> [endpoint] FORMAT <n>   →   [primaryEpoch, minSeq, format]
 HW.REPL.HELLO CLIENT <clientId> <lastSeenEpoch>                 →   [role, a, b]   (three bulk strings)
+HW.REPL.HELLO PEER <nodeId> <lastSeenEpoch>                     →   [role, a, b]   (as CLIENT)
 ```
 
 **Replica form.** Register or resume a retention slot. `lastAppliedSeq` is the replica's derived watermark (`GetLatestSequenceNumber` after the last applied page). `epoch` is the highest epoch the replica has seen. The optional `endpoint` names where the caller is reachable — a **promoting node announces itself** with it (epoch+1 plus its endpoint), which is how a demoted ex-primary learns where to point its `-NOTPRIMARY`. The reply's `minSeq` is the retention floor: the minimum acked watermark across live slots (0 when this is the only / first slot). This form is served in **every** role: it is the epoch/endpoint gossip channel.
+
+**`FORMAT <n>` (5.0)** declares the caller's storage format. A replica applies the primary's WAL byte for byte, so the formats must match; a replica form without `FORMAT`, or with another number, is refused `ERR HW_STORAGE_FORMAT` naming both formats — a 2.x node can never pull a 3.0 primary's batches into its old keyspace. `endpoint` and `FORMAT` may come in either order. The reply's third element is the **primary's** format, and a replica refuses to pull from a primary whose reply lacks it or names another: a 2.x primary ignores `FORMAT` and answers two integers, and its batches must never reach a 3.0 store.
 
 **Client form (the herd handshake, 042-1).** The literal `CLIENT` disambiguates (it is also why `CLIENT` can never be a replica id). The reply is three bulk strings, keyed by the first:
 
@@ -1054,6 +788,10 @@ HW.REPL.HELLO CLIENT <clientId> <lastSeenEpoch>                 →   [role, a, 
 | `standby` | masterEndpoint | masterEpoch | Unwilling — its master-link is healthy. Go where it points. One confused client cannot move mastership. A **draining** master (GOODBYE in progress) also answers `standby` — it is leaving, and must not pull the walking herd back onto itself; its self-redirect is a signal to walk on. |
 
 A `lastSeenEpoch` above the node's own is adopted (the any-channel epoch rule).
+
+**Peer form (5.0, 069).** `PEER` answers exactly as `CLIENT`, but the connection is a **peer session**: the probed node neither counts it as a herd client nor takes it as master contact. A standby that has lost its master sends it to every higher-priority roster peer and answers a client `willing` only when none of them answered `master` or `willing`, or `standby` with a redirect to someone other than itself or the asker; a peer with no answer in the last few seconds counts as alive. Otherwise the standby answers `standby`, redirecting to that peer. Like `CLIENT`, `PEER` can never be a replica id.
+
+**Equal-epoch tie-break (5.0, 069).** A primary that receives a replica-form HELLO carrying an endpoint at its **own** epoch is hearing a second primary's promotion announce. If the roster gives the caller a higher priority, this node demotes and schedules its rejoin as the caller's replica; otherwise it keeps its role and the caller yields on hearing this node's announce.
 
 Arity -4. Two forms.
 
@@ -1163,217 +901,95 @@ Arity 1.
 
 ---
 
-## Stock Garnet Dependencies
+## Served RESP Commands
 
-A client built only from the `HW.*` commands cannot function. These stock commands are required.
-
-| Command | Purpose |
-|---|---|
-| `GET hw:rep:{requestId}` | **Retrieve an RPC reply.** There is no `HW.*` command for this — `HW.REPLY` writes a plain main-store string and the caller reads it directly. |
-| `DEL hw:rep:{requestId}` | Remove the reply slot after collecting it. Optional but recommended; the `ReplySlotTtl` bounds leakage otherwise. |
-| `SUBSCRIBE hw:door:...` | Observe doorbells. Optional — doorbells are a latency optimization and correctness never depends on them. |
-| `SET hw:idem:... NX EX` / `GET` / `DEL` | **Deduplication.** Optional — required only for a client that implements `[Idempotent]`-style at-most-once handler invocation. See below. |
-| `PING` / `ECHO` | Connection health, as with any RESP server. |
-| `CLIENT SETNAME <node>` | **Identifies the connection as a node.** Optional. Highway's own client sends its node name on connect so the broker can answer "where is this node connected from?" without the node ever declaring an address. A client that omits it works normally; its node simply shows no observed address. |
-| `CLIENT LIST` | Read the names above back, joined against the node registry. Used by the dashboard only. |
-| `AUTH <password>` or `AUTH <user> <password>` | **Required against a secured server.** Highway's own client sends the password alone; the username defaults to Garnet's `default`. |
-
-**The reply doorbell is node-global.** Every client subscribed to `hw:door:rep` receives a notification for **every** reply on the server, not just its own. A client must ignore request IDs it did not issue, and in particular must never `DEL` a slot it does not own — doing so destroys another caller's reply and hangs that call until its timeout. This is a real defect that occurred during development, not a hypothetical.
-
-### The served RESP subset (040, as built)
-
-As of feature 040 the broker is Highway's own RESP server, not a Garnet extension. The
-table above still describes what a *client* must issue; this section is the *server's*
-side of that contract — the exhaustive list of what it answers. The server serves the
-`HW.*` command set plus exactly the stock commands below, and nothing else: an
-unrecognized command receives `ERR unknown command '<name>'. This is a Highway broker;
-served commands are the HW.* set: …` (naming the set), never a plausible `+OK`.
+The broker serves the `HW.*` set plus exactly the stock commands below, and nothing else: an unrecognized command receives `ERR HW_INVALID_ARG unknown command '<name>'. This is a Highway broker; served commands are the HW.* set: …` (naming the set), never a plausible `+OK`.
 
 | Command | As-built behaviour |
 |---|---|
-| `AUTH` | Both forms (`AUTH password`, `AUTH user password`). Failure is `-WRONGPASS`. **Pre-auth gate:** an unauthenticated connection may issue only `AUTH` and `QUIT`; everything else — `PING` included, because `PING` is SE.Redis's connect handshake — answers `-NOAUTH Authentication required.` (037 R11.3 as amended 2026-09-15). |
+| `AUTH` | Both forms (`AUTH password`, `AUTH user password`). Failure is `-WRONGPASS`. **Pre-auth gate:** an unauthenticated connection may issue only `AUTH` and `QUIT`; everything else — `PING` included, because `PING` is StackExchange.Redis's connect handshake — answers `-NOAUTH Authentication required.` |
 | `QUIT` | `+OK`, then the connection closes. Allowed in every state. |
 | `PING` | `+PONG`, or a bulk echo of its argument. Post-auth only. |
-| `HELLO` | RESP2 only: `HELLO` / `HELLO 2` answer a minimal server map; `HELLO 3` is refused with `NOPROTO`, and SE.Redis falls back to RESP2. |
+| `HELLO` | RESP2 only: `HELLO` / `HELLO 2` answer a minimal server map; `HELLO 3` is refused with `NOPROTO`, and StackExchange.Redis falls back to RESP2. |
 | `ECHO` | Bulk echo. |
 | `SELECT` | `+OK` for any index — a single logical database. |
-| `CLIENT` | `+OK` for every subcommand, **accepted and ignored**. In particular `CLIENT LIST` no longer returns connection records (the Garnet-era observed-address join is gone). |
+| `CLIENT` | `+OK` for every subcommand. `CLIENT SETNAME <node>` names the connection, so the dashboard can show where a node connects from; it is otherwise accepted and ignored. |
 | `COMMAND` | Empty array — no command catalogue. |
-| `CONFIG` | `CONFIG GET …` answers an empty array ("no matching keys" — SE.Redis probes this on connect); any other subcommand `+OK`. Never an error, which would abort a client's connect. |
-| `INFO` | A minimal bulk string declaring a standalone master, for SE.Redis's server-type detection. |
-| `SUBSCRIBE` / `UNSUBSCRIBE` | Doorbell channels only. A subscribed connection is in RESP2 restricted mode: only `SUBSCRIBE`, `UNSUBSCRIBE`, `PING`, `QUIT`. `PUBLISH` is **not** served — doorbells are published server-internally. |
-| `GET` | Served for the raw-key families a client reads: reply slots `hw:rep:*`, idempotency markers `hw:idem:*`, and — when the cache is enabled — `hw:cache:*` (a miss on a non-master). Any other key answers a null bulk — the honest reply to SE.Redis's tiebreaker probe; there is no general keyspace. |
-| `SET` | Idempotency claim (`hw:idem:*`, with `EX`/`PX`/`NX` honoured) or — when the cache is enabled — a cache set (`hw:cache:*`, `EX`/`PX` → TTL, `defaultTtl` when absent, clamped to `maxTtl`; `NX` is ignored). A `SET` on any other key is refused with `ERR HW_INVALID_ARG` naming this boundary. |
-| `SETEX` / `PSETEX` | Idempotency record writes (`hw:idem:*`) or cache sets (`hw:cache:*`, when enabled) — SE.Redis's unconditional expiring write. |
-| `DEL` / `UNLINK` | One key, from the reply-slot, idempotency, or (when enabled) cache families; answers `:1` (the delete is idempotent — `:1` whether or not the key still existed). Any other key is refused with an error naming the families. |
-| `TTL` / `PTTL` | Idempotency markers or (when enabled) cache keys, Redis semantics: `-2` no key, `-1` no expiry, else remaining time. |
+| `CONFIG` | `CONFIG GET …` answers an empty array (StackExchange.Redis probes this on connect); any other subcommand `+OK`. Never an error, which would abort a client's connect. |
+| `INFO` | A minimal bulk string declaring a standalone master, for server-type detection. |
+| `SUBSCRIBE` / `UNSUBSCRIBE` | Doorbell channels only. A subscribed connection is in RESP2 restricted mode: only `SUBSCRIBE`, `UNSUBSCRIBE`, `PING`, `QUIT`. `PUBLISH` is **not** served — doorbells are rung server-internally. |
+| `GET` | The opt-in cache: `hw:cache:*` when `server.cache.enabled` (a miss on a non-master). Any other key answers a null bulk — the honest reply to StackExchange.Redis's tiebreaker probe; there is no general keyspace. |
+| `SET` / `SETEX` / `PSETEX` | Cache keys only, when enabled (`EX`/`PX` → TTL, `defaultTtl` when absent, clamped to `maxTtl`; `NX` is ignored). Any other key is refused with `ERR HW_INVALID_ARG` naming the boundary. |
+| `DEL` / `UNLINK` | One cache key, when enabled; answers `:1`. Any other key is refused. |
+| `TTL` / `PTTL` | Cache keys, when enabled: `-2` no key, `-1` no expiry, else remaining. |
 
-`KEYS`, `SCAN`, `EVAL`, transactions, cluster commands and streams are not served — 037
-R6.3's rule is that the broker serves its protocol, not a keyspace.
+`KEYS`, `SCAN`, `EVAL`, transactions, cluster commands and streams are not served — the broker serves its protocol, not a keyspace. Since 5.0 reply slots and idempotency are reached only through `HW.RESULT` and `HW.IDEM`; no stock command reads or writes Highway state.
 
-**The cache family is opt-in and broker-local.** `hw:cache:*` is served only when
-`server.cache.enabled` is set; a broker with the cache off answers those keys exactly as any
-other unrecognized key (null / `ERR HW_INVALID_ARG`), byte-identical to a pre-044 broker. When
-on, the family is backed by a **separate store that replication never ships** — it is not part
-of the durable, replicated dataset, does not appear in `HW.REPL.PULL`, and is wiped on any epoch
-change (a mastership move means another node may have mutated the system of record, so every
-cached value is suspect). A herd-holding master that keeps its herd through a peer-only partition
-does **not** change epoch and so does **not** wipe. It is a cache: a miss is one more trip to the
-system of record, never data loss. See feature 044 and [`constraints.md`](product/constraints.md).
+**The cache family is opt-in and broker-local** (044). `hw:cache:*` is served only when `server.cache.enabled` is set. It is backed by a **separate store that replication never ships**, and wiped on any epoch change (a mastership move means another node may have changed the system of record). It is a cache: a miss is one more trip to the system of record, never data loss. `HybridCache` writes its L2 in the background, so an immediate L2 read after `GetOrCreateAsync` may still miss. See [`constraints.md`](product/constraints.md) C10.
 
 ### Authentication and transport security
 
-Highway does not define an authentication protocol — it configures Garnet's. A client
-therefore authenticates exactly as it would against any RESP server, with `AUTH`.
+A client authenticates exactly as against any RESP server, with `AUTH`.
 
-**Password authentication.** A server secured with `WithPassword` has exactly one user,
-Garnet's `default`. A client may send the password alone or pair it with that username;
-anything else is refused. There is no configuration file and no user directory.
+**Password authentication.** A secured broker has exactly one user, `default`. A client may send the password alone or pair it with that username; anything else is refused.
 
-**When authentication is required.** Highway refuses to build a server bound to a
-**non-loopback** address with no authentication, unless the operator explicitly opts out.
-Loopback is exempt: running open is the right configuration for development, and a
-loopback-bound broker is reachable only by processes already on the machine. This means
-`new HighwayServerBuilder().Build()` starts an unsecured broker, deliberately.
+**When authentication is required.** Highway refuses to build a broker bound to a **non-loopback** address with no authentication, unless the operator explicitly opts out. Loopback is exempt: running open is the right configuration for development, and a loopback-bound broker is reachable only by processes already on the machine.
 
-**TLS is never required.** Not on loopback, not off it, not alongside a password. Highway
-can demand a password; it cannot invent a certificate, so a TLS-by-default server would be
-one that cannot start. **The password crosses the wire in clear text without it** — RESP
-`AUTH` sends it as an ordinary bulk string — so TLS is strongly recommended wherever a
-password crosses a network.
-
-**A trap worth knowing if you configure Garnet's ACL directly.** Highway's commands fall
-under Garnet's `@dangerous` ACL category, not `@admin`. A rule set of `+@all -@dangerous` —
-a common hardening idiom — connects successfully and then refuses **every** `HW.*` command
-with `NOPERM`. That reads like a Highway bug and is not. Grant `+@custom`, or name the
-commands individually.
+**TLS is never required**, but strongly recommended wherever a password crosses a network — RESP `AUTH` sends it as an ordinary bulk string.
 
 ---
 
-### Deduplication is a client protocol, not a server one
+## Storage Layout & Stored Records
 
-Highway's delivery is at-least-once by design: a consumer that runs a handler and dies before its acknowledgement lands will see the same request again. Nothing on the server can prevent that — the server learns a request is complete when `HW.ACK` arrives, and the duplicate exists *precisely because that acknowledgement never arrived*. Only the consumer knows the handler ran.
+The storage layout is private to the broker — nothing on the wire names a stored key since 5.0 — and is documented in [Storage Engine](design/storage-engine.md) and [Durable Queues](design/durable-queues.md). What a client or operator needs to know:
 
-A client that wants at-most-once handler invocation therefore implements it itself, against a server key:
+- **Storage format 4** (Highway 3.0, feature 065): every service, queue and group queue lives in its own contiguous key range (a *box*), found through a catalog; creating one is a catalog write, retiring one is a single range delete, and every count is a maintained counter. Registry, membership, reply slots and idempotency state live in a system range. The format is stamped in `highway.format` in the data directory.
+- **No in-place migration.** A 3.0 broker refuses a 2.x (format 3) data directory — by stamp, and by recognising 2.x keys even without one — rather than serving it as an empty, healthy-looking store. Drain it with 2.x, then `highways --wipe-data` (keeps the node's replication identity) or delete it; in a replica set the upgraded node starts empty and the other re-syncs from it.
+- A replica applies its primary's WAL byte for byte, so both must store the same format: `HW.REPL.HELLO` declares it and a mismatch is refused.
 
-1. `SET hw:idem:{service}:{requestId} <in-progress> EX <window> NX` — atomic, so two concurrent redeliveries cannot both claim.
-2. If it claimed: run the handler, then `SET` the same key to the response envelope with the same TTL, then reply and acknowledge.
-3. If it did not claim and the value is a response: reply with **those exact bytes** and acknowledge. The caller must not be able to tell.
-4. If it did not claim and the value is the in-progress sentinel: **do nothing** — do not run, do not reply, do not acknowledge. Another attempt holds it, or held it when its process died. Treating a stale sentinel as "probably crashed, run it again" defeats the entire mechanism.
+### Stored records
 
-Step 4 is why the window is not merely "how long duplicates are remembered": it is also how long a crashed in-flight request stays blocked. That is the correct trade for a contract that has declared running twice worse than running late.
+All multi-byte integers are **big-endian**. All lengths are in bytes. Timestamps are .NET UTC tick counts (100-nanosecond intervals since 0001-01-01).
 
-**This deduplicates redeliveries and nothing else.** A caller issuing the same logical request twice produces two request IDs, and no server-side or client-side mechanism here relates them.
-
-Highway requires **no** cluster commands, **no** scripting (`EVAL`), and **no** stream commands (`X*`) — Garnet does not implement streams, which is why Highway's queues are built on lists and doorbells.
-
----
-
-## Key Schema
-
-Every key Highway creates lives under the `hw:` namespace and cannot collide with application data.
-
-### RPC
-
-| Key | Store | Type | Purpose |
-|---|---|---|---|
-| `hw:svc:{service}:q` | Object | List | Pending requests, FIFO |
-| `hw:svc:{service}:proc:{nodeId}` | Object | List | Requests claimed by one node, not yet acknowledged |
-| `hw:svc:{service}:nodes` | Object | Set | Nodes that have claimed work for this service |
-| `hw:svc:{service}:nodelist` | Main | String | Newline-delimited mirror of the nodes set |
-| `hw:svc:{service}:dlq` | Object | List | Dead letters: requests that exhausted `MaxDeliveryAttempts`. Capped at `MaxDeadLetterEntries` |
-| `hw:q:{queue}:q` | Object | List | Queued work, FIFO |
-| `hw:q:{queue}:proc:{nodeId}` | Object | List | Claimed by one worker, not yet acknowledged |
-| `hw:q:{queue}:nodes` | Object | Set | Workers that have claimed from this queue |
-| `hw:q:{queue}:nodelist` | Main | String | Newline-delimited mirror of the workers set |
-| `hw:q:{queue}:dlq` | Object | List | Dead letters. Capped at `MaxDeadLetterEntries` |
-| `hw:q:{queue}:delayed` | Object | Sorted Set | Work awaiting a future delivery time. Score = delivery time in ticks |
-| `hw:rep:{requestId}` | Main | String | Reply slot. **TTL `ReplySlotTtl`** (default 5 min) |
-| `hw:idem:{service}:{requestId}` | Main | String | Deduplication marker for an `[Idempotent]` contract: an in-progress sentinel, then the response envelope. **TTL = the contract's window** (default 5 min). Written by *clients*, not by any `HW.*` command |
-
-### Pub/Sub
-
-| Key | Store | Type | Purpose |
-|---|---|---|---|
-| `hw:ch:{channel}:groups` | Object | Set | Registered subscriber groups |
-| `hw:ch:{channel}:grplist` | Main | String | Newline-delimited mirror of the groups set |
-| `hw:ch:{channel}:seq` | Main | Integer | Message-ID counter |
-| `hw:job:{queue}:schedules` | Object | Sorted set | Recurring-job schedules (028): score = nextFireTicks, member = versioned record (name, expression, lastFire, nextFire, template) |
-| `hw:job:index` | Main | String | Newline-delimited mirror of queues holding schedules, read in `Prepare` |
-| `hw:grp:members:{channel}@{group}` | Main | String | Newline-delimited node IDs backing the group (025). Deleted with the group |
-
-A subscriber group's queue, processing list, dead letters and delayed set all live under `hw:q:{channel}@{group}:*` — the standard queue key space. The derived queue name `{channel}@{group}` is what makes the `@` reservation mandatory (see [Identifiers](#identifiers)).
-
-### Registry
-
-| Key | Store | Type | Purpose |
-|---|---|---|---|
-| `hw:reg:node:{nodeId}` | Main | String | Registration record: registration timestamp + catalog. Written at registration only |
-| `hw:reg:seen:{nodeId}` | Main | String | Liveness timestamp (i64 BE ticks), refreshed by every beat (4.12). Deleted with the record |
-| `hw:reg:nodes` | Main | String | Newline-delimited list of registered node IDs |
-| `hw:reg:svc:{service}` | Main | String | Newline-delimited node IDs hosting the service |
-| `hw:reg:node:{nodeId}:subs` | Main | String | Newline-delimited `{channel}@{group}` entries the node subscribes through (025) — the index `BYE PURGE` walks |
-
-### Mirror keys, and why they exist
-
-Three keys duplicate an object-store set as a newline-delimited main-store string: `:nodelist`, `:grplist`, and the registry's list keys.
-
-This is **mandatory, not stylistic**. Reading an object-store set during a command's `Prepare` phase goes through Garnet's watch API, which registers a watch on that key; the exclusive lock the command then takes on the same key fails watch-version validation and aborts the transaction. Reading a main-store string with `GET` avoids the conflict.
-
-The consequence is the newline delimiter, and that is why identifiers may not contain control characters. The delimiter is load-bearing — see [Identifiers](#identifiers).
-
-Mirrors are updated in the same transaction as the set they mirror, so the two cannot diverge.
-
----
-
-## Entry Framing
-
-All multi-byte integers are **big-endian** (network byte order). All lengths are in bytes.
-
-| Entry | Layout |
+| Record | Layout |
 |---|---|
-| RPC queue entry | `[u8 0xFF][u16 attempts][u16 requestIdLen][requestId][payload]` |
-| RPC processing entry | `[u8 0xFF][i64 claimTicksUtc][u16 attempts][u16 requestIdLen][requestId][payload]` |
-| Dead-letter entry | `[i64 deadLetteredTicksUtc][u16 attempts][u16 reasonLen][reason][original entry]` |
-| Registration record | `[i64 seenTicksUtc][catalog json bytes]` |
+| Queue entry (waiting or deferred work, any kind) | `[u8 0xFF][u16 attempts][u16 idLen][id][payload]` + optional failure block |
+| Claim | `[u8 1][i64 claimTicks][u16 nodeLen][node][queue entry]` |
+| Dead letter | `[i64 deadLetteredTicks][u16 attempts][u16 reasonLen][reason][queue entry]` |
+| Registration | `[i64 registeredTicks][catalog json]` — liveness beats go to a separate 8-byte timestamp (4.12) |
+| Job schedule | `[u8 1][u16][name][u16][expression][i64 lastFire][i64 nextFire][template]` |
 
-### The delivery attempt count
+**The claim wraps the queue entry unchanged**, so a message moves between waiting, claimed and dead-lettered without re-encoding its payload or losing its failure block.
 
-`attempts` bounds redelivery. It is incremented when an entry is **requeued after a lease expiry**, not when it is first enqueued — a message delivered once and acknowledged has one attempt, not two. An entry that would exceed `MaxDeliveryAttempts` is moved to a dead-letter list instead of being requeued.
+**The delivery attempt count** bounds redelivery. It is incremented when a claim is recovered — its lease expired, or its node was declared dead — not when the message is first enqueued: a message delivered once and acknowledged has one attempt, not two. A message that would exceed `MaxDeliveryAttempts` is dead-lettered instead. The count lives *in the entry* so that incrementing it is atomic with the move that caused it, and saturates at `u16` maximum rather than wrapping, because a wrapped counter silently restores unbounded retry.
 
-The count lives *in the entry* rather than in a side key so that incrementing it is atomic with the move that caused it. A count kept beside the entry would be lost by exactly the crash it exists to survive. It saturates at `u16` maximum rather than wrapping, because a wrapped counter silently restores unbounded retry.
+**The version byte.** Entries begin with `0xFF`; an entry written before 013 is refused with `HW_STORAGE_FORMAT` rather than misparsed into a corrupt payload.
 
-Two paths increment it: `HW.DEQUEUE`'s lease sweep and `HW.QCLAIM`'s lease sweep. A path that requeued without counting would let an entry escape the limit indefinitely.
+#### The failure block
 
-### The version byte, and a breaking change
+An optional **trailer** on a queue entry (015):
 
-**Entries written before this was introduced cannot be read.** Adding `attempts` changed how entries parse, and an old entry read as a current one does not fail on its own: it reinterprets its leading bytes, reads a wrong length, and hands a **corrupt payload** to an application. That is worse than an error, so versioned entries begin with `0xFF` and a mismatch is refused with `HW_STORAGE_FORMAT`.
+```
+<entry>  [block][u32 blockLen][u32 magic 0xFE15FA11]
+block := [u16 typeLen][type][u16 firstTypeLen][firstType][u32 detailLen][detail]
+```
 
-`0xFF` is unambiguous against every pre-existing leading byte: the high half of a `u16` identifier length (bounded by `MaxIdentifierBytes`), the high byte of a message-ID counter starting at 1, and the high byte of a .NET tick count. Raising `MaxIdentifierBytes` to 65,280 or above would break that property, and is rejected.
-
-**Upgrade path:** drain the affected queues with the previous version, or delete the data directory.
-
-Timestamps are .NET UTC tick counts (100-nanosecond intervals since 0001-01-01).
-
-The processing variants are the queue entry with a timestamp inserted after the version byte — that timestamp is what the lease sweeps compare against.
-
-The registration record is framed in binary rather than JSON: `[i64 BE timestamp][catalog]`. Since 4.12 the liveness form does not touch it at all — beats go to the separate 8-byte `hw:reg:seen:{nodeId}` key — so the catalog is written once per registration rather than once per beat, and is not re-shipped to standbys every few seconds. The header timestamp remains the registration time and the fallback for records written before 4.12.
+Read from the **end**, which is what makes it additive: every framing ends with "payload is the rest", so an entry written without a block decodes byte-for-byte as it always did. It rides through every move — claim, recovery, dead-lettering — so `firstType` is never lost on redelivery. `firstType` is empty unless the failure changed shape; once set it is never overwritten. A payload would have to *end* with the eight trailer bytes to be misread as carrying a block; the magic's last byte is deliberately not `}` (a JSON envelope's last byte), and the declared length is bounds-checked as well.
 
 ---
-
 ## Doorbell Channels
 
-Doorbells are Garnet RESP pub/sub messages that wake waiting clients so they need not poll. They are **best-effort by contract**: a client that never receives one must still make progress by polling. Correctness never depends on delivery.
+Doorbells are RESP pub/sub messages that wake waiting clients so they need not poll. They are **best-effort by contract**: a client that never receives one must still make progress by polling. Correctness never depends on delivery.
 
 | Channel | Rung by | Payload |
 |---|---|---|
 | `hw:door:svc:{service}` | `HW.CALL` | `requestId` |
 | `hw:door:rep` | `HW.REPLY` | `requestId` |
 | `hw:door:q:{channel}@{group}` | `HW.PUBLISH`, once per group | `messageId` |
-| `hw:door:q:{queue}` | `HW.QSEND` | `messageId` |
+| `hw:door:q:{queue}` | `HW.SEND` | `messageId` |
 | `hw:door:topology` | topology changes (042-1) | one of the three narration messages below |
 
-Doorbells are rung **after** the transaction commits, and are **not** rung during AOF replay — a recovering server does not wake workers for requests that were already handled before the restart. A rejected command rings nothing.
+Doorbells are rung **after** the command commits, never during recovery, and a rejected command rings nothing. A client must re-subscribe its doorbells after it follows a failover to another node (Highway's client does, for every doorbell including queue doorbells — before 3.0 queue doorbells were lost and those workers fell back to backstop polling).
 
 **The narration channel (042-1).** `hw:door:topology` carries the master's advisory topology pushes — single-line, space-delimited:
 
@@ -1385,7 +1001,7 @@ ROSTER-UPDATE <rosterVersion> <nodeId> <priority> <endpoint> JOINED|LEFT
 
 Every narration message is **advisory**: a client re-runs its own rule and may stay put; a wrong or lost push is harmless because `-NOTPRIMARY` refusal and the TCP-drop walk remain the guarantee. Narration is never a vote.
 
-`hw:door:rep` is a single node-global channel rather than one per request, keeping subscriptions O(1) per node instead of O(pending calls). The cost is that every client sees every reply notification and must filter — see [Stock Garnet Dependencies](#stock-garnet-dependencies).
+`hw:door:rep` is a single node-global channel rather than one per request, keeping subscriptions O(1) per node instead of O(pending calls). The cost is that every client sees every reply notification and must filter — see [`HW.RESULT`](#hwresult).
 
 ---
 
@@ -1397,23 +1013,23 @@ Guarantees that span commands. Each names the test that enforces it, so a reader
 
 A worker must send `HW.REPLY` **before** `HW.ACK`.
 
-If it crashes between the two, the reply is already delivered and the lease eventually returns the request for redelivery — the caller gets an answer either way. Reversed, a crash between acknowledgement and reply loses the request entirely: it is no longer in any processing list, so nothing will redeliver it, and the caller waits out its timeout for a reply that will never come.
+If it crashes between the two, the reply is already delivered and the lease eventually returns the request for redelivery — the caller gets an answer either way. Reversed, a crash between acknowledgement and reply loses the request entirely: it is no longer claimed, so nothing will redeliver it, and the caller waits out its timeout for a reply that will never come.
 
 *Enforced by* `RpcWorkerLoopTests.Process_SendsReplyBeforeAck`.
 
 ### Pub/Sub: acknowledge only after dispatch completes
 
-A consumer must send `HW.QACK` only **after** the message has been fully dispatched to its handlers.
+A consumer must send `HW.ACK` only **after** the message has been fully dispatched to its handlers.
 
 Acknowledging first turns a crash mid-dispatch into silent loss. Acknowledging last turns it into redelivery, which at-least-once permits.
 
-*Enforced by* `SubscriptionWorkerLoop`'s structure: `ProcessAsync` calls `ExecuteSubscribersAsync` first, then `QAckAsync` only if all handlers succeed.
+*Enforced by* `SubscriptionWorkerLoop`'s structure: `ProcessAsync` calls `ExecuteSubscribersAsync` first, then `AckAsync(token)` only if all handlers succeed.
 
 ### A schedule fires exactly once per occurrence (028)
 
-The fire — enqueue one occurrence, advance `nextFire`, replace the schedule member — is one
-transaction inside `HW.QCLAIM`'s exclusive locks. However many workers poll at the due
-instant, one fires; the others find the schedule already re-armed. The claim is the election.
+The fire — enqueue one occurrence, advance `nextFire` — is one commit inside `HW.CLAIM`,
+under the queue's lock. However many workers poll at the due instant, one fires; the others
+find the schedule already re-armed. The claim is the election.
 
 *Enforced by* `RecurringJobTests.DueSchedule_FiresExactlyOneOccurrence_UnderRacingPollers`,
 verified against deliberately broken re-arm.
@@ -1442,27 +1058,33 @@ Deleting groups on prune would silently convert Highway's durable pub/sub into f
 
 ### At-least-once for both RPC and pub/sub
 
-Neither path is exactly-once. A request can be executed more than once (reply sent, acknowledgement lost, lease requeues it) and a message can be delivered more than once (dispatch completed, `HW.RACK` lost).
+Neither path is exactly-once. A request can be executed more than once (reply sent, acknowledgement lost, lease requeues it) and a message can be delivered more than once (dispatch completed, `HW.ACK` lost). `[Idempotent]` contracts use [`HW.IDEM`](#idempotency-commands) to run a handler at most once per delivery id.
 
 **Duplicate handling is the application's responsibility.** Handlers should be idempotent.
 
 *Enforced by* `RpcFlowTests`, `LeaseRecoveryTests`, and `NodeExpiryTests`.
 
-### Group identity is the node name, and groups outlive the process
+### Group identity defaults to the node name, and groups outlive the process
 
-A subscriber group is identified by the consuming node's name. Every group receives its own copy of every message, so N nodes subscribed to a channel produce N deliveries.
+A subscriber group is identified by `SubscriptionGroup`, which defaults to the consuming node's name. Every group receives its own copy of every message, so N nodes in N groups produce N deliveries; N nodes sharing one group compete for one copy (025).
 
 The client never sends `HW.UNSUBSCRIBE`. A node that stops leaves its group registered, so messages published while it is down accumulate and drain when it returns under the same name. This is what makes "a message published with no online subscriber is delivered when the subscriber eventually starts" true across process restarts.
 
-The corollary: **two live processes sharing a node name share a group**, and will compete for messages rather than each receiving a copy. Node names must be unique per running instance.
+The corollary: **two live processes sharing a node name (with the default group) share a group**, and will compete for messages rather than each receiving a copy. Node names must be unique per running instance.
 
 *Enforced by* `PubSubIntegrationTests.Subscriber_StopsAndRestartsWithSameNodeName_DrainsMessagesPublishedWhileDown`.
 
-### A liveness beat never resurrects a node into the index
+### A liveness beat never resurrects a node — it asks for the session
 
-If the server holds no registration record, the liveness form replies `+REGISTER` and writes nothing. It never recreates a record from a bare beat, because without the catalog it cannot rebuild the discovery index — and a node that is live but absent from the index is worse than one that is plainly gone.
+If the broker holds no registration for the node, the liveness form replies `+SESSION` and writes nothing. It never recreates a record from a bare beat, because without the catalog it cannot rebuild the discovery index, and without the session it cannot restore the node's subscriptions and schedules — a node that is live but absent from the index, unsubscribed and unscheduled is worse than one that is plainly gone. The client re-declares its whole session at once.
 
-*Enforced by* `RegistryTests.Liveness_ForUnregisteredNode_AsksForRegistration_AndMutatesNothing` and `RegistryTests.Liveness_AfterTheNodeIsGone_AsksForRegistrationAgain`.
+*Enforced by* `RegistryTests` (liveness for an unknown or departed node asks for a session and mutates nothing) and `HeartbeatLoopTests.SessionReply_ReDeclaresTheWholeSession_AtOnce`.
+
+### A token names exactly one claim
+
+Claim sequences are never reused, so a token is valid for one claim of one message, once. After a lease expiry the redelivered message carries a new token; the late holder's `HW.ACK`, `HW.TOUCH` or `HW.FAIL` answers `:0` and never settles, renews or annotates the redelivery.
+
+*Enforced by* `WorkProtocolTests.AStaleToken_AfterLeaseRecovery_DoesNotSettleTheRedelivery`.
 
 ---
 
@@ -1472,17 +1094,17 @@ Options that change observable protocol behaviour. All are server-side.
 
 | Option | Default | Effect |
 |---|---|---|
-| `MaxPayloadBytes` | 5 MiB (max 15 MiB) | Payload cap for `HW.CALL`, `HW.REPLY`, `HW.PUBLISH`, `HW.QSEND`. Exceeding → `HW_PAYLOAD_TOO_LARGE`. A configured value above the 15 MiB ceiling is refused at build (a message is buffered whole in memory). The server advertises the effective value on the `HW.STATS` server form so clients track it. |
+| `MaxPayloadBytes` | 5 MiB (max 15 MiB) | Payload cap for `HW.CALL`, `HW.REPLY`, `HW.PUBLISH`, `HW.SEND`, and job templates. Exceeding → `HW_PAYLOAD_TOO_LARGE`. A configured value above the 15 MiB ceiling is refused at build (a message is buffered whole in memory). The server advertises the effective value on the `HW.STATS` server form so clients track it. |
 | `MaxIdentifierBytes` | 256 | Identifier length cap. Exceeding → `HW_INVALID_ARG`. |
-| `MaxCatalogBytes` | 256 KiB | Catalog cap for the `HW.HEARTBEAT` registration form. |
-| `Lease` | 5 minutes | How long a claimed RPC request or received message may go unacknowledged before redelivery. `TimeSpan.Zero` disables lease sweeps. |
-| `ReplySlotTtl` | 5 minutes | TTL on `hw:rep:{requestId}`. Should comfortably exceed the client's call timeout. |
+| `MaxCatalogBytes` | 256 KiB | Catalog cap for `HW.SESSION`. |
+| `Lease` | 5 minutes | How long a claim may go unacknowledged (or unrenewed by `HW.TOUCH`) before redelivery. `TimeSpan.Zero` disables lease recovery. |
+| `ReplySlotTtl` | 5 minutes | How long a reply waits for `HW.RESULT` before it is deleted. Should comfortably exceed the client's call timeout. |
 | `NodeExpiry` | 30 seconds | How long a registration stays valid without a beat. What matters is the **ratio** to the client's heartbeat interval; the defaults give 6×. Below about 3×, ordinary GC pauses cause false staleness. |
-| `PruningEnabled` | `true` | When `false`, stale nodes are still excluded from discovery but their state is never reclaimed, and their unacknowledged work is recovered only by the slower lease sweep. |
-| `ReceiveDefaultCount` | 10 | `HW.RECEIVE` `COUNT` when omitted. |
-| `ReceiveMaxCount` | 500 | Maximum accepted `COUNT`. Above → `HW_INVALID_COUNT`. Also caps `HW.DLQ` `COUNT`. |
+| `PruningEnabled` | `true` | When `false`, stale nodes are still excluded from discovery but their claims are recovered only by the slower lease recovery, never by dead-node recovery. |
+| `ReceiveDefaultCount` | 10 | `HW.DLQ` `COUNT` when omitted. |
+| `ReceiveMaxCount` | 500 | Maximum accepted `COUNT` for `HW.CLAIM` and `HW.DLQ`. Above → `HW_INVALID_COUNT`. |
 | `MaxDeliveryAttempts` | 5 | Deliveries before an entry is dead-lettered instead of requeued. `0` means unlimited, restoring the pre-013 behaviour in which a permanently failing message is redelivered forever. |
-| `MaxDeadLetterEntries` | 10,000 | Per-list dead-letter cap; oldest dropped first. |
+| `MaxDeadLetterEntries` | 10,000 | Per-target dead-letter cap; oldest dropped first. |
 | `PubSubBackoffEnabled` | `false` | A pub/sub message returned after a lease expiry waits a growing delay before becoming claimable again. **Off by default because backoff and head-of-queue ordering are mutually exclusive**: holding a failed message serves the messages behind it first, and redelivery-preserves-order is a documented guarantee. Enable it where pacing matters more than order. |
 | `RpcBackoffEnabled` | `false` | The RPC equivalent. Off because a caller waits against `CallTimeout` (30 s) while `Lease` defaults to 5 minutes — the caller has already given up before a retry is possible, so a delay changes nothing but when the dead-letter happens. Worth enabling only where `Lease` is tuned well below the call timeout. |
 | `MaxBackoff` | 1 minute | Upper bound on the retry delay. The cap matters more than the curve: an uncapped exponential reaches hours by the twelfth attempt, when the message is functionally dead but still occupying a live queue. |
@@ -1494,4 +1116,4 @@ Options that change observable protocol behaviour. All are server-side.
 | `Replication.PromoteTimeout` | 8s | Replica may self-promote after this long of primary silence (OD1). |
 | `Replication.Margin` | 1s | Clock-rate / scheduling slack (OD1). |
 
-Durability options (`DataDir`, `WaitForCommit`) affect whether state survives a restart but do not change any command's contract. With no data directory the server is memory-only and all state is lost on shutdown — including registrations, which is what the `+REGISTER` handshake recovers from.
+Durability options (`DataDir`, `WaitForCommit`) affect whether state survives a restart but do not change any command's contract. With no data directory the server is memory-only and all state is lost on shutdown — including every session, which is what the `+SESSION` re-declaration recovers from.

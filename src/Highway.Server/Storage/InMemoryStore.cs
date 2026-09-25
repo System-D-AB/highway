@@ -53,6 +53,13 @@ public sealed class InMemoryStore : IHighwayStore
     }
 
     /// <inheritdoc />
+    public byte[]? Read(IStoreBatch batch, byte[] key) => Cast(batch).ReadThrough(key);
+
+    /// <inheritdoc />
+    public IReadOnlyList<(byte[] Key, byte[] Value)> Scan(IStoreBatch batch, byte[] prefix, byte[] from, int limit)
+        => Cast(batch).EntriesFrom(prefix, from, limit);
+
+    /// <inheritdoc />
     public long ListLength(IStoreSnapshot snapshot, byte[] key)
         => CountPrefix(Cast(snapshot).Map, key);
 

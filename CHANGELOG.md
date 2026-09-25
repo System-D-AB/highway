@@ -8,6 +8,58 @@ The wire protocol has its own authoritative history in
 [`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md); this file records the product and
 package changes and links there rather than restating command-level detail.
 
+## [3.0.0] — Unreleased
+
+A major release: a new storage layout, protocol 5.0, and a failover that no longer splits under
+load. **The broker, the client packages and every data directory move together** — a 3.0 broker
+refuses a 2.x data directory, a 2.x client cannot talk to it, and 2.x and 3.0 nodes never replicate
+from each other. Upgrading is a drain and a fresh start per node: see runbook 7 in the
+[server distribution guide](docs/distribution/README.md). The public client API is unchanged.
+
+### Breaking
+
+- **Storage format 4 — every queue in its own key range** (feature 065). Each service, queue and
+  subscriber group's queue is a *box* found through a catalog; claims, leases, deferred work, dead
+  letters, job schedules and counters each have their own sub-range. There is **no in-place
+  migration**: a 3.0 broker refuses a format-3 directory, by its stamp and by recognising 2.x keys,
+  and names the recovery. New `highways --wipe-data` empties a data directory for the fresh start
+  while keeping the node's replication identity.
+- **Protocol 5.0** (features 067, 068). One work path: `HW.CLAIM SVC|Q` returns claim tokens, and
+  `HW.ACK` / `HW.TOUCH` / `HW.FAIL` take the token. `HW.QSEND` is `HW.SEND`. A node declares its
+  whole session (catalog, subscriptions, jobs) with `HW.SESSION`. Reply slots and idempotency are
+  reached only through `HW.RESULT` and `HW.IDEM`; stock `GET`/`SET`/`DEL` now serve the opt-in cache
+  only. See the 5.0 row of [`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md).
+- Replication declares the storage format in both directions (`HW.REPL.HELLO ... FORMAT 4`, and the
+  primary's reply echoes its own).
+
+### Fixed
+
+- **Two primaries after a failover under load** (feature 069). With two or more standbys, a client
+  whose probe of the live successor was slow could walk on to a lower-priority standby, which promoted
+  by its timer alone; both stayed primary at one epoch. A standby that has lost its master now asks its
+  higher-priority peers first (`HW.REPL.HELLO PEER`) and defers to any that could take the herd, and
+  two primaries at one epoch settle by priority (the lower one rejoins the other). The 3.0 client also
+  fails over faster: it fails fast when it has other endpoints, compares endpoints by identity rather
+  than spelling, probes a dead node once instead of three times, and treats a disposed connection as a
+  lost one.
+- **Subscriptions and jobs lost after a failover.** They were registered once at startup; a broker
+  that had not seen that registration served the node without them. The client now re-declares its
+  session whenever a broker asks (`+SESSION`) and after every failover it follows, and re-subscribes
+  queue doorbells.
+- **Expired reply slots and idempotency markers were never deleted** — only hidden from reads. They
+  are now indexed by expiry and deleted.
+- Races between publish and claim, fail and touch, and job update and job fire on one queue: every
+  operation on a queue now holds that queue's lock.
+- The dashboard and metrics no longer scan the whole keyspace to list queues.
+
+### Improved
+
+- A claim, ack, touch or fail costs the same with ten thousand messages in flight as with one: acks
+  are point lookups by token, lease recovery reads only expired claims, and every count is a counter.
+- A replica catching up from far behind reads the WAL once instead of once per page (300 000 batches:
+  1.5 s → 0.2 s) and applies each page with one synced write (feature 066).
+- RocksDB 11.8.1 (feature 064; data directories are compatible with 11.1.2).
+
 ## [2.0.1] — 2026-09-16
 
 ### Fixed

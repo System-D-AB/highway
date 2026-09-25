@@ -387,8 +387,19 @@ var server = new HighwayServerBuilder()
 await server.RunAsync();
 ```
 
-The broker is durable by default — messages survive restart via append-only file
-persistence. Use `.Ephemeral()` for tests that need a disposable broker.
+The broker is durable by default — messages survive a restart in its embedded RocksDB store
+(see [Storage Engine](../design/storage-engine.md)). Use `.Ephemeral()` for tests that need a
+disposable broker.
+
+### Upgrading from 2.x to 3.0
+
+Highway 3.0 is a breaking release on both sides: the broker speaks protocol 5.0 and stores format 4,
+and does not migrate a 2.x data directory. Upgrade the broker and every application together — drain
+on 2.x, run `highways --wipe-data`, start 3.0, then deploy the applications on the 3.0 packages. The
+step-by-step procedure, including replica sets, is runbook 7 of the
+[server distribution guide](../distribution/README.md). Application code does not change: the public
+API is the same, and only the wire protocol beneath it moved — which is why the packages must match the
+broker.
 
 ### For integration tests
 

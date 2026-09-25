@@ -56,6 +56,20 @@ internal sealed class InMemoryBatch : IStoreBatch
         return best;
     }
 
+    /// <summary>Live entries under a prefix from <paramref name="from"/> on, at most <paramref name="limit"/> (065).</summary>
+    internal List<(byte[] Key, byte[] Value)> EntriesFrom(byte[] prefix, byte[] from, int limit)
+    {
+        var entries = new List<(byte[], byte[])>();
+        if (limit <= 0) return entries;
+        foreach (var k in MergedKeysUnderPrefix(prefix))
+        {
+            if (ByteArrayComparer.Instance.Compare(k, from) < 0) continue;
+            if (ReadThrough(k) is { } v) entries.Add((k, v));
+            if (entries.Count >= limit) break;
+        }
+        return entries;
+    }
+
     /// <summary>Every live key under a prefix (staged + committed merged), in byte order.</summary>
     internal List<byte[]> AllUnderPrefix(byte[] prefix) => [.. MergedKeysUnderPrefix(prefix)];
 

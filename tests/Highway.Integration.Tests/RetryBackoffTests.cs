@@ -33,15 +33,15 @@ public class RetryBackoffTests : IDisposable
 
     private static async Task<int> ReceiveAsync(IDatabase db, string group)
     {
-        var r = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@{group}", "node-1");
-        return r.IsNull ? 0 : 1;
+        var r = await db.ClaimQAsync($"{Channel}@{group}", "node-1");
+        return r is null ? 0 : 1;
     }
 
     [Fact]
     public async Task FailedMessage_IsRedliveredImmediately_ViaQueueEngine()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, "g1");
+        await db.SubscribeAsync(Channel, "g1");
         await db.ExecuteAsync("HW.PUBLISH", Channel, "body"u8.ToArray());
 
         (await ReceiveAsync(db, "g1")).Should().Be(1, "first delivery");
@@ -59,15 +59,14 @@ public class RetryBackoffTests : IDisposable
     public async Task OneGroupsRetry_IsNotDeliveredToAnother()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, "g1");
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, "g2");
+        await db.SubscribeAsync(Channel, "g1");
+        await db.SubscribeAsync(Channel, "g2");
         await db.ExecuteAsync("HW.PUBLISH", Channel, "body"u8.ToArray());
 
         // g1 takes it and abandons it; g2 takes and acknowledges its own copy.
         (await ReceiveAsync(db, "g1")).Should().Be(1);
-        var g2First = await db.ExecuteAsync("HW.QCLAIM", $"{Channel}@g2", "node-1");
-        var g2MessageId = ((RedisResult[])g2First!)[0].ToString();
-        await db.ExecuteAsync("HW.QACK", $"{Channel}@g2", "node-1", g2MessageId!);
+        var g2First = await db.ClaimQAsync($"{Channel}@g2", "node-1");
+        (await db.AckAsync(g2First!.Value.Token)).Should().Be(1);
 
         await Task.Delay(120);                       // g1's lease expires
         await ReceiveAsync(db, "g1");                // sweep runs, message goes to g1's retry set
@@ -92,7 +91,7 @@ public class RetryBackoffTests : IDisposable
         });
 
         var db = (await ConnectionMultiplexer.ConnectAsync(immediate.ConnectionString)).GetDatabase();
-        await db.ExecuteAsync("HW.SUBSCRIBE", Channel, "g1");
+        await db.SubscribeAsync(Channel, "g1");
         await db.ExecuteAsync("HW.PUBLISH", Channel, "body"u8.ToArray());
 
         (await ReceiveAsync(db, "g1")).Should().Be(1);
