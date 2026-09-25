@@ -468,6 +468,39 @@ distinction — but a point-in-time measurement is an upper bound, not the live-
 > is the same, the reclamation mechanism (compaction vs. never, on Garnet) is what differs — and that
 > difference is what moved C4.6 from unmet to met.
 
+### C4.9 — Per-message cost does not grow with uptime
+
+**Status: Met** — feature 061 (2.5.4).
+
+**Before (2.5.3 and earlier):** under steady, modest RPC traffic a broker's CPU climbed with uptime,
+spent mostly in native RocksDB iteration stepping over deleted keys. Every
+ack / fail / touch and every lease sweep (run on **every** worker poll) drained the worker's whole
+in-flight list and re-pushed the survivors, so each call re-wrote every in-flight message and left
+tombstones; pops and scans started at the list's first key and stepped over all of them. A
+deterministic reproduction showed poll cost growing 3.5 ms → 9.6 ms within 50 000 calls.
+
+**Now:** in-flight messages are deleted or updated in place by key; the lease sweep is read-only
+except for expired entries and runs at most once per `min(1 s, Lease/10)` per queue; pops and list
+scans start from a per-list head hint (a process-local lower bound, only ever raised after a
+successful commit, cleared on any epoch change); every iterator carries an upper bound; and RocksDB
+compacts delete-heavy files on its own (compact-on-deletion collector). Same reproduction: ~0.6 ms per
+poll, flat from 2 000 to 50 000 calls, and an idle poll with messages in flight writes nothing.
+
+Observable: `highway.storage.memtable_deletes` and `highway.storage.estimated_keys`. Recovery for a
+data directory that accumulated tombstones before 2.5.4: `highways --compact` with the broker stopped.
+
+**2.5.5 — the memtable, too.** Deletes still in the memtable are not reached by the collector, and a
+lightly written broker's memtable flushes only after hours, so reads that start at a range's first key
+(queue-depth counts, delayed-set and schedule scans) still stepped over every pop since the last flush
+— so memtable deletes and CPU climbed together. RocksDB's
+`memtable_op_scan_flush_trigger` now flushes the memtable as soon as one read step skips 1 000 hidden
+entries (or reads average 16 per step over such a window), handing the tombstones to the collector.
+That bounds what any scan can meet, including scans not yet given a head hint.
+
+**Not yet:** in-flight entries are still located by a bounded scan of the worker's in-flight list
+(O(in-flight), not O(1)). Addressing them by message id — and giving each queue its own key box — is
+the planned storage-layout change (061-b).
+
 ---
 
 ## C5 — What Highway does not guarantee
@@ -730,6 +763,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C4.5 | Durable by default | ✅ **Met** (016) |
 | C4.6 | Bounded over time | ✅ **Met** (041, RocksDB compaction) — Garnet AOF was not; see the 2026-09-15 addendum |
 | C4.7 | Byte budget bounds a queue, not the process | ⚠️ **Deliberately unmet** (016 decision 1) |
+| C4.9 | Per-message cost does not grow with uptime | ✅ **Met** (061) |
 | C23 | No encryption at rest (volume encryption is the answer) | ✅ Met as stated (041) |
 | C24 | Deletion is logical until compaction | ✅ Met as stated (041) |
 | C7.1 | Diagnostics can never break a delivery | ✅ Met (002 + 015) |
@@ -877,6 +911,29 @@ until a manual reconfigure + wipe + restart. 050-a closes the class:
 
 The root cure — a symmetric member/peer config that removes the learned-endpoint marker entirely — is
 the deferred **050-b**.
+
+### C9.9 — A replica pull's cost does not grow with uptime
+
+**Status: Met** — feature 062 (2.5.5).
+
+**Before (2.5.4 and earlier):** a primary with a caught-up replica spent CPU in proportion to how long
+it had run, even at modest traffic. Each `HW.REPL.PULL` opened RocksDB's WAL reader, which reads the
+live WAL file from its start up to the requested sequence; that file rolls only on a memtable flush —
+hours on a lightly written broker — and a caught-up replica pulls about 20 times a second. Measured:
+≈1.5 ms per pull after 2 000 writes, ≈54 ms after 120 000.
+
+**Now:** the primary serves pulls from a bounded in-memory tail of recently committed batches (16 MiB),
+captured after each commit's write and cleared on any epoch or role change. A pull at the watermark
+returns an empty page without reading the WAL; a pull just behind gets the tail's contiguous run. Only
+a replica further behind than the tail — or one pulling right after a primary restart — reads the WAL,
+through the unchanged gap-checked path. Where group commit merged batches into one WAL record and a
+replica stands inside it, that record is trimmed to start after the replica's watermark; one that
+cannot be split with certainty is refused as a gap (the replica re-syncs, never diverges). Measured:
+under 1 ms per pull at 40 000 writes, flat. See
+[replication-and-failover](../design/replication-and-failover.md).
+
+**Not yet:** a replica catching up from further back than the tail still pays the WAL reader's
+read-from-file-start cost once per page.
 
 ## C10 — Broker-local cache (feature 044)
 

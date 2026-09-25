@@ -69,7 +69,7 @@ internal sealed class HwFailCommand : HighwayCommand
         using var batch = ctx.Store.NewBatch();
 
         var found = false;
-        ConsumerSupport.DrainAndRestore(ctx.Store, batch, _procListName, entry =>
+        ConsumerSupport.UpdateInPlace(ctx.Store, batch, _procListName, entry =>
         {
             if (!found && !Envelope.IsLegacyEntry(entry) && Matches(entry))
             {

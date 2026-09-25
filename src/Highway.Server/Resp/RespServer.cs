@@ -85,7 +85,8 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
         _metrics = new HighwayMetrics(
             replication,
             () => brokerState.QueuesAsync().GetAwaiter().GetResult().Value ?? [],
-            Recorder);
+            Recorder,
+            storageProperty: store is RocksDbStore durable ? durable.SumProperty : null);   // 061 T8
 
         Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication, _cache, _metrics);
 

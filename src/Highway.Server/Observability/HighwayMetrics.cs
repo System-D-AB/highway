@@ -54,7 +54,8 @@ internal sealed class HighwayMetrics : IDisposable
         ReplicationFeeder? replication,
         Func<IReadOnlyList<QueueStateDto>> sampleQueues,
         FlightRecorder recorder,
-        string? meterName = null)
+        string? meterName = null,
+        Func<string, long>? storageProperty = null)
     {
         _meter = new Meter(meterName ?? MeterName);
 
@@ -95,6 +96,18 @@ internal sealed class HighwayMetrics : IDisposable
             "Dead-lettered messages awaiting an operator (labelled queue).");
         _meter.CreateObservableGauge("highway.recorder.dropped", () => recorder.DroppedBudget, "{event}",
             "Flight-recorder events dropped rather than blocking a delivery.");
+
+        // 061 T8: the storage engine's delete load, so a build-up of tombstones is visible here rather than
+        // only in a CPU profile. Durable (RocksDB) brokers only; sampled only when a listener collects.
+        if (storageProperty is not null)
+        {
+            _meter.CreateObservableGauge("highway.storage.memtable_deletes",
+                () => storageProperty("rocksdb.num-deletes-active-mem-table") + storageProperty("rocksdb.num-deletes-imm-mem-tables"),
+                "{deletion}", "Deletions held in the storage engine's memtables, not yet flushed or compacted.");
+            _meter.CreateObservableGauge("highway.storage.estimated_keys",
+                () => storageProperty("rocksdb.estimate-num-keys"),
+                "{key}", "The storage engine's estimate of live keys.");
+        }
     }
 
     // ---- counter recording (called from the command / transition sites) ------

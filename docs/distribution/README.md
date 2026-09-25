@@ -146,6 +146,30 @@ without the dashboard UI, set `dashboard.enabled: false` and keep `dashboard.hea
 
 ---
 
+### Offline Compaction (`--compact`)
+
+Compacts the data directory and drops every deleted-key marker ("tombstone") the storage engine is
+holding. It changes no data. Use it once after upgrading a broker that ran **2.5.3 or earlier** for a
+long time: those versions left tombstones on busy queues that every poll had to step over, so an
+idle-looking broker could spend a whole core. From 2.5.4 the broker no longer creates that churn and
+RocksDB compacts delete-heavy files on its own; from 2.5.5 it also flushes deletes out of memory as
+soon as reads start stepping over them. Routine use is not needed.
+
+```cmd
+REM stop the broker first — a running broker holds the data directory's lock
+bin\highways.exe --stop        REM Windows service; on Linux: sudo systemctl stop highway
+bin\highways.exe --compact --config config\highway.json
+bin\highways.exe --start       REM start it again
+```
+
+It prints the elapsed time and the directory size before and after. **Disk size need not shrink** —
+write-ahead-log files are kept for replication for `walTtlSeconds` (default 24 h); what compaction
+removes is the scan cost of the tombstones. The metric
+`highway.storage.memtable_deletes` shows the engine's pending deletes if you want to watch it; on 2.5.5
+it rises and falls rather than climbing for hours.
+
+---
+
 ## 5. Runbook: Data-Directory Rotation (Drain-Then-Rotate)
 
 When upgrading across incompatible storage format versions or performing store maintenance, use the **Drain-Then-Rotate** procedure to ensure zero data loss.

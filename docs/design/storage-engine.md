@@ -43,6 +43,15 @@ disk until compaction merges the SST files holding it. So a point-in-time direct
 set *plus* not-yet-compacted tombstones and overwritten versions — it fluctuates above the logical
 size between compactions, but does not grow without bound.
 
+**Tombstones are also a read cost, so they are bounded in time, not just in space** (features 061,
+062). A range scan steps over every deleted key in its range until compaction removes it — in the
+memtable as well as in SST files. Three engine settings keep that bounded on a lightly written broker,
+whose memtable may otherwise sit unflushed for hours: every iterator carries an upper bound for its
+key range; `memtable_op_scan_flush_trigger` flushes the memtable once a single read step skips 1 000
+hidden entries; and the compact-on-deletion collector compacts any SST file that is delete-dense. The
+hot paths also avoid creating churn and start from a queue's known head (see
+[durable-queues](durable-queues.md)). `highways --compact` drops every tombstone offline.
+
 **Everything that grows with traffic is bounded.** Each queue-like structure carries a byte budget
 (`MaxQueueBytes`, default 1 GB), maintained by a running counter inside the same transaction that
 pushes or pops, so the write path stays O(1). A full structure **refuses** the producer loudly

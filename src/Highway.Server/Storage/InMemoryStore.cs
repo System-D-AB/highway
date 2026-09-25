@@ -182,6 +182,18 @@ public sealed class InMemoryStore : IHighwayStore
     }
 
     /// <inheritdoc />
+    public IReadOnlyList<(byte[] Key, byte[] Value)> ListEntries(IStoreBatch batch, byte[] key)
+    {
+        var b = Cast(batch);
+        var entries = new List<(byte[], byte[])>();
+        foreach (var k in b.AllUnderPrefix(key))
+        {
+            if (b.ReadThrough(k) is { } v) entries.Add((k, v));
+        }
+        return entries;
+    }
+
+    /// <inheritdoc />
     public void SortedSetAdd(IStoreBatch batch, byte[] key, long score, byte[] member)
         => Cast(batch).Put(ComposeZKey(key, score, member), []);
 
@@ -319,4 +331,17 @@ internal sealed class ByteArrayComparer : IComparer<byte[]>
 {
     public static readonly ByteArrayComparer Instance = new();
     public int Compare(byte[]? x, byte[]? y) => x!.AsSpan().SequenceCompareTo(y!);
+}
+
+/// <summary>Bytewise equality — for maps keyed by a key prefix (the head hints, 061 A4).</summary>
+internal sealed class ByteArrayEqualityComparer : IEqualityComparer<byte[]>
+{
+    public static readonly ByteArrayEqualityComparer Instance = new();
+    public bool Equals(byte[]? x, byte[]? y) => ReferenceEquals(x, y) || (x is not null && y is not null && x.AsSpan().SequenceEqual(y));
+    public int GetHashCode(byte[] obj)
+    {
+        var hash = new HashCode();
+        hash.AddBytes(obj);
+        return hash.ToHashCode();
+    }
 }

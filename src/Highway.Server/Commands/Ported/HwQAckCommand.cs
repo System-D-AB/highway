@@ -35,7 +35,7 @@ internal sealed class HwQAckCommand : HighwayCommand
         using var batch = ctx.Store.NewBatch();
 
         var found = false;
-        ConsumerSupport.DrainAndRestore(ctx.Store, batch, HighwayNames.QueueProcessing(_queue, _nodeId), entry =>
+        ConsumerSupport.UpdateInPlace(ctx.Store, batch, HighwayNames.QueueProcessing(_queue, _nodeId), entry =>
         {
             if (!found && !Envelope.IsLegacyEntry(entry))
             {

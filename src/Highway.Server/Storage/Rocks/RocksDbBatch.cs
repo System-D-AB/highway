@@ -12,6 +12,12 @@ namespace Highway.Server.Storage.Rocks;
 /// <para>An overlay entry with a <c>null</c> value is a staged delete (tombstone),
 /// distinct from an absent key. Disposing without committing discards everything
 /// (037 R4.2) — the DB is untouched until <see cref="Commit"/>.</para>
+///
+/// <para><b>Scans stream (061).</b> A merged prefix scan walks the committed iterator and the
+/// overlay together, lazily, so <see cref="FirstUnderPrefix"/> stops at the first live key instead
+/// of materialising every key in the list — a pop used to cost O(list length). List scans may start
+/// from the store's head hint (061 A4) and record, for after the commit, the first live key they
+/// saw, so the next scan of that list starts there instead of re-walking deleted history.</para>
 /// </summary>
 internal sealed class RocksDbBatch : IStoreBatch
 {
@@ -22,6 +28,10 @@ internal sealed class RocksDbBatch : IStoreBatch
 
     // Prefixes range-deleted in this batch, applied as native DeleteRange at commit.
     internal List<byte[]> RangeDeletes { get; } = [];
+
+    // 061 A4: list head hints to raise once this batch has committed — (list prefix, the hint the
+    // scan started from or null, the first live key it found). Raised with compare-and-swap.
+    internal List<(byte[] Prefix, byte[]? Observed, byte[] FirstLive)> HintRaises { get; } = [];
 
     private bool _committed;
 
@@ -44,30 +54,87 @@ internal sealed class RocksDbBatch : IStoreBatch
         return _store.CommittedGet(key);
     }
 
-    internal byte[]? FirstUnderPrefix(byte[] prefix)
+    /// <summary>The first live key under <paramref name="prefix"/>; stops there (061).</summary>
+    internal byte[]? FirstUnderPrefix(byte[] prefix, bool listHint = false)
     {
-        foreach (var k in MergedKeysUnderPrefix(prefix))
-            return k; // yielded in byte order
+        foreach (var (key, _) in Merged(prefix, withValues: false, listHint))
+            return key;
         return null;
     }
 
-    internal List<byte[]> AllUnderPrefix(byte[] prefix) => [.. MergedKeysUnderPrefix(prefix)];
-
-    private IEnumerable<byte[]> MergedKeysUnderPrefix(byte[] prefix)
+    internal List<byte[]> AllUnderPrefix(byte[] prefix, bool listHint = false)
     {
-        var seen = new SortedDictionary<byte[], bool>(ByteArrayComparer.Instance);
+        var keys = new List<byte[]>();
+        foreach (var (key, _) in Merged(prefix, withValues: false, listHint))
+            keys.Add(key);
+        return keys;
+    }
 
-        foreach (var k in _store.CommittedKeysUnderPrefix(prefix))
-            seen[k] = true;
+    /// <summary>Every live entry under <paramref name="prefix"/>, in key order, with its value (061 A1).</summary>
+    internal List<(byte[] Key, byte[] Value)> EntriesUnderPrefix(byte[] prefix, bool listHint = false)
+    {
+        var entries = new List<(byte[], byte[])>();
+        foreach (var (key, value) in Merged(prefix, withValues: true, listHint))
+            entries.Add((key, value!));
+        return entries;
+    }
 
-        foreach (var kv in Overlay)
+    /// <summary>
+    /// Merges the committed range (bounded, optionally from the head hint) with this batch's staged
+    /// writes under <paramref name="prefix"/>, in key order; a staged write wins over the committed
+    /// value and a staged delete hides the key. Lazy: abandoning the enumeration disposes the native
+    /// iterator.
+    /// </summary>
+    private IEnumerable<(byte[] Key, byte[]? Value)> Merged(byte[] prefix, bool withValues, bool listHint)
+    {
+        byte[]? observed = null;
+        var seekFrom = prefix;
+        if (listHint && _store.TryGetHeadHint(prefix, out var hint))
         {
-            if (!RocksDbStore.StartsWith(kv.Key, prefix)) continue;
-            if (kv.Value is null) seen.Remove(kv.Key);
-            else seen[kv.Key] = true;
+            observed = hint;
+            seekFrom = hint;
         }
 
-        return seen.Keys;
+        // The overlay is small (one command's writes); take its slice under the prefix.
+        var staged = new List<KeyValuePair<byte[], byte[]?>>();
+        foreach (var kv in Overlay)
+            if (RocksDbStore.StartsWith(kv.Key, prefix)) staged.Add(kv);
+
+        using var committed = _store.CommittedEntries(prefix, seekFrom, withValues).GetEnumerator();
+        var hasCommitted = committed.MoveNext();
+        var s = 0;
+        var first = true;
+
+        while (hasCommitted || s < staged.Count)
+        {
+            int order;
+            if (!hasCommitted) order = 1;
+            else if (s >= staged.Count) order = -1;
+            else order = ByteArrayComparer.Instance.Compare(committed.Current.Key, staged[s].Key);
+
+            byte[] key;
+            byte[]? value;
+            if (order < 0)
+            {
+                (key, value) = committed.Current;
+                hasCommitted = committed.MoveNext();
+            }
+            else
+            {
+                key = staged[s].Key;
+                value = staged[s].Value;
+                s++;
+                if (order == 0) hasCommitted = committed.MoveNext();   // the staged write shadows the committed one
+                if (value is null) continue;                            // staged delete
+            }
+
+            if (first)
+            {
+                first = false;
+                if (listHint) HintRaises.Add((prefix, observed, key));
+            }
+            yield return (key, withValues ? value : null);
+        }
     }
 
     // ---- commit ----
@@ -77,6 +144,7 @@ internal sealed class RocksDbBatch : IStoreBatch
         if (_committed) throw new InvalidOperationException("Batch already committed.");
         _committed = true;
         _store.Commit(this);
+        _store.ApplyHeadHints(this);   // only after the write succeeded (061 A4)
     }
 
     public void Dispose() { /* uncommitted overlay discarded */ }

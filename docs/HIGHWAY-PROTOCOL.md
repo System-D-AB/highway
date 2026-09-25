@@ -1,6 +1,6 @@
 # The Highway Protocol
 
-**Protocol version 4.12** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
+**Protocol version 4.13** — see the [changelog](#protocol-version--changelog); the served RESP surface as of feature 040 is in [Stock Garnet Dependencies](#stock-garnet-dependencies).
 
 ## About
 
@@ -40,7 +40,7 @@ This file is the complete and authoritative definition of the Highway wire proto
 
 ## Protocol Version & Changelog
 
-**Current version: 4.10**
+**Current version: 4.13**
 
 A version is documentation for humans. Nothing negotiates it at runtime and no command reports it — Highway has no capability handshake.
 
@@ -48,6 +48,7 @@ A version is documentation for humans. Nothing negotiates it at runtime and no c
 
 | Version | Features | Change |
 |---|---|---|
+| 4.13 | 062 | **Replica pulls from memory.** `HW.REPL.PULL`'s reply shape is unchanged; its page is now defined precisely: the first batch begins at exactly `fromSeq + 1` (the replica's watermark + 1), and a WAL record that spans the cursor is trimmed to start there. A batch is one committed write or several merged by RocksDB's group commit, so batch boundaries may differ between pulls of the same range; sequences and contents do not. A record that cannot be trimmed with certainty is refused with `ERR HW_REPL_GAP`. Compatible with existing replicas. |
 | 4.12 | 059, 060 | **Idle write load.** Adds the key `hw:reg:seen:{nodeId}` (8-byte liveness timestamp). The `HW.HEARTBEAT` liveness form now writes only that key and **no longer rewrites** `hw:reg:node:{nodeId}` — the catalog is written once, at registration, instead of on every beat (and is no longer re-shipped to standbys per beat). Effective last-seen is the newer of the record header and the new key, so pre-4.12 records read correctly. Server-side: a commit that stages nothing (e.g. an empty `HW.QCLAIM`/`HW.DEQUEUE`) no longer issues a synced write. No command, argument or reply changes. Additive. |
 | 4.11 | 052 | **Readiness field.** The `HW.STATS` server form and `HW.REPL.STATUS` append `repl.ready` (bool) and `repl.readyReason` (`primary`/`replica`/`fenced`/`draining`/`bootstrapping`/`demoted`) — the same decision the new HTTP `GET /ready` endpoint serves, so readiness is legible on every channel. The health endpoints (`/health`, `/ready`, `/replication`) are HTTP, not RESP, and carry no wire command. Additive. |
 | 4.10 | 057 | **Message size.** The default `MaxPayloadBytes` is raised from 1 MiB to **5 MiB**, configurable up to a **15 MiB** ceiling (above which the server refuses at build). The `HW.STATS` server form appends a `maxPayloadBytes` field so a client learns the server's configured limit at connect and does not falsely reject below a raised server limit. Additive. |
@@ -806,6 +807,8 @@ Instruments are **always defined** (no config gate) and cost nothing when no lis
 | `highway.deadletters` | ObservableGauge | `{message}` | `queue` |
 | `highway.connections` | ObservableGauge | `{connection}` | — |
 | `highway.recorder.dropped` | ObservableGauge | `{event}` | — |
+| `highway.storage.memtable_deletes` | ObservableGauge | `{deletion}` | — |
+| `highway.storage.estimated_keys` | ObservableGauge | `{key}` | — |
 
 The replication instruments are present only on a durable (RocksDB) broker; an in-memory broker has no feeder, so they report nothing.
 
@@ -1060,7 +1063,7 @@ Arity -4. Two forms.
 HW.REPL.PULL <fromSeq> <maxBytes>   →   [epoch, [[seq, data], ...], nextSeq | *-1]
 ```
 
-A page of WAL batches starting at `fromSeq` (inclusive, matching RocksDB `GetUpdatesSince`). Each inner pair is the batch's sequence number and its `WriteBatch` bytes. `nextSeq` is the first sequence **not** included in this page; `*-1` (null array) means the iterator is drained — the replica is caught up until the next write.
+A page of WAL batches **following** `fromSeq` — the replica's applied watermark. The first batch begins at exactly `fromSeq + 1` (4.13): batches the replica already holds are not re-served, and a WAL record that spans the cursor is trimmed to start there. Each inner pair is the batch's first sequence number and its `WriteBatch` bytes (header sequence equal to it). A batch is one committed write or several merged by group commit; boundaries may differ between pulls of the same range, sequences and contents never do. A pull at the primary's latest sequence returns an empty page. `nextSeq` is the first sequence **not** included in this page; `*-1` (null array) means the iterator is drained — the replica is caught up until the next write.
 
 `maxBytes` bounds the page. A single batch larger than `maxBytes` is still returned so the cursor can advance.
 

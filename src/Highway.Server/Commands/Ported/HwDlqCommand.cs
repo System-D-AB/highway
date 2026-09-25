@@ -85,50 +85,41 @@ internal sealed class HwDlqCommand : HighwayCommand
         using var _lock = ctx.Locks.Lock(_dlqName);
         using var batch = ctx.Store.NewBatch();
 
-        // Drain the DLQ once; the head window is [0.._count). _dlqName is already the full
-        // logical name (Queue/Service dead-letter), so the list prefix is built directly.
-        var all = ctx.Store.ListDrain(batch, HighwayKeyspace.ListPrefix(_dlqName));
+        // Read the DLQ once; the head window is [0.._count). _dlqName is already the full logical
+        // name (Queue/Service dead-letter), so the list prefix is built directly. 061 A1: read-only —
+        // PEEK writes nothing, and REQUEUE / PURGE delete only the entries in the window (this used to
+        // drain the whole DLQ and re-push everything outside the window, even for a PEEK).
+        var all = ctx.Store.ListEntries(batch, HighwayKeyspace.ListPrefix(_dlqName));
+        var window = System.Math.Min(_count, all.Count);
 
         switch (_action)
         {
             case ActionPeek:
-                // Non-destructive: restore everything in order, report the head window.
-                foreach (var e in all) HwQSendCommand.PushTail(ctx.Store, batch, _dlqName, e);
-                batch.Commit();
-                WritePeek(writer, all.Take(_count).ToList());
+                batch.Commit();   // nothing staged, nothing written
+                WritePeek(writer, all.Take(window).Select(e => e.Value).ToList());
                 break;
 
             case ActionRequeue:
             {
-                var moved = 0;
-                for (var i = 0; i < all.Count; i++)
+                for (var i = 0; i < window; i++)
                 {
-                    if (i < _count)
-                    {
-                        DeadLetter.Decode(all[i], out _, out _, out _, out var original);
-                        Envelope.DecodeRpcEntry(original, out var requestId, out var payload, out _);
-                        var revived = Envelope.EncodeRpcEntry(requestId.ToArray(), payload.ToArray(), attempts: 0);
-                        HwQSendCommand.PushTail(ctx.Store, batch, _liveName, revived);
-                        moved++;
-                    }
-                    else
-                    {
-                        HwQSendCommand.PushTail(ctx.Store, batch, _dlqName, all[i]); // beyond the window: keep in DLQ
-                    }
+                    DeadLetter.Decode(all[i].Value, out _, out _, out _, out var original);
+                    Envelope.DecodeRpcEntry(original, out var requestId, out var payload, out _);
+                    var revived = Envelope.EncodeRpcEntry(requestId.ToArray(), payload.ToArray(), attempts: 0);
+                    HwQSendCommand.PushTail(ctx.Store, batch, _liveName, revived);
+                    ctx.Store.Delete(batch, all[i].Key);
                 }
                 batch.Commit();
-                writer.Integer(moved);
+                writer.Integer(window);
                 break;
             }
 
             default: // PURGE
             {
-                var removed = System.Math.Min(_count, all.Count);
-                // Restore everything beyond the window; the head window is dropped.
-                for (var i = removed; i < all.Count; i++)
-                    HwQSendCommand.PushTail(ctx.Store, batch, _dlqName, all[i]);
+                for (var i = 0; i < window; i++)
+                    ctx.Store.Delete(batch, all[i].Key);
                 batch.Commit();
-                writer.Integer(removed);
+                writer.Integer(window);
                 break;
             }
         }

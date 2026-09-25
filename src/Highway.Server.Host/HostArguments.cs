@@ -19,6 +19,9 @@ internal sealed class HostArguments
 
     public bool ShowVersion { get; private set; }
     public bool Validate { get; private set; }
+
+    /// <summary>--compact: offline — compact the data directory, dropping tombstones (061 T5). Broker must be stopped.</summary>
+    public bool Compact { get; private set; }
     public string? ConfigPath { get; private set; }
     public int? Port { get; private set; }
     public string? BindAddress { get; private set; }
@@ -84,6 +87,11 @@ internal sealed class HostArguments
                 case "--validate":
                     RejectIfVerb(result, "--validate");
                     result.Validate = true;
+                    break;
+
+                case "--compact":
+                    RejectIfVerb(result, "--compact");
+                    result.Compact = true;
                     break;
 
                 case "--config":

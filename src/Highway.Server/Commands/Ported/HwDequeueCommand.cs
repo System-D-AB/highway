@@ -50,8 +50,10 @@ internal sealed class HwDequeueCommand : HighwayCommand
         // registry — so it stops being locked and swept on every future dequeue.
         var pruned = SweepDeadNodes(ctx, store, snap, batch);
 
-        // Lease sweep across the service's processing lists (skip nodes just pruned).
-        if (ctx.Options.Lease > TimeSpan.Zero)
+        // Lease sweep across the service's processing lists (skip nodes just pruned). 061 A2: at most
+        // once per min(1 s, Lease/10) per service, not on every poll.
+        if (ctx.Options.Lease > TimeSpan.Zero &&
+            (ctx.Sweeps is null || ctx.Sweeps.ShouldSweep("svc:" + _service, ctx.NowTicks, ctx.Options.Lease)))
         {
             var leaseExpiry = ctx.NowTicks - ctx.Options.Lease.Ticks;
             foreach (var node in KnownWorkerNodes(store, snap, _service, _nodeId))

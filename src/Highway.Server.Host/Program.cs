@@ -63,6 +63,9 @@ public static class Program
         if (parsed.DrainAndStop)
             return DispatchDrainAndStop(parsed, environment);
 
+        if (parsed.Compact)
+            return RunCompact(parsed, environment);
+
         if (parsed.Validate)
         {
             try
@@ -159,6 +162,45 @@ public static class Program
     /// identifier (R1.3): an operator upgrading in place can ask both binaries
     /// what they are before touching data.
     /// </summary>
+    /// <summary>
+    /// <c>--compact</c> (061 T5): offline compaction of the configured data directory. Resolves the data
+    /// directory exactly as a run would (config file, environment, <c>--data-dir</c>), then compacts it.
+    /// The broker must be stopped; RocksDB's LOCK refuses a second opener and that is reported plainly.
+    /// </summary>
+    private static int RunCompact(HostArguments parsed, System.Collections.IDictionary? environment)
+    {
+        try
+        {
+            var loaded = ConfigurationLoader.Load(
+                parsed.ConfigPath ?? DiscoverConfigFile(), environment,
+                cliPort: parsed.Port, cliBindAddress: parsed.BindAddress, cliDataDir: parsed.DataDir);
+            var dataDir = loaded.Configuration.Server.DataDir;
+            if (string.IsNullOrWhiteSpace(dataDir) || loaded.Configuration.Server.Ephemeral)
+            {
+                Console.Error.WriteLine("Nothing to compact: this broker is configured as ephemeral (no data directory).");
+                return ExitCodes.ConfigurationInvalid;
+            }
+
+            Console.WriteLine($"Compacting {dataDir} ...");
+            var result = Highway.Server.HighwayStorageMaintenance.Compact(dataDir);
+            Console.WriteLine(FormattableString.Invariant(
+                $"Done in {result.Elapsed.TotalSeconds:F1}s. Tombstones dropped; directory {result.BytesBefore / 1048576.0:F1} MB -> {result.BytesAfter / 1048576.0:F1} MB."));
+            Console.WriteLine("(Disk size need not shrink: write-ahead-log files are kept for replication for walTtlSeconds. The gain is scan cost.)");
+            return ExitCodes.Success;
+        }
+        catch (ConfigurationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.ConfigurationInvalid;
+        }
+        catch (Exception ex) when (ex.Message.Contains("lock", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine("The data directory is in use - stop the Highway broker (service) first, then run --compact.");
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.Unexpected;
+        }
+    }
+
     private static void PrintVersion(TextWriter writer)
     {
         var assembly = typeof(Program).Assembly;
@@ -288,6 +330,7 @@ public static class Program
           --drain-and-stop           GOODBYE, wait for the drain, then stop the service (safe rolling upgrade)
           --version                 print version, storage format and RID, then exit
           --validate                load and validate configuration, print it masked, exit
+          --compact                 offline: compact the data directory (drops tombstones); stop the broker first
           --config <path>           configuration file (default: discovery in CWD, config/, beside exe)
           --port <n>                override server.port
           --bind <addr>             override server.bindAddress

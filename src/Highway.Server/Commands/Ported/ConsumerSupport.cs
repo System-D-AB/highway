@@ -68,14 +68,12 @@ internal static class ConsumerSupport
     {
         var deadLettered = new List<SweepOutcome>();
 
-        var procPrefix = HighwayKeyspace.ListPrefix(procListName);
-        var entries = store.ListDrain(batch, procPrefix);
-        if (entries.Count == 0)
-            return deadLettered;
-
-        var keep = new List<byte[]>();
-
-        foreach (var entry in entries)
+        // 061 A2: read-only. Only an entry whose lease has expired is touched (deleted, then requeued or
+        // dead-lettered); an entry still within its lease is left exactly where it is. The previous
+        // drain-and-restore deleted and re-wrote every in-flight entry on every poll, and the tombstones
+        // it left made every later scan slower. A sweep that finds
+        // nothing expired now stages nothing, so the claim that ran it commits nothing (059).
+        foreach (var (key, entry) in store.ListEntries(batch, HighwayKeyspace.ListPrefix(procListName)))
         {
             var span = (ReadOnlySpan<byte>)entry;
 
@@ -85,10 +83,9 @@ internal static class ConsumerSupport
             decode(span, out var claimTicks, out var id, out var payload, out var attempts);
 
             if (claimTicks >= leaseExpiry)
-            {
-                keep.Add(entry); // lease still valid — restore verbatim
-                continue;
-            }
+                continue; // lease still valid — untouched
+
+            store.Delete(batch, key);
 
             var next = Envelope.NextAttempt(attempts);
             var source = entry;
@@ -114,10 +111,6 @@ internal static class ConsumerSupport
                 HwQSendCommand.PushTail(store, batch, liveQueueName, requeued);
         }
 
-        // Restore surviving entries to the processing list (tail order preserved).
-        foreach (var e in keep)
-            HwQSendCommand.PushTail(store, batch, procListName, e);
-
         return deadLettered;
     }
 
@@ -134,21 +127,22 @@ internal static class ConsumerSupport
     }
 
     /// <summary>
-    /// The drain-filter-restore idiom the ack/fail/touch family shares: drain the processing
-    /// list, invoke <paramref name="transform"/> on each entry in FIFO order, and re-push
-    /// whatever it returns (null = drop that entry). Preserves order of surviving entries — the
-    /// old <c>ListLeftPop(int.MaxValue)</c> + selective <c>ListRightPush</c> pattern.
+    /// The ack/fail/touch family's one idiom (061 A1): offer each processing-list entry, in FIFO order,
+    /// to <paramref name="transform"/>, which returns the <b>same</b> entry to leave it alone,
+    /// <c>null</c> to remove it, or new bytes to replace it. Only an entry that changed is written —
+    /// removed with a delete of its own key, or replaced in place under that key, so its position is
+    /// kept. Replaces drain-and-restore, which deleted and re-pushed every in-flight entry to change one.
     /// </summary>
-    public static void DrainAndRestore(
+    public static void UpdateInPlace(
         IHighwayStore store, IStoreBatch batch, string procListName, Func<byte[], byte[]?> transform)
     {
-        var prefix = HighwayKeyspace.ListPrefix(procListName);
-        var entries = store.ListDrain(batch, prefix);
-        foreach (var entry in entries)
+        foreach (var (key, entry) in store.ListEntries(batch, HighwayKeyspace.ListPrefix(procListName)))
         {
-            var kept = transform(entry);
-            if (kept is not null)
-                HwQSendCommand.PushTail(store, batch, procListName, kept);
+            var result = transform(entry);
+            if (result is null)
+                store.Delete(batch, key);
+            else if (!ReferenceEquals(result, entry))
+                store.Set(batch, key, result);
         }
     }
 
@@ -156,13 +150,10 @@ internal static class ConsumerSupport
     public static void TrimDeadLetters(IHighwayStore store, IStoreBatch batch, string dlqName, int maxEntries)
     {
         if (maxEntries <= 0) return;
-        var prefix = HighwayKeyspace.ListPrefix(dlqName);
-        // ListLength reads committed+staged? ListDrain would empty it; instead pop heads while over.
-        // A snapshot read of length is not batch-aware, so we drain-and-restore the tail window.
-        var all = store.ListDrain(batch, prefix);
-        var overflow = all.Count - maxEntries;
-        var start = overflow > 0 ? overflow : 0;
-        for (var i = start; i < all.Count; i++)
-            HwQSendCommand.PushTail(store, batch, dlqName, all[i]);
+        // 061 A1: delete only the overflow at the head (oldest first). This used to drain the whole DLQ
+        // (up to MaxDeadLetterEntries, default 10 000) and re-push it, on every dead-lettered message.
+        var entries = store.ListEntries(batch, HighwayKeyspace.ListPrefix(dlqName));
+        for (var i = 0; i < entries.Count - maxEntries; i++)
+            store.Delete(batch, entries[i].Key);
     }
 }

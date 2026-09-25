@@ -57,8 +57,10 @@ internal sealed class HwQClaimCommand : HighwayCommand
         // the store when this queue has schedules, so a queue with none pays one set read.
         FireDueJobs(ctx, store, snap, batch);
 
-        // 2. Lease sweep across this queue's processing lists (this node + any known workers).
-        if (ctx.Options.Lease > TimeSpan.Zero)
+        // 2. Lease sweep across this queue's processing lists (this node + any known workers). 061 A2: at
+        // most once per min(1 s, Lease/10) per queue, not on every claim.
+        if (ctx.Options.Lease > TimeSpan.Zero &&
+            (ctx.Sweeps is null || ctx.Sweeps.ShouldSweep("q:" + _queue, ctx.NowTicks, ctx.Options.Lease)))
         {
             var leaseExpiry = ctx.NowTicks - ctx.Options.Lease.Ticks;
             foreach (var node in KnownWorkerNodes(store, snap, _queue, _nodeId))

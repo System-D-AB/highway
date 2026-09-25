@@ -237,6 +237,17 @@ public interface IHighwayStore : IDisposable
     IReadOnlyList<byte[]> ListDrain(IStoreBatch batch, byte[] key);
 
     /// <summary>
+    /// Every live entry of the list, in FIFO order, with its full entry key — <b>read-only</b> (061 A1).
+    /// The in-flight paths (ack / fail / touch / lease sweep) use this to find the one entry they act on
+    /// and then <see cref="Delete"/> or <see cref="Set"/> <b>that key only</b>. On an ordered LSM store,
+    /// draining and re-pushing the survivors (the <see cref="ListDrain"/> idiom) deletes and rewrites every
+    /// in-flight entry on every call, and the tombstones it leaves make every later scan of the list
+    /// slower, until a broker at modest load spent a whole core stepping over them. Staged writes in
+    /// <paramref name="batch"/> are visible (read-your-own-writes).
+    /// </summary>
+    IReadOnlyList<(byte[] Key, byte[] Value)> ListEntries(IStoreBatch batch, byte[] key);
+
+    /// <summary>
     /// Number of entries. Read for depth/in-flight/dead-letter counts
     /// (<c>HwStatsCommand</c>) and to count a group's backlog before retiring it
     /// (<c>Decommission.RetireGroup</c>). Reads against a <see cref="IStoreSnapshot"/>.

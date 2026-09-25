@@ -53,6 +53,12 @@ internal sealed class CommandContext
     /// </summary>
     public HighwayMetrics? Metrics { get; }
 
+    /// <summary>
+    /// Rate-limits the lease sweep (061 A2); null means sweep on every claim — the in-process command
+    /// tests' deterministic behaviour. The production dispatcher always supplies one.
+    /// </summary>
+    public SweepThrottle? Sweeps { get; }
+
     public CommandContext(
         IHighwayStore store,
         StripedLock locks,
@@ -61,7 +67,8 @@ internal sealed class CommandContext
         HighwayServerOptions options,
         long nowTicks,
         ReplicationFeeder? replication = null,
-        HighwayMetrics? metrics = null)
+        HighwayMetrics? metrics = null,
+        SweepThrottle? sweeps = null)
     {
         Store = store;
         Locks = locks;
@@ -71,5 +78,6 @@ internal sealed class CommandContext
         NowTicks = nowTicks;
         Replication = replication;
         Metrics = metrics;
+        Sweeps = sweeps;
     }
 }

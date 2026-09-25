@@ -58,7 +58,7 @@ internal sealed class HwTouchCommand : HighwayCommand
         using var batch = ctx.Store.NewBatch();
 
         var renewed = false;
-        ConsumerSupport.DrainAndRestore(ctx.Store, batch, _procListName, entry =>
+        ConsumerSupport.UpdateInPlace(ctx.Store, batch, _procListName, entry =>
         {
             if (!renewed && !Envelope.IsLegacyEntry(entry))
             {

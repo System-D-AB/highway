@@ -27,6 +27,25 @@ standby pulls at a low idle cadence (≈20/s) and applies nothing — the primar
 for a pull at the watermark, so an idle replica set costs negligible CPU on both sides (feature 058;
 the ack keeps refreshing the slot so liveness is unaffected).
 
+**Pulls are served from memory, not the WAL (feature 062).** RocksDB's WAL reader
+(`GetUpdatesSince`) locates the live WAL file and reads it from its start up to the requested
+sequence; the live file rolls only on a memtable flush, which a lightly written broker reaches after
+hours. Reading the WAL on every pull therefore cost more the longer the primary ran (≈1.5 ms per pull
+after 2 000 writes, ≈54 ms after 120 000, at ≈20 pulls/s per caught-up replica). The primary now keeps
+its most recently committed batches in a bounded in-memory tail (16 MiB): a pull at the watermark
+answers without touching the WAL, and a pull just behind it gets the tail's contiguous run. The tail
+is captured after each commit's write — the batch then carries its assigned sequence and is the same
+bytes as its WAL record — holds no lock across the synced write, starts only once a replica first
+pulls, and is cleared on any epoch or role change. Anything it cannot serve contiguously (a replica
+further behind, a restarted primary, a batch still being added) falls back to the WAL path unchanged,
+gap checks included.
+
+One consequence is handled explicitly: RocksDB's group commit merges concurrent committers into one
+WAL record, while the tail holds them separately, so a replica fed from the tail can stand *inside* a
+WAL record. When such a replica falls back to the WAL, the record is trimmed to start just after its
+watermark; a record that cannot be split with certainty is refused like a gap, and the replica
+re-syncs from a snapshot rather than risk diverging.
+
 **Start order does not matter.** A blank standby whose primary is not yet listening **waits** for it —
 retrying the snapshot bootstrap with backoff and logging each wait — instead of exiting; the snapshot
 downloads into a temporary directory and is moved into place only when complete, so an interrupted
@@ -101,6 +120,8 @@ channels it depends on — metrics (051) and health/readiness endpoints (052) �
   never silent.
 - **A replica serves no client writes** (C9.3); a dead replica cannot fill the disk (C9.4, WAL TTL +
   size + slot-lag cap).
+- **A pull's cost does not grow with uptime** (C9.9): a caught-up or nearly caught-up replica is
+  served from the in-memory tail; only a replica further behind than the tail reads the WAL.
 - **No auto-failback** (C9.6): a higher-priority node waits; failback is a deliberate GOODBYE.
 - **Two-to-few-node warm standby**, not cross-datacenter quorum consensus and not active-active —
   Highway stays single-writer.

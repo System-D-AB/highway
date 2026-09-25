@@ -41,6 +41,7 @@ internal sealed class CommandDispatcher
     private readonly Highway.Server.Storage.Rocks.ReplicationFeeder? _replication;
     private readonly Highway.Server.Storage.Cache.IHighwayCacheStore? _cache;
     private readonly HighwayMetrics? _metrics;
+    private readonly SweepThrottle _sweeps = new();   // 061 A2: one per server
 
     public CommandDispatcher(
         IHighwayStore store,
@@ -296,7 +297,7 @@ internal sealed class CommandDispatcher
         var args = new byte[frame.Count - 1][];
         for (var i = 1; i < frame.Count; i++) args[i - 1] = frame[i];
 
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps);
         var command = entry.Factory();
 
         // HW.CALL carries the RPC request/latency instruments (051 R1): time the server-side

@@ -78,6 +78,7 @@ internal sealed class ReplicationFeeder : IDisposable
         _dataDir = dataDir;
         Options = options;
         _source = new ReplicationSource(db);
+        OnEpochChanged += Tail.Clear;   // 062: a new epoch is a new history — nothing captured before it is served
         Epoch = LoadPersistedEpoch();
         Role = options.StartAsReplica ? ReplicaRole.Replica : ReplicaRole.Primary;
         LastPeerContact = options.Clock.GetUtcNow();
@@ -88,7 +89,24 @@ internal sealed class ReplicationFeeder : IDisposable
 
     public HighwayReplicationOptions Options { get; }
     public ulong Epoch { get; private set; }
-    public ReplicaRole Role { get; private set; }
+
+    /// <summary>
+    /// This node's role. Any change clears the <see cref="Tail"/> (062): batches captured as primary
+    /// must never be served after the node stood down, even if it is promoted again later.
+    /// </summary>
+    public ReplicaRole Role
+    {
+        get => _role;
+        private set
+        {
+            if (_role != value) Tail.Clear();
+            _role = value;
+        }
+    }
+    private ReplicaRole _role;
+
+    /// <summary>Recently committed batches, served to caught-up replicas without reading the WAL (062).</summary>
+    internal ReplicationTail Tail { get; } = new();
 
     /// <summary>This node's own advertised address (config; falls back to the bind endpoint).</summary>
     public string SelfEndpoint { get; set; }
@@ -310,6 +328,16 @@ internal sealed class ReplicationFeeder : IDisposable
         ulong? nextSeq = null;
         var latestAtStart = Engine.GetLatestSequenceNumber();
 
+        // 062: serve from memory when possible. A caught-up replica (it pulls every 50 ms) gets its
+        // empty page without the WAL; one just behind gets the tail's contiguous run. GetUpdatesSince
+        // re-reads the live WAL file from its start on every call, so this path is what keeps a pull's
+        // cost independent of uptime. Anything the tail cannot answer falls through to the WAL below.
+        Tail.Enable();
+        if (fromSeq == latestAtStart)
+            return new ReplicationPage(Epoch, batches, null);
+        if (Role == ReplicaRole.Primary && Tail.TryRead(fromSeq, maxBytes, batches, out var more))
+            return new ReplicationPage(Epoch, batches, more);
+
         foreach (var pooled in _source.GetPooledWalUpdates(fromSeq))
         {
             try
@@ -333,6 +361,21 @@ internal sealed class ReplicationFeeder : IDisposable
                 {
                     nextSeq = pooled.SequenceNumber;
                     break;
+                }
+
+                // 062: the cursor is inside this record. Group commit merges concurrent committers into
+                // one WAL record while the tail served them one by one, so a replica fed from the tail
+                // can stand mid-record; served whole, the record would be skipped by the replica
+                // (first sequence <= its watermark) and its tail lost. Serve only what follows the
+                // cursor — or, if the record cannot be split with certainty, refuse like a gap: the
+                // replica re-syncs from a snapshot rather than diverge.
+                if (batches.Count == 0 && pooled.SequenceNumber <= fromSeq)
+                {
+                    if (!WriteBatchTrim.TryStartAt(pooled.PooledData.AsSpan(0, length), fromSeq + 1, out var rest))
+                        throw new ReplicationGapException(fromSeq, lastSeq + 1);
+                    batches.Add((fromSeq + 1, rest));
+                    pageBytes += (ulong)rest.Length;
+                    continue;
                 }
 
                 var owned = pooled.PooledData.AsSpan(0, length).ToArray();

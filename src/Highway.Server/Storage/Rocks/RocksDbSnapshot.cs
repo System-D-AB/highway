@@ -12,6 +12,9 @@ internal sealed class RocksDbSnapshot : IStoreSnapshot
 {
     private readonly Snapshot _snapshot;
 
+    /// <summary>The native snapshot, so a scan can build its own bounded <see cref="ReadOptions"/> pinned to it (061 A3).</summary>
+    internal Snapshot NativeSnapshot => _snapshot;
+
     internal ReadOptions ReadOptions { get; }
 
     internal RocksDbSnapshot(Snapshot snapshot, ReadOptions readOptions)

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using Highway.Server.Storage.Layout;
 using Microsoft.Extensions.Logging;
 using RocksDbSharp;
@@ -75,6 +76,9 @@ public sealed class RocksDbStore : IHighwayStore
             this,
             new RosterMember(Replication.Options.ReplicaId, Replication.Options.Priority, Replication.SelfEndpoint),
             out _, out _);
+        // 061 A4: head hints describe what THIS process wrote as primary. Any epoch change (a promotion,
+        // or adopting a higher epoch) starts cold, so a hint can never outlive the writer it describes.
+        Replication.OnEpochChanged += () => _headHints.Clear();
     }
 
     /// <summary>
@@ -135,7 +139,7 @@ public sealed class RocksDbStore : IHighwayStore
 
         var families = new ColumnFamilies();
         for (var i = 1; i < HighwayColumnFamilies.OrderedNames.Count; i++)
-            families.Add(HighwayColumnFamilies.OrderedNames[i], new ColumnFamilyOptions());
+            families.Add(HighwayColumnFamilies.OrderedNames[i], new ColumnFamilyOptions().CompactOnDeletions());   // 061 T7
 
         var db = RocksDb.Open(options, path, families);
 
@@ -312,19 +316,31 @@ public sealed class RocksDbStore : IHighwayStore
 
     /// <inheritdoc />
     public long ListLength(IStoreSnapshot snapshot, byte[] key)
-        => CountPrefix(Cast(snapshot).ReadOptions, key);
+        => CountPrefix(BoundedSnapshotRead(snapshot, key), key);
 
     /// <inheritdoc />
     public long SortedSetLength(IStoreSnapshot snapshot, byte[] key)
-        => CountPrefix(Cast(snapshot).ReadOptions, key);
+        => CountPrefix(BoundedSnapshotRead(snapshot, key), key);
+
+    /// <summary>
+    /// Read options pinned to the snapshot and bounded to <paramref name="prefix"/>'s range (061 A3). A
+    /// fresh <see cref="ReadOptions"/> per scan: the snapshot's own options are shared across a command's
+    /// reads, so a bound set on them would leak into the next scan.
+    /// </summary>
+    private ReadOptions BoundedSnapshotRead(IStoreSnapshot snapshot, byte[] prefix)
+        => new ReadOptions()
+            .SetSnapshot(Cast(snapshot).NativeSnapshot)
+            .SetIterateUpperBound(PrefixUpperBound(prefix));
 
     /// <inheritdoc />
     public IReadOnlyList<byte[]> SortedSetRangeByScore(
         IStoreSnapshot snapshot, byte[] key, long minScore, long maxScore, int limit)
     {
         var results = new List<byte[]>();
-        using var iter = _db.NewIterator(_data, Cast(snapshot).ReadOptions);
-        for (iter.Seek(key); iter.Valid() && results.Count < limit; iter.Next())
+        using var iter = _db.NewIterator(_data, BoundedSnapshotRead(snapshot, key));
+        // Members are ordered by score, so seek straight to the lower score and stop past the upper
+        // one (061 A3): the scan never visits members outside [minScore, maxScore].
+        for (iter.Seek(ComposeZKey(key, minScore, [])); iter.Valid() && results.Count < limit; iter.Next())
         {
             var k = iter.Key();
             if (!StartsWith(k, key)) break;
@@ -332,7 +348,7 @@ public sealed class RocksDbStore : IHighwayStore
 
             var score = DecodeScoreAt(k, key.Length);
             if (score < minScore) continue;
-            if (score > maxScore) continue;
+            if (score > maxScore) break;
 
             results.Add(k[(key.Length + 8)..]); // member = suffix after prefix+score
         }
@@ -343,7 +359,7 @@ public sealed class RocksDbStore : IHighwayStore
     public IReadOnlyList<byte[]> SetMembers(IStoreSnapshot snapshot, byte[] key)
     {
         var results = new List<byte[]>();
-        using var iter = _db.NewIterator(_data, Cast(snapshot).ReadOptions);
+        using var iter = _db.NewIterator(_data, BoundedSnapshotRead(snapshot, key));
         for (iter.Seek(key); iter.Valid(); iter.Next())
         {
             var k = iter.Key();
@@ -396,16 +412,24 @@ public sealed class RocksDbStore : IHighwayStore
     }
 
     /// <inheritdoc />
-    public void ListRightPush(IStoreBatch batch, byte[] key, byte[] value) => Cast(batch).Put(key, value);
+    public void ListRightPush(IStoreBatch batch, byte[] key, byte[] value)
+    {
+        LowerHeadHint(ListPrefixOf(key), key);   // 061 A4: before staging; lowering is always safe
+        Cast(batch).Put(key, value);
+    }
 
     /// <inheritdoc />
-    public void ListLeftPush(IStoreBatch batch, byte[] key, byte[] value) => Cast(batch).Put(key, value);
+    public void ListLeftPush(IStoreBatch batch, byte[] key, byte[] value)
+    {
+        LowerHeadHint(ListPrefixOf(key), key);   // a head push is the one write that lands below the head
+        Cast(batch).Put(key, value);
+    }
 
     /// <inheritdoc />
     public byte[]? ListLeftPop(IStoreBatch batch, byte[] key)
     {
         var b = Cast(batch);
-        var head = b.FirstUnderPrefix(key);
+        var head = b.FirstUnderPrefix(key, listHint: true);
         if (head is null) return null;
         var value = b.ReadThrough(head);
         b.Delete(head);
@@ -416,7 +440,7 @@ public sealed class RocksDbStore : IHighwayStore
     public IReadOnlyList<byte[]> ListDrain(IStoreBatch batch, byte[] key)
     {
         var b = Cast(batch);
-        var keys = b.AllUnderPrefix(key);
+        var keys = b.AllUnderPrefix(key, listHint: true);
         var values = new List<byte[]>(keys.Count);
         foreach (var k in keys)
         {
@@ -426,6 +450,10 @@ public sealed class RocksDbStore : IHighwayStore
         }
         return values;
     }
+
+    /// <inheritdoc />
+    public IReadOnlyList<(byte[] Key, byte[] Value)> ListEntries(IStoreBatch batch, byte[] key)
+        => Cast(batch).EntriesUnderPrefix(key, listHint: true);
 
     /// <inheritdoc />
     public void SortedSetAdd(IStoreBatch batch, byte[] key, long score, byte[] member)
@@ -470,6 +498,7 @@ public sealed class RocksDbStore : IHighwayStore
         foreach (var k in b.AllUnderPrefix(keyPrefix))
             b.Delete(k);
         b.MarkRangeDeleted(keyPrefix);
+        ClearHeadHintsUnder(keyPrefix);   // 061 A4: an emptied list may restart its sequence below the old head
     }
 
     // ---- commit (the single write path) --------------------------------------
@@ -498,6 +527,38 @@ public sealed class RocksDbStore : IHighwayStore
         }
 
         _db.Write(wb, _writeOptions);
+
+        // 062: after the write the batch carries its assigned sequence and is byte-identical to its WAL
+        // record — keep it for replica pulls. Outside any lock; off until a replica first pulls.
+        if (Replication.Tail.Capturing)
+            Replication.Tail.Add(wb.ToBytes());
+    }
+
+    /// <summary>
+    /// Compacts every column family end to end (061 T5, <c>highways --compact</c>): drops every tombstone,
+    /// so a data directory that accumulated them under 2.5.3 or earlier is fast again at once. Blocking
+    /// native work; run it with the broker stopped (RocksDB's own LOCK refuses a second opener).
+    /// </summary>
+    internal void CompactAll()
+    {
+        for (var i = 1; i < HighwayColumnFamilies.OrderedNames.Count; i++)
+            _db.CompactRange((byte[]?)null!, (byte[]?)null!, _db.GetColumnFamily(HighwayColumnFamilies.OrderedNames[i]));
+    }
+
+    /// <summary>
+    /// Sum of a RocksDB integer property over the broker's column families (061 T8), e.g.
+    /// <c>rocksdb.num-deletes-active-mem-table</c>. Unknown or unparsable values count as 0.
+    /// </summary>
+    internal long SumProperty(string property)
+    {
+        long total = 0;
+        for (var i = 1; i < HighwayColumnFamilies.OrderedNames.Count; i++)
+        {
+            var raw = _db.GetProperty(property, _db.GetColumnFamily(HighwayColumnFamilies.OrderedNames[i]));
+            if (long.TryParse(raw, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v))
+                total += v;
+        }
+        return total;
     }
 
     /// <summary>Committed read for a batch's read-through fallback.</summary>
@@ -516,18 +577,83 @@ public sealed class RocksDbStore : IHighwayStore
         return result;
     }
 
-    /// <summary>Committed keys under a prefix, ordered — for a batch's merged view.</summary>
-    internal List<byte[]> CommittedKeysUnderPrefix(byte[] prefix)
+    /// <summary>
+    /// Committed entries under <paramref name="prefix"/>, in key order, starting at
+    /// <paramref name="seekFrom"/> (the prefix itself, or a list's head hint) — lazily, for a batch's
+    /// merged view. The iterator carries <c>iterate_upper_bound</c> = the prefix's successor (061 A3),
+    /// so an exhausted range stops at its bound instead of walking deleted keys into the next range.
+    /// The <see cref="ReadOptions"/> is not IDisposable in the 11.x binding and the iterator holds a
+    /// reference to it, so the bound lives exactly as long as the scan (verified against the assembly).
+    /// </summary>
+    internal IEnumerable<(byte[] Key, byte[]? Value)> CommittedEntries(byte[] prefix, byte[] seekFrom, bool withValues)
     {
-        var result = new List<byte[]>();
-        using var iter = _db.NewIterator(_data);
-        for (iter.Seek(prefix); iter.Valid(); iter.Next())
+        var readOptions = new ReadOptions().SetIterateUpperBound(PrefixUpperBound(prefix));
+        using var iter = _db.NewIterator(_data, readOptions);
+        for (iter.Seek(seekFrom); iter.Valid(); iter.Next())
         {
             var k = iter.Key();
-            if (!StartsWith(k, prefix)) break;
-            result.Add(k);
+            if (!StartsWith(k, prefix)) yield break;
+            yield return (k, withValues ? iter.Value() : null);
         }
-        return result;
+    }
+
+    // ---- 061 A4: list head hints ---------------------------------------------
+    //
+    // For each list, a key that is <= every live entry of that list. A pop or a list scan seeks there
+    // instead of to the list's start, so it does not step over the tombstones of everything already
+    // popped or acked (the cost that grew with uptime: CPU spent walking deleted keys).
+    //
+    // The invariant is one-sided and that is what makes it safe: a hint that is too LOW only costs a
+    // longer scan; a hint too HIGH would skip live messages. So:
+    //   * lowering happens immediately, at staging time, on every push (ListRightPush/ListLeftPush are
+    //     the only writes that create list entries) - safe even if the batch is later discarded;
+    //   * raising happens only after a successful commit, by compare-and-swap against the exact hint the
+    //     scan started from, so a push that lowered the hint in between always wins;
+    //   * a range delete clears the hints under it (an emptied list may restart its sequence at 0);
+    //   * any epoch change clears all of them (ctor).
+    // Process-local and never persisted: losing it only means one scan from the list's start.
+
+    private readonly ConcurrentDictionary<byte[], byte[]> _headHints = new(ByteArrayEqualityComparer.Instance);
+
+    internal bool TryGetHeadHint(byte[] listPrefix, out byte[] hint) => _headHints.TryGetValue(listPrefix, out hint!);
+
+    private static byte[] ListPrefixOf(byte[] entryKey) => entryKey[..^8];   // ListEntry = ListPrefix + seq:8
+
+    private void LowerHeadHint(byte[] listPrefix, byte[] entryKey)
+    {
+        while (true)
+        {
+            if (_headHints.TryGetValue(listPrefix, out var current))
+            {
+                if (ByteArrayComparer.Instance.Compare(entryKey, current) >= 0) return;   // still <= every live key
+                if (_headHints.TryUpdate(listPrefix, entryKey, current)) return;
+            }
+            // No hint: occupy the slot with "scan from the start" so a raise that observed "no hint"
+            // (TryAdd) cannot land after this push and skip it.
+            else if (_headHints.TryAdd(listPrefix, listPrefix)) return;
+        }
+    }
+
+    private void ClearHeadHintsUnder(byte[] rangePrefix)
+    {
+        foreach (var listPrefix in _headHints.Keys)
+            if (StartsWith(listPrefix, rangePrefix)) _headHints.TryRemove(listPrefix, out _);
+    }
+
+    /// <summary>Applies a committed batch's hint effects (061 A4). Called only after the write succeeded.</summary>
+    internal void ApplyHeadHints(RocksDbBatch batch)
+    {
+        foreach (var range in batch.RangeDeletes)
+            ClearHeadHintsUnder(range);
+
+        foreach (var (listPrefix, observed, firstLive) in batch.HintRaises)
+        {
+            if (batch.RangeDeletes.Exists(r => StartsWith(listPrefix, r))) continue;   // emptied in this batch
+            if (observed is null)
+                _headHints.TryAdd(listPrefix, firstLive);                             // loses to any concurrent lower
+            else if (ByteArrayComparer.Instance.Compare(firstLive, observed) > 0)
+                _headHints.TryUpdate(listPrefix, firstLive, observed);                // CAS on the exact hint read
+        }
     }
 
     // ---- helpers ------------------------------------------------------------

@@ -33,10 +33,19 @@ wake. A worker *claims* one message at a time, receiving its id and payload; the
 **lease**. When the worker finishes it *acks*, and the message is gone. Until the ack arrives the
 message sits in that worker's processing list — which is exactly what makes delivery at-least-once.
 
-**Lease recovery is the safety net.** Every claim first sweeps expired leases across all known
-workers: a message whose lease elapsed returns to the queue with its attempt count incremented, so
-a worker that died mid-processing loses nothing. There is no background timer doing this — recovery
-and deferred-delivery promotion both happen *on the claim path*, decided by the broker's clock.
+**Lease recovery is the safety net.** Claims sweep expired leases across all known workers: a
+message whose lease elapsed returns to the queue with its attempt count incremented, so a worker that
+died mid-processing loses nothing. There is no background timer doing this — recovery and
+deferred-delivery promotion both happen *on the claim path*, decided by the broker's clock. The sweep
+runs at most once per `min(1 s, lease/10)` per queue and is **read-only except for expired entries**:
+a message still inside its lease is never touched (feature 061).
+
+**In-flight work is changed in place, never re-written.** Ack, fail and touch act on the one message
+they name — a delete of its key, or an in-place update — and leave every other in-flight message
+exactly where it is. The broker's store is an ordered LSM (RocksDB), where a delete leaves a
+tombstone that later scans must step over; so the hot paths neither create churn nor walk history:
+a pop starts from the queue's known head, and every scan is bounded to its own key range. The cost of
+a claim or an ack therefore does not grow with how long the broker has been running (feature 061).
 
 **Slow work vs. dead work.** A handler that outlives its lease would be redelivered while still
 running — a duplicate caused by nothing but slowness. A worker renews its lease ("still working")
@@ -87,5 +96,7 @@ alongside it.
 - **Bounded costs:** a byte cap that refuses rather than drops; a delivery-attempt cap that
   dead-letters rather than loops; a client-bounded processing window that recovers hung handlers.
   These bounds are tracked line by line in [`constraints.md`](../product/constraints.md).
+- **Cost independent of history:** a poll, claim or ack costs the same after a million messages as
+  after the first (constraint C4.9). An idle poll with messages in flight writes nothing.
 - **What it is not:** not a pub/sub bus (use channels for broadcast), not an ordered log, and not a
   result-returning call (use RPC when the sender needs a reply).
