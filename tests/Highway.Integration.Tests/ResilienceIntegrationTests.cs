@@ -71,9 +71,17 @@ public class ResilienceIntegrationTests : IDisposable
             raw.GetDatabase().Execute("HW.CALL", "it.slow", "drain-req-1", envelope);
         }
 
-        // Let the worker claim it, then stop: the drain must wait for the
-        // in-flight handler and the reply must still be written.
-        await Task.Delay(200);
+        // Wait until the worker has CLAIMED it, then stop: the drain must wait for the in-flight
+        // handler and the reply must still be written. (070 verification: a fixed 200 ms sleep here
+        // failed under full-suite load - the engine stopped before claiming, and unclaimed work
+        // correctly stays queued for another host, so there was nothing in flight to drain.)
+        using (var raw = ConnectionMultiplexer.Connect(_server.ConnectionString))
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline && InFlight(raw.GetDatabase(), "it.slow") == 0)
+                await Task.Delay(20);
+            InFlight(raw.GetDatabase(), "it.slow").Should().Be(1, "the worker claimed the request");
+        }
         await node.Engine.StopAsync();
         _nodes.Remove(node);
 
@@ -83,6 +91,14 @@ public class ResilienceIntegrationTests : IDisposable
             slot.HasValue.Should().BeTrue(
                 "graceful shutdown must drain in-flight work — the reply was written during the drain");
         }
+    }
+
+    private static long InFlight(IDatabase db, string service)
+    {
+        var flat = (RedisResult[])db.Execute("HW.STATS", service)!;
+        for (var i = 0; i + 1 < flat.Length; i += 2)
+            if ((string?)flat[i] == "inFlight") return long.Parse((string)flat[i + 1]!);
+        return 0;
     }
 
     [Fact]

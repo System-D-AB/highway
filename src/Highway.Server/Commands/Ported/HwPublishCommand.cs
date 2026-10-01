@@ -42,6 +42,8 @@ internal sealed class HwPublishCommand : HighwayCommand
     private int _retiredGroups;
     private long _retiredMessages;
     private long _retiredBytes;
+    private string[] _drainingSkipped = [];
+    private string[] _selfHealed = [];
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
     {
@@ -78,11 +80,38 @@ internal sealed class HwPublishCommand : HighwayCommand
         // lock), then hold the channel and every group box together — in stripe order — so the fan-out is
         // atomic and serializes against claims on those groups (before 3.0 publish locked only the channel
         // while claims locked the group queue, and the two could race on the queue's sequence).
+        //
+        // 070 review R2-1: the box ids are resolved before the locks, so a group retired (and re-joined) in
+        // between would leave this publish holding the lock of a deleted box — and enqueueing into its
+        // range: ":1", message gone. Under the locks, every group still listed must still name the box that
+        // was locked; otherwise forget the stale ids and resolve again.
         string[] groups;
-        using (var snap = store.Snapshot())
-            groups = ReadGroupNames(store, snap, _channel);
-        var boxes = groups.ToDictionary(g => g, g => BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, BoxCommandSupport.GroupQueue(_channel, g)));
-        using var _lock = ctx.Locks.LockMany([_channel, .. boxes.Values.Select(WorkBox.LockName)]);
+        Dictionary<string, uint> boxes;
+        IDisposable lease;
+        for (var attempt = 1; ; attempt++)
+        {
+            using (var snap = store.Snapshot())
+                groups = ReadGroupNames(store, snap, _channel);
+            boxes = groups.ToDictionary(g => g, g => BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, BoxCommandSupport.GroupQueue(_channel, g)));
+            lease = ctx.Locks.LockMany([_channel, .. boxes.Values.Select(WorkBox.LockName)]);
+
+            var stale = false;
+            using (var check = store.Snapshot())
+                foreach (var g in ReadGroupNames(store, check, _channel))
+                {
+                    var name = BoxCommandSupport.GroupQueue(_channel, g);
+                    if (boxes.TryGetValue(g, out var locked) && BoxCommandSupport.LiveBox(ctx, BoxKeys.Kind.Queue, name) != locked)
+                    {
+                        ctx.Boxes.Forget(BoxKeys.Kind.Queue, name, locked);
+                        stale = true;
+                    }
+                }
+            if (!stale) break;
+            lease.Dispose();
+            if (attempt >= 16)
+                throw new InvalidOperationException($"HW.PUBLISH {_channel}: its groups kept being retired and re-created");
+        }
+        using var _lock = lease;
 
         using var snapshot = store.Snapshot();
         _groups = ReadGroupNames(store, snapshot, _channel).Where(boxes.ContainsKey).ToArray();   // a group added since has no lock held: next publish
@@ -92,8 +121,8 @@ internal sealed class HwPublishCommand : HighwayCommand
         var entry = Envelope.EncodeRpcEntry(messageIdBytes, _payloadBytes);
 
         var retired = new List<(BoxKeys.Kind, string, uint)>();
-        if (_groups.Length > 0 && ctx.Options.SubscriberRetirementThreshold > TimeSpan.Zero)
-            ClassifyAndRetireGroups(ctx, snapshot, batch, retired);
+        if (_groups.Length > 0)
+            ClassifyAndRetireGroups(ctx, snapshot, batch, boxes, retired);
 
         if (_groups.Length == 0)
         {
@@ -144,23 +173,46 @@ internal sealed class HwPublishCommand : HighwayCommand
     }
 
     /// <summary>
-    /// Subscriber retirement (017): a group all of whose registered members have been silent past the
-    /// threshold is destroyed here, before the fan-out, and does not receive the message; one past half the
-    /// threshold is reported as suspect. A member with no registration record is not evidence of death.
+    /// Which groups this publish reaches (017, 070). A <b>draining</b> group — its last member stopped
+    /// declaring it — receives nothing and never refuses the publish; once it has drained past
+    /// <see cref="HighwayServerOptions.SubscriberRetirementThreshold"/> it is retired here. A group with no
+    /// members and no draining mark is inconsistent state: it starts draining now (logged), never an outage.
+    /// Otherwise a group all of whose members have been silent past the threshold is retired, and one past
+    /// half of it is reported as suspect. A member with no registration record is not evidence of death.
     /// </summary>
-    private void ClassifyAndRetireGroups(CommandContext ctx, IStoreSnapshot snap, IStoreBatch batch, List<(BoxKeys.Kind, string, uint)> retired)
+    private void ClassifyAndRetireGroups(
+        CommandContext ctx, IStoreSnapshot snap, IStoreBatch batch, Dictionary<string, uint> boxes,
+        List<(BoxKeys.Kind, string, uint)> retired)
     {
         var store = ctx.Store;
         var threshold = ctx.Options.SubscriberRetirementThreshold;
+        var retirementOn = threshold > TimeSpan.Zero;
         var halfThreshold = threshold / 2;
         var dead = new List<string>();
         var suspect = new List<string>();
+        var draining = new List<string>();
+        var healed = new List<string>();
 
         foreach (var group in _groups)
         {
             var members = RegistrySupport.ReadSet(store, snap, HighwayNames.GroupMembers(_channel, group));
-            if (members.Length == 0)
-                members = [group]; // pre-025: the group is the node
+            using (var wb = BoxCommandSupport.Open(ctx, boxes[group], BoxKeys.Kind.Queue, batch))
+            {
+                var since = wb.DrainingSince;
+                if (since == 0 && members.Length == 0)
+                {
+                    since = ctx.NowTicks;
+                    wb.SetDrainingSince(since);
+                    healed.Add(group);
+                }
+                if (since != 0)
+                {
+                    if (retirementOn && ctx.NowTicks - since > threshold.Ticks) dead.Add(group);
+                    else draining.Add(group);
+                    continue;
+                }
+            }
+            if (!retirementOn) continue;
 
             var anyRecord = false;
             var allStale = true;
@@ -181,6 +233,8 @@ internal sealed class HwPublishCommand : HighwayCommand
         }
 
         _suspectGroups = [.. suspect];
+        _drainingSkipped = [.. draining];
+        _selfHealed = [.. healed];
         foreach (var group in dead)
         {
             var destroyed = BoxCommandSupport.RetireGroup(ctx, batch, _channel, group, retired);
@@ -188,8 +242,8 @@ internal sealed class HwPublishCommand : HighwayCommand
             _retiredMessages += destroyed.Messages;
             _retiredBytes += destroyed.Bytes;
         }
-        if (dead.Count > 0)
-            _groups = [.. _groups.Where(g => !dead.Contains(g))];
+        if (dead.Count > 0 || draining.Count > 0)
+            _groups = [.. _groups.Where(g => !dead.Contains(g) && !draining.Contains(g))];
     }
 
     protected override void AfterCommit(CommandContext ctx)
@@ -209,6 +263,14 @@ internal sealed class HwPublishCommand : HighwayCommand
                 nodeId: group,
                 errorCode: $"node '{group}' has been absent past half the retirement threshold; " +
                            "its subscriber queue will be destroyed if it does not return");
+        }
+
+        foreach (var group in _selfHealed)
+        {
+            ctx.Recorder.Record(
+                HighwayEventType.GroupDraining, _channel, nodeId: group,
+                errorCode: $"group '{group}' had no members and no draining mark; it now drains " +
+                           "(no new messages, backlog kept until the retirement threshold)");
         }
 
         if (_retiredGroups > 0)

@@ -59,8 +59,8 @@ internal sealed class HwClaimCommand : HighwayCommand
 
     protected override void Run(CommandContext ctx, RespWriter writer)
     {
-        var box = BoxCommandSupport.Ensure(ctx, _kind, _name);
-        using var _lock = BoxCommandSupport.Lock(ctx, box);
+        using var _lock = BoxCommandSupport.LockLive(ctx, _kind, _name, create: true, out var resolved);
+        var box = resolved!.Value;
         using var wb = BoxCommandSupport.Open(ctx, box, _kind);
 
         if (_kind == BoxKeys.Kind.Queue)

@@ -75,6 +75,8 @@ public class MessageProjectionTests
             [HighwayEventType.NodeRegistered] = EventVisibility.Internal,
             [HighwayEventType.NodeDeparted] = EventVisibility.Internal,
             [HighwayEventType.GroupRetired] = EventVisibility.Internal,
+            [HighwayEventType.GroupDraining] = EventVisibility.Internal,      // 070: registry bookkeeping
+            [HighwayEventType.MembershipRemoved] = EventVisibility.Internal,  // 070
             [HighwayEventType.NodeSuspect] = EventVisibility.Internal,
             [HighwayEventType.LeaseRenewed] = EventVisibility.Internal,
             [HighwayEventType.ProcessingCapExceeded] = EventVisibility.Internal,

@@ -80,6 +80,8 @@ public class ProducersTests
     {
         using var batch = store.NewBatch();
         store.SetAdd(batch, HighwayKeyspace.SetPrefix(HighwayNames.ChannelGroups(channel)), Encoding.UTF8.GetBytes(group));
+        // A group always has a member (070: a member-less group drains) - here a node named like the group.
+        store.SetAdd(batch, HighwayKeyspace.SetPrefix(HighwayNames.GroupMembers(channel, group)), Encoding.UTF8.GetBytes(group));
         batch.Commit();
     }
 

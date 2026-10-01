@@ -75,17 +75,17 @@ internal sealed class HwStatsCommand : HighwayCommand
     }
 
     /// <summary>A work box's counters, or zeros when nothing was ever sent to or claimed from it (065: never a scan).</summary>
-    private static (long Ready, long InFlight, long Delayed, long Dead, int Workers) Counters(CommandContext ctx, BoxKeys.Kind kind, string name)
+    private static (long Ready, long InFlight, long Delayed, long Dead, int Workers, long DrainingSince) Counters(CommandContext ctx, BoxKeys.Kind kind, string name)
     {
         if (BoxCommandSupport.Find(ctx, kind, name) is not { } box) return default;
         using var wb = BoxCommandSupport.Open(ctx, box, kind);
-        return (wb.Ready, wb.InFlight, wb.Delayed, wb.Dead, wb.Workers().Count);
+        return (wb.Ready, wb.InFlight, wb.Delayed, wb.Dead, wb.Workers().Count, wb.DrainingSince);
     }
 
     private static List<(string, string)> QueueStats(CommandContext ctx, IStoreSnapshot snap, string queue)
     {
         var c = Counters(ctx, BoxKeys.Kind.Queue, queue);
-        return
+        List<(string, string)> fields =
         [
             ("kind", "queue"),
             ("depth", c.Ready.ToString()),
@@ -94,6 +94,10 @@ internal sealed class HwStatsCommand : HighwayCommand
             ("deferred", c.Delayed.ToString()),
             ("deadLettered", c.Dead.ToString()),
         ];
+        // 070: a group queue whose last member stopped declaring it drains (ticks since, or 0).
+        if (queue.Contains('@'))
+            fields.Add(("draining", c.DrainingSince.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        return fields;
     }
 
     private static List<(string, string)> RecorderStats(CommandContext ctx)
@@ -135,12 +139,13 @@ internal sealed class HwStatsCommand : HighwayCommand
         }
 
         var groups = ctx.Store.SetMembers(snap, HighwayKeyspace.SetPrefix(HighwayNames.ChannelGroups(name)));
-        long pending = 0, dead = 0;
+        long pending = 0, dead = 0, draining = 0;
         foreach (var g in groups)
         {
             var c = Counters(ctx, BoxKeys.Kind.Queue, BoxCommandSupport.GroupQueue(name, Encoding.UTF8.GetString(g)));
             pending += c.Ready;
             dead += c.Dead;
+            if (c.DrainingSince != 0) draining++;
         }
         return
         [
@@ -148,6 +153,7 @@ internal sealed class HwStatsCommand : HighwayCommand
             ("groups", groups.Count.ToString()),
             ("pending", pending.ToString()),
             ("deadLettered", dead.ToString()),
+            ("draining", draining.ToString()),   // 070: groups receiving nothing new, backlog kept
         ];
     }
 

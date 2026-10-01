@@ -55,6 +55,15 @@ heartbeat with `+SESSION` or the client follows a failover. Before 3.0 a subscri
 start, so a broker that lost it (a wipe, a fresh node) kept answering while every publish reached
 nobody, silently, until the subscriber restarted.
 
+**A session's subscriptions are the node's complete set** (3.0, feature 070). A group the node no longer
+declares loses it as a member. When that node was the group's last member the group **drains**: publishes
+skip it, so it receives nothing new and — however full its queue — can never refuse a publish to the
+channel; its backlog is kept and it is retired by the first publish after the retirement threshold (never, if retirement is disabled), unless a node declares it
+again first, which resumes it with that backlog. Messages published while it drains are **not** kept for
+it: a resumed group has its old backlog and everything published after the re-declare, never the gap. This closes a 2.x trap: subscriptions were add-only, so
+a node redeployed without a subscriber stayed a member while it heartbeated, its group filled, and the
+whole channel was then refused. Draining is logged at Warning and visible as `draining` in `HW.STATS`.
+
 ## Wire surface
 
 `HW.PUBLISH` (immediate or deferred), `HW.SESSION` (whose `subscriptions` register a group and the

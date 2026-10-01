@@ -179,6 +179,25 @@ confusing them loses data.
 Retirement deletes the backlog and is **never silent**: it logs at Warning, records a
 `GroupRetired` event, and reports the messages and bytes destroyed.
 
+**Amended 3.0 (feature 070): a group also ends when its last member stops declaring it.** Before 3.0.0
+a node's subscriptions were add-only and the client never unsubscribes, so a node redeployed *without*
+a subscriber stayed a member for as long as it heartbeated. Its group queue filled to `MaxQueueBytes`,
+and because a publish refuses in full when any target group is full, **every publish to that channel
+failed** — a latent outage, found by review, not in production. Now a node's session is its complete
+subscription set: a group it no longer declares loses it, and a group whose last member left
+**drains** — publishes skip it (it can never refuse the channel), its backlog is kept, and it is
+retired by the first publish to its channel after it has drained for `SubscriberRetirementThreshold`
+(retirement rides the publish path; there is no timer), unless a node declares it again first, which
+resumes it with its backlog. With retirement disabled (a zero threshold) a draining group is never
+retired — it stays skipped with its backlog until re-declared or removed with `HW.UNSUBSCRIBE`. What a
+draining group skips is **not** kept for it: a message published while the group drains never reaches
+that group, even if it is declared again later — the resumed group gets its old backlog and what is
+published from then on, not the gap. Draining is loud (Warning log, `GroupDraining` event, `draining` in `HW.STATS`). Until 070 the
+"logs at Warning" above was not true — retirement recorded an event but nothing wrote it to the broker
+log; since 070 the recorder writes membership changes and retirements to the log at Warning, whatever
+its own settings. Proven by `RegistryHardeningTests` (mutation-checked) and
+`RedeployWithoutSubscriberTests` (a real engine redeployed without its subscriber).
+
 ### C2.4 — Pub/Sub is **not** a store for messages nobody has subscribed to
 
 **Status: Met** — the backlog was removed once `SendAsync` gave that use case a proper home. Proven during Settle/Arrival phases of feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
@@ -870,6 +889,8 @@ get stale, and this register is already maintained and cross-linked.
 | **`[Job]` attribute sugar** | 028, OD1 | Layers onto the composition-root API if demanded; the reverse retreat would break users |
 | **Per-subscriber `SubscriptionGroup` override** | 025, D5 | One node-wide option teaches the model ("this process is one replica of `billing`"); a per-subscriber-class override re-opens the which-identity-am-I confusion 025 exists to close, and no review produced a concrete need. Registered until one does |
 | **`HostingMode` default flip to `Declared`** | 024, D1 | Changing the default silently changes what deployed processes host — the exact surprise 024 exists to end — and under a test runner the entry assembly is `testhost`, so the flip breaks every fixture-hosting test that has not declared its assembly. A major-version change, made when `Implicit`'s startup warning has had time to teach |
+| **Group retirement off the publish path** | 070, review decision 3A | Every publish decides whether each target group should retire by reading its member set and, per member, the registration record and heartbeat — O(groups × members) point reads under the channel and group locks. Small at today's topologies (a few groups, a few members); kept on the publish path so there is one place that retires groups. Revisit if a channel gains many members |
+| **Collections restructure** (named internal collections, families layer removed) | 070, review scope decision | Reviewed as mostly cosmetic for 3.0: the behaviour wins already existed after 065 or were the 070 registry fixes. A format-5 change if ever wanted; the generic collection engine is extracted in 071 where the cache and stats need it |
 | **A longer-retention message index** | 023, Open Decision 3 | The dashboard's message view is bounded by the flight recorder's window, so history older than that is simply gone. A durable index would fix it and would be **new unbounded storage inside a diagnostic** — the exact cost feature 016 spent its length measuring. Registered, not built |
 | **A node → message index** | 023 T6 | The node page projects every entity and filters, because nothing maps a node to the messages it handled. Affordable only because the recorder is bounded. An index would be new storage for a view |
 | **`MaxDeliveryAttempts` off-by-one** | 013, then 015 | Belongs with the attempt-counting work, because that is what redefines what an attempt *is*. Also listed under Open Decisions above |

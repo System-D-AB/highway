@@ -64,6 +64,57 @@ internal static class BoxCommandSupport
 
     public static IDisposable Lock(CommandContext ctx, uint box) => ctx.Locks.Lock(WorkBox.LockName(box));
 
+    // =====================================================================================
+    // Resolve-then-lock, validated (070 second review, R2-1)
+    // =====================================================================================
+
+    private const int MaxLiveAttempts = 16;
+
+    /// <summary>
+    /// Only subscriber-group queues (<c>{channel}@{group}</c>) are ever retired, so only their box id can
+    /// change under a name. Services and plain queues keep their box for life and skip every check below.
+    /// </summary>
+    public static bool CanRetire(BoxKeys.Kind kind, string name) => kind == BoxKeys.Kind.Queue && name.Contains('@');
+
+    /// <summary>The box the store names for (kind, name) right now — a direct read that bypasses the id cache.</summary>
+    public static uint? LiveBox(CommandContext ctx, BoxKeys.Kind kind, string name)
+    {
+        using var batch = ctx.Store.NewBatch();
+        var raw = ctx.Store.Read(batch, BoxKeys.NameIndexKey(kind, name));
+        return raw is { Length: 4 } ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(raw) : null;
+    }
+
+    /// <summary>
+    /// Resolves the box for (kind, name), takes its lock, and confirms <b>under the lock</b> that the name
+    /// still names that box. A box id is resolved before its lock is taken (the catalog has its own lock;
+    /// the stripes are not re-entrant), so a group retired — and possibly re-created — in between would
+    /// otherwise be written into after its range was deleted: the message acknowledged and lost. When the
+    /// name moved, the stale id is forgotten and resolution starts over. <paramref name="create"/> = Ensure
+    /// (a send or claim to an unknown queue is valid); otherwise <paramref name="box"/> is null when the
+    /// name has no box.
+    /// </summary>
+    public static IDisposable LockLive(CommandContext ctx, BoxKeys.Kind kind, string name, bool create, out uint? box)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            box = create ? Ensure(ctx, kind, name) : Find(ctx, kind, name);
+            if (box is not { } id) return NoLock.Instance;
+            var lease = Lock(ctx, id);
+            if (!CanRetire(kind, name) || LiveBox(ctx, kind, name) == id)
+                return lease;
+            lease.Dispose();
+            ctx.Boxes.Forget(kind, name, id);   // stale: retired since it was resolved
+            if (attempt >= MaxLiveAttempts)
+                throw new InvalidOperationException($"'{name}' kept being retired and re-created under {MaxLiveAttempts} attempts");
+        }
+    }
+
+    private sealed class NoLock : IDisposable
+    {
+        public static readonly NoLock Instance = new();
+        public void Dispose() { }
+    }
+
     /// <summary>The name a storage-format error reports for a work box.</summary>
     public static string StorageName(BoxKeys.Kind kind, string name)
         => kind == BoxKeys.Kind.Service ? HighwayNames.ServiceQueue(name) : HighwayNames.Queue(name);
@@ -96,10 +147,55 @@ internal static class BoxCommandSupport
             Catalog.Retire(store, batch, ctx.Boxes, BoxKeys.Kind.Queue, derived, ctx.NowTicks);
             retiredBoxes.Add((BoxKeys.Kind.Queue, derived, box));
         }
+        // 070: a retired group is gone from every member's declaration record too, so a node that still
+        // declares it is seen as joining again (the session diff compares against real membership).
+        using (var snap = store.Snapshot())
+            foreach (var member in RegistrySupport.ReadSet(store, snap, HighwayNames.GroupMembers(channel, group)))
+                RegistrySupport.SetRemove(store, batch, HighwayNames.NodeSubs(member), derived);
         store.DeleteRange(batch, HighwayKeyspace.SetPrefix(HighwayNames.GroupMembers(channel, group)));
         RegistrySupport.SetRemove(store, batch, HighwayNames.ChannelGroups(channel), group);
-        RegistrySupport.SetRemove(store, batch, HighwayNames.NodeChannels(group), channel);
         return new RegistrySupport.RetirementOutcome(1, messages, bytes);
+    }
+
+    /// <summary>What happens to a group when the node leaving it was its last member (070).</summary>
+    public enum LastMember
+    {
+        /// <summary>Stop fan-out now, keep the backlog, retire after the retirement threshold (session diff).</summary>
+        Drain,
+        /// <summary>Retire now, discarding the backlog, counted (BYE PURGE).</summary>
+        Retire,
+    }
+
+    /// <summary>The effect of <see cref="LeaveGroup"/>, for the caller's events.</summary>
+    public readonly record struct LeaveOutcome(bool OthersRemain, bool Draining, RegistrySupport.RetirementOutcome Retired);
+
+    /// <summary>
+    /// A node leaves one subscriber group (070 — the one implementation used by the session diff and BYE
+    /// PURGE). Removes the membership and the node's declaration of it; when other members remain nothing
+    /// else changes. When the node was the last member: <see cref="LastMember.Drain"/> marks the group queue
+    /// draining (publishes skip it, its backlog is kept until the retirement threshold) — or retires it at
+    /// once if it never received anything, since there is nothing to keep; <see cref="LastMember.Retire"/>
+    /// retires it now. The caller holds the channel and group box locks and commits the batch.
+    /// </summary>
+    public static LeaveOutcome LeaveGroup(
+        CommandContext ctx, IStoreBatch batch, IStoreSnapshot snap, string channel, string group, string node,
+        LastMember onLast, List<(BoxKeys.Kind Kind, string Name, uint Box)> retiredBoxes)
+    {
+        var store = ctx.Store;
+        var derived = GroupQueue(channel, group);
+        var members = RegistrySupport.ReadSet(store, snap, HighwayNames.GroupMembers(channel, group));
+        RegistrySupport.SetRemove(store, batch, HighwayNames.GroupMembers(channel, group), node);
+        RegistrySupport.SetRemove(store, batch, HighwayNames.NodeSubs(node), derived);
+        if (members.Any(m => m != node))
+            return new LeaveOutcome(OthersRemain: true, Draining: false, default);
+
+        if (onLast == LastMember.Drain && Catalog.Find(store, batch, ctx.Boxes, BoxKeys.Kind.Queue, derived) is { } box)
+        {
+            using var wb = Open(ctx, box, BoxKeys.Kind.Queue, batch);
+            if (wb.DrainingSince == 0) wb.SetDrainingSince(ctx.NowTicks);
+            return new LeaveOutcome(OthersRemain: false, Draining: true, default);
+        }
+        return new LeaveOutcome(false, false, RetireGroup(ctx, batch, channel, group, retiredBoxes));
     }
 
     /// <summary>The group queue boxes of every group in <paramref name="groups"/> that exist — for locking before a retire or a fan-out.</summary>

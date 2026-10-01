@@ -112,10 +112,16 @@ internal static class Wire5
     {
         var sb = new StringBuilder("{");
         if (catalogJson is not null) sb.Append("\"catalog\":").Append(catalogJson).Append(',');
-        sb.Append("\"subscriptions\":[");
-        sb.Append(string.Join(",", (subscriptions ?? []).Select(s =>
-            $"{{\"channel\":{JsonSerializer.Serialize(s.Channel)},\"group\":{JsonSerializer.Serialize(s.Group)}}}")));
-        sb.Append("],\"jobs\":[");
+        // 070: a present list is the node's complete subscription set (groups it omits are left). With no
+        // subscriptions given - Register - the property is omitted, which leaves memberships unchanged.
+        if (subscriptions is not null)
+        {
+            sb.Append("\"subscriptions\":[");
+            sb.Append(string.Join(",", subscriptions.Select(s =>
+                $"{{\"channel\":{JsonSerializer.Serialize(s.Channel)},\"group\":{JsonSerializer.Serialize(s.Group)}}}")));
+            sb.Append("],");
+        }
+        sb.Append("\"jobs\":[");
         sb.Append(string.Join(",", (jobs ?? []).Select(j =>
             $"{{\"queue\":{JsonSerializer.Serialize(j.Queue)},\"job\":{JsonSerializer.Serialize(j.Job)}," +
             $"\"expression\":{JsonSerializer.Serialize(j.Expression)},\"template\":\"{Convert.ToBase64String(j.Template)}\"}}")));

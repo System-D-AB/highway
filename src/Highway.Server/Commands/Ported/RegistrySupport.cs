@@ -98,12 +98,6 @@ internal static class RegistrySupport
     }
 
     /// <summary>
-    /// The channels a node subscribes to, from the <c>node:channels</c> set (was a mirror).
-    /// Used by BYE PURGE to derive the (channel, group) targets it must retire.
-    /// </summary>
-    public static string[] ReadNodeChannels(IHighwayStore store, IStoreSnapshot snap, string nodeId)
-        => ReadSet(store, snap, HighwayNames.NodeChannels(nodeId));
-    /// <summary>
     /// The service names a catalog declares (<c>services[].name</c>). False when the JSON does not parse —
     /// a catalog the server cannot read would leave the node undiscoverable, so it is refused loudly.
     /// </summary>

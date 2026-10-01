@@ -94,7 +94,8 @@ internal sealed record CatalogueRowDto(
     long? Depth,
     long? Bytes,
     long? MaxBytes,
-    long? DeadLettered);
+    long? DeadLettered,
+    bool Draining = false);   // 070: shown as a badge — receives nothing new, backlog kept
 
 internal sealed record CatalogueDto(
     IReadOnlyList<CatalogueRowDto> Entries,

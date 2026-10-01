@@ -119,7 +119,10 @@ public class ReplicationPairTests : IDisposable
         // Resurrection: the promoted node announced itself to the old primary (G3), so
         // the old primary demotes without any manual epoch injection — and its
         // reconciliation report names what stayed local (G9).
-        await WaitForAsync(() => primary.Replication!.Role == ReplicaRole.Demoted);
+        // The role flips first (writes stop at once) and the report is written after it, under the
+        // role lock; Role is read here without that lock, so wait for the report too.
+        await WaitForAsync(() => primary.Replication!.Role == ReplicaRole.Demoted
+                                 && primary.Replication.LastReconciliationPath is not null);
         File.Exists(primary.Replication!.LastReconciliationPath).Should().BeTrue();
         var report = File.ReadAllText(primary.Replication.LastReconciliationPath!);
         report.Should().Contain("the broker never merges");

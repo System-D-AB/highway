@@ -41,6 +41,14 @@ internal abstract class TokenCommand : HighwayCommand
         (Kind, Name) = meta;
 
         using var _lock = BoxCommandSupport.Lock(ctx, Box);
+        // Under the lock (070 review R2-1): a group box retired since its metadata was cached holds nothing,
+        // and writing into it would land in a deleted range.
+        if (BoxCommandSupport.CanRetire(Kind, Name!) && BoxCommandSupport.LiveBox(ctx, Kind, Name!) != Box)
+        {
+            ctx.Boxes.Forget(Kind, Name!, Box);
+            writer.Integer(0);
+            return;
+        }
         using var wb = BoxCommandSupport.Open(ctx, Box, Kind);
         if (wb.ReadInFlight(Seq) is { } held)
         {

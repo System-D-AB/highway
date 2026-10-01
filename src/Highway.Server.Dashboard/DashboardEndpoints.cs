@@ -182,7 +182,7 @@ internal static class DashboardEndpoints
                     byName.TryGetValue(e.Name, out var q);
                     return new CatalogueRowDto(
                         e.Name, e.Kind.ToString(), e.State.ToString(), e.ParentChannel, e.Hosts,
-                        q?.Depth, q?.Bytes, q?.MaxBytes, q?.DeadLettered);
+                        q?.Depth, q?.Bytes, q?.MaxBytes, q?.DeadLettered, q?.Draining ?? false);
                 })
                 .ToArray();
 

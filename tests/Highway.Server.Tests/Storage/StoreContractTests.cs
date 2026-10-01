@@ -250,7 +250,7 @@ public abstract class StoreContractTests
     {
         // The ack/fail/touch/sweep idiom: drain, keep some, push survivors back — atomically.
         using var store = CreateStore();
-        var name = HighwayNames.QueueProcessing("q", "node-A");
+        var name = "q:q:proc:node-A";
         var prefix = HighwayKeyspace.ListPrefix(name);
         PushTail(store, name, "keep-1");
         PushTail(store, name, "drop");
@@ -284,7 +284,7 @@ public abstract class StoreContractTests
     public void SortedSet_RangeByScore_InclusiveBounds()
     {
         using var store = CreateStore();
-        var key = HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed("q"));
+        var key = HighwayKeyspace.SortedSetPrefix("q:q:delayed");
 
         InBatch(store, b =>
         {
@@ -302,7 +302,7 @@ public abstract class StoreContractTests
     public void SortedSet_Range_AscendingByScore()
     {
         using var store = CreateStore();
-        var key = HighwayKeyspace.SortedSetPrefix(HighwayNames.JobSchedules("q"));
+        var key = HighwayKeyspace.SortedSetPrefix("job:q:schedules");
         InBatch(store, b =>
         {
             store.SortedSetAdd(b, key, 300, B("c"));
@@ -318,7 +318,7 @@ public abstract class StoreContractTests
     public void SortedSet_Range_RespectsLimit()
     {
         using var store = CreateStore();
-        var key = HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed("q"));
+        var key = HighwayKeyspace.SortedSetPrefix("q:q:delayed");
         InBatch(store, b =>
         {
             for (var i = 0; i < 10; i++)
@@ -334,7 +334,7 @@ public abstract class StoreContractTests
     public void SortedSet_Remove()
     {
         using var store = CreateStore();
-        var key = HighwayKeyspace.SortedSetPrefix(HighwayNames.QueueDelayed("q"));
+        var key = HighwayKeyspace.SortedSetPrefix("q:q:delayed");
         InBatch(store, b =>
         {
             store.SortedSetAdd(b, key, 100, B("m1"));
@@ -371,7 +371,7 @@ public abstract class StoreContractTests
     public void Set_Add_ReturnsTrueOnFirst_FalseOnRepeat()
     {
         using var store = CreateStore();
-        var key = HighwayKeyspace.SetPrefix(HighwayNames.QueueNodes("q"));
+        var key = HighwayKeyspace.SetPrefix("q:q:nodes");
 
         bool first = false, second = false;
         InBatch(store, b => first = store.SetAdd(b, key, B("node-A")));
@@ -400,7 +400,7 @@ public abstract class StoreContractTests
     public void Set_Remove()
     {
         using var store = CreateStore();
-        var key = HighwayKeyspace.SetPrefix(HighwayNames.QueueNodes("q"));
+        var key = HighwayKeyspace.SetPrefix("q:q:nodes");
         InBatch(store, b =>
         {
             store.SetAdd(b, key, B("node-A"));
@@ -632,7 +632,7 @@ public abstract class StoreContractTests
         // leave BOTH absent: the single commit point means staged-but-uncommitted is nothing.
         using var store = CreateStore();
         var entryKey = HighwayKeyspace.ListEntry(HighwayNames.Queue("q"), 0);
-        var counterKey = HighwayKeyspace.Counter(HighwayNames.QueueBytes("q"));
+        var counterKey = HighwayKeyspace.Counter("q:q:bytes");
 
         var thrown = false;
         try

@@ -34,6 +34,14 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
 
 ### Fixed
 
+- **A redeploy without a subscriber could block a whole channel** (feature 070). Subscriptions were
+  add-only and the client never unsubscribes, so a node that dropped a subscriber but kept running stayed
+  a member of that group; the group queue filled to its byte budget and, since a publish refuses when any
+  target group is full, every publish to the channel failed. A node's session is now its complete
+  subscription set: a group it no longer declares loses it, and a group whose last member left drains —
+  publishes skip it, its backlog is kept, and the first publish after the retirement threshold retires it unless declared
+  again. `HW.SESSION` also now takes the channel and group locks for membership changes, closing a race
+  with publish-time retirement, and group retirements and drains are written to the broker log.
 - **Two primaries after a failover under load** (feature 069). With two or more standbys, a client
   whose probe of the live successor was slow could walk on to a lower-priority standby, which promoted
   by its timer alone; both stayed primary at one epoch. A standby that has lost its master now asks its

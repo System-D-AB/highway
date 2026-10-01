@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Highway.Abstractions.Observability;
+using Microsoft.Extensions.Logging;
 
 namespace Highway.Server.Observability;
 
@@ -21,6 +22,9 @@ namespace Highway.Server.Observability;
 /// </summary>
 internal sealed class FlightRecorder : IDisposable
 {
+    /// <summary>Broker log for membership changes and destruction (070); set by the server, null in tests.</summary>
+    public ILogger? Logger { get; set; }
+
     private readonly ObservabilityOptions _options;
     private readonly ConcurrentDictionary<string, NameBuffer?> _buffers = new(StringComparer.OrdinalIgnoreCase);
     private readonly RecorderSweeper? _sweeper;
@@ -152,6 +156,12 @@ internal sealed class FlightRecorder : IDisposable
             if (count is { } discarded)
                 Interlocked.Add(ref _messagesDiscarded, discarded);
         }
+
+        // 070: changes to who receives a channel, and destruction, reach the broker log whatever the
+        // recorder's settings — "loud" must not depend on a diagnostics switch.
+        if (Logger is { } log && eventType is HighwayEventType.GroupRetired or HighwayEventType.GroupDraining
+                or HighwayEventType.MembershipRemoved)
+            log.LogWarning("[registry] {EventType} {Name} group={Group}: {Detail}", eventType, name, nodeId, errorCode);
 
         if (!_options.RecorderEnabled)
             return;

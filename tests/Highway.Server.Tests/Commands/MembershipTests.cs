@@ -77,8 +77,7 @@ public class MembershipTests
 
         // The channel-groups set is authoritative — the old grplist mirror is gone.
         Members(h.Store, HighwayNames.ChannelGroups("news")).Should().BeEquivalentTo("billing");
-        // Every former mirror reader now reads the same set (R3.2 equivalence).
-        Members(h.Store, HighwayNames.NodeChannels("billing")).Should().BeEquivalentTo("news");
+        // 070: the node's NodeSubs set is its only membership record (the pre-025 node:channels index is gone).
         Members(h.Store, HighwayNames.GroupMembers("news", "billing")).Should().BeEquivalentTo("node-1");
         Members(h.Store, HighwayNames.NodeSubs("node-1")).Should().BeEquivalentTo("news@billing");
     }
@@ -132,7 +131,6 @@ public class MembershipTests
 
         // Group unregistered, queue destroyed, reverse index cleared.
         Members(h.Store, HighwayNames.ChannelGroups("news")).Should().BeEmpty();
-        Members(h.Store, HighwayNames.NodeChannels("billing")).Should().BeEmpty();
         using var after = h.Store.Snapshot();
         new StoreInspector(h.Store).ListLength("hw:q:news@billing:q").Should().Be(0);
     }
@@ -488,8 +486,9 @@ public class MembershipTests
         text.Should().StartWith("*1\r\n*3\r\n");
         text.Should().Contain("req-1");
 
-        // dead-node dropped from the worker set and the registry.
-        Members(h.Store, HighwayNames.ServiceNodes("orders")).Should().NotContain("dead-node");
+        // dead-node dropped from discovery and the registry (070: the 2.x svc:nodes set this used to check
+        // had not been written since 065, so the assertion could never fail).
+        Members(h.Store, HighwayNames.RegistrationService("orders")).Should().NotContain("dead-node");
         Members(h.Store, HighwayNames.RegistrationNodeList).Should().NotContain("dead-node");
     }
 }

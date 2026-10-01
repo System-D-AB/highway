@@ -47,7 +47,8 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
                     InFlight: wb.InFlight,
                     DeadLettered: wb.Dead,
                     Delayed: wb.Delayed,
-                    IsSubscriberGroup: name.Contains('@')));
+                    IsSubscriberGroup: name.Contains('@'),
+                    Draining: wb.DrainingSince != 0));
             }
             return Task.FromResult(StateResult<IReadOnlyList<QueueStateDto>>.Ok(rows));
         }

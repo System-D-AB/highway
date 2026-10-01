@@ -32,6 +32,8 @@ internal sealed class CommandHarness : IDisposable
     public RecordingDoorbell Doorbell => _doorbell;
     public FlightRecorder Recorder => _recorder;
     public HighwayServerOptions Options => _options;
+    public StripedLock Locks => _locks;
+    public Highway.Server.Storage.Boxes.BoxRuntime Boxes => _boxes;
 
     /// <summary>
     /// Runs <paramref name="command"/> with the given string args at wall-clock

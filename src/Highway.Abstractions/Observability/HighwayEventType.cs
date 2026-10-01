@@ -185,4 +185,14 @@ public enum HighwayEventType
     /// poll — backpressure reaches the scheduler instead of being absorbed silently.
     /// </summary>
     JobFireRefused = 26,
+
+    /// <summary>
+    /// A subscriber group's last member stopped declaring it (070): the group receives no new messages and
+    /// keeps its backlog until <c>SubscriberRetirementThreshold</c>, then retires — unless a node declares it
+    /// again first. <c>Name</c> is the channel, <c>NodeId</c> the group, <c>ErrorCode</c> says who left.
+    /// </summary>
+    GroupDraining = 27,
+
+    /// <summary>A node stopped declaring a subscription whose group other members still back (070).</summary>
+    MembershipRemoved = 28,
 }

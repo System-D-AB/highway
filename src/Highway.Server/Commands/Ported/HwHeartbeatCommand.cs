@@ -2,6 +2,7 @@ using System.Text;
 using Highway.Server.Commands.Runtime;
 using Highway.Server.Internal;
 using Highway.Abstractions.Observability;
+using Highway.Server.Storage;
 using Highway.Server.Storage.Boxes;
 using Highway.Server.Storage.Layout;
 
@@ -107,42 +108,67 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
 
     private void RunPurge(CommandContext ctx, RespWriter writer)
     {
-        var targets = PurgeTargets(ctx);
         Depart(ctx);
 
-        var retired = new List<(BoxKeys.Kind, string, uint)>();
-        foreach (var (channel, group) in targets)
+        // Leave every group the node declared, under the node lock as well as the channel and group box
+        // locks, re-reading the node's declarations under them (070 review F2). A session for the same node
+        // is then either wholly before a pass (its groups are in the re-read and are left) or wholly after
+        // the purge (a new registration whose record and memberships agree) — never half in between, which
+        // would leave a membership its NodeSubs record no longer lists, one nothing could drain or retire.
+        for (var attempt = 1; ; attempt++)
         {
-            var lockNames = BoxCommandSupport.GroupLockNames(ctx, channel, [group]);
-            lockNames.Add(channel);
-            using var _ = ctx.Locks.LockMany(lockNames);
-            using var snap = ctx.Store.Snapshot();
-            using var batch = ctx.Store.NewBatch();
-            var members = RegistrySupport.ReadSet(ctx.Store, snap, HighwayNames.GroupMembers(channel, group));
-            if (members.Length > 0 && members.Any(m => m != _nodeId))
-                RegistrySupport.SetRemove(ctx.Store, batch, HighwayNames.GroupMembers(channel, group), _nodeId);
-            else
-                _retired += BoxCommandSupport.RetireGroup(ctx, batch, channel, group, retired);
-            batch.Commit();
-        }
-        BoxCommandSupport.Forget(ctx, retired);
+            (string Channel, string Group)[] targets;
+            using (var snap = ctx.Store.Snapshot())
+                targets = PurgeTargets(ctx, snap);
 
-        using (var batch = ctx.Store.NewBatch())
-        {
-            ctx.Store.DeleteRange(batch, HighwayKeyspace.SetPrefix(HighwayNames.NodeChannels(_nodeId)));
-            ctx.Store.DeleteRange(batch, HighwayKeyspace.SetPrefix(HighwayNames.NodeSubs(_nodeId)));
-            batch.Commit();
+            var held = LocksFor(ctx, targets);
+            using (ctx.Locks.LockMany(held))
+            {
+                using var snap = ctx.Store.Snapshot();
+                targets = PurgeTargets(ctx, snap);
+                if (!LocksFor(ctx, targets).IsSubsetOf(held))
+                {
+                    if (attempt >= MaxPurgeAttempts)
+                        throw new InvalidOperationException(
+                            $"BYE PURGE for '{_nodeId}': its subscriptions kept changing under {MaxPurgeAttempts} lock attempts");
+                    continue;   // a session joined a group on another channel meanwhile: lock that too
+                }
+
+                using var batch = ctx.Store.NewBatch();
+                var retired = new List<(BoxKeys.Kind, string, uint)>();
+                foreach (var (channel, group) in targets)
+                    _retired += BoxCommandSupport.LeaveGroup(ctx, batch, snap, channel, group, _nodeId,
+                        BoxCommandSupport.LastMember.Retire, retired).Retired;
+                // Entries that are not a {channel}@{group} name are not memberships; clear them with the rest.
+                ctx.Store.DeleteRange(batch, HighwayKeyspace.SetPrefix(HighwayNames.NodeSubs(_nodeId)));
+                batch.Commit();
+                // Before the locks go (070 review F3): until the retired box id leaves the runtime cache, a
+                // publish that re-resolves the group would get the deleted box and enqueue into it - lost.
+                BoxCommandSupport.Forget(ctx, retired);
+            }
+            break;
         }
         writer.ThreeIntegers(_retired.Groups, _retired.Messages, _retired.Bytes);
     }
 
-    /// <summary>Every group this node belongs to: legacy (the group is the node) and 025 memberships.</summary>
-    private (string Channel, string Group)[] PurgeTargets(CommandContext ctx)
+    private const int MaxPurgeAttempts = 16;
+
+    /// <summary>The node lock plus each target's channel and existing group box lock.</summary>
+    private HashSet<string> LocksFor(CommandContext ctx, IEnumerable<(string Channel, string Group)> targets)
     {
-        using var snap = ctx.Store.Snapshot();
+        var names = new HashSet<string>(StringComparer.Ordinal) { _nodeId };
+        foreach (var byChannel in targets.GroupBy(t => t.Channel, StringComparer.Ordinal))
+        {
+            names.Add(byChannel.Key);
+            names.UnionWith(BoxCommandSupport.GroupLockNames(ctx, byChannel.Key, byChannel.Select(t => t.Group)));
+        }
+        return names;
+    }
+
+    /// <summary>Every group this node declared (its <c>NodeSubs</c> record — 070: the only membership record).</summary>
+    private (string Channel, string Group)[] PurgeTargets(CommandContext ctx, IStoreSnapshot snap)
+    {
         var targets = new Dictionary<string, (string, string)>(StringComparer.Ordinal);
-        foreach (var channel in RegistrySupport.ReadNodeChannels(ctx.Store, snap, _nodeId))
-            targets[BoxCommandSupport.GroupQueue(channel, _nodeId)] = (channel, _nodeId);
         foreach (var entry in RegistrySupport.ReadSet(ctx.Store, snap, HighwayNames.NodeSubs(_nodeId)))
         {
             var at = entry.IndexOf('@');

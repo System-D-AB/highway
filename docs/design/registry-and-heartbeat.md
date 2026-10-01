@@ -45,9 +45,13 @@ replication fields when replication is on).
 
 **Retirement bounds the pub/sub backlog.** A subscriber group's queue holds messages while the
 group is away — but "away forever" would fill a disk and, with byte budgets, block the channel for
-healthy subscribers. So a group is retired three ways: the node says so (`BYE PURGE`), an operator
-says so, or the broker decides after every backing node has missed the heartbeat past
-`SubscriberRetirementThreshold` (24 h). Since groups can have several members, liveness is the
+healthy subscribers. So a group is retired four ways: the node says so (`BYE PURGE`), an operator
+says so, the broker decides after every backing node has missed the heartbeat past
+`SubscriberRetirementThreshold` (24 h), or — since 3.0 (feature 070) — its last member's session stops
+declaring it: the group then **drains** (publishes skip it, its backlog is kept) and is retired by the
+first publish to its channel after the same threshold, unless a node declares it again first (with
+retirement disabled it is never retired). Retirement always rides the publish path — there is no timer. A live node that merely dropped a subscriber no
+longer keeps an abandoned group filling until it blocks its channel. Since groups can have several members, liveness is the
 *youngest member's* heartbeat — one live replica keeps the whole group and its siblings' backlog
 alive. Retirement is never silent: it warns, records a `GroupRetired` event, and reports what it
 destroyed. This is the evidence-based bound that generic idle timers (`x-expires`,

@@ -25,6 +25,7 @@ namespace Highway.Server.Storage.Boxes;
 internal sealed class WorkBox : IDisposable
 {
     private const byte CHead = 1, CNextSeq = 2, CReady = 3, CInFlight = 4, CDelayed = 5, CDead = 6, CBytes = 7, CDeadHead = 8;
+    private const byte CDrainingSince = 9;   // 070: a group queue whose last member left (ticks; absent = not draining)
     private const int SweepPage = 256;
 
     private readonly IHighwayStore _store;
@@ -81,6 +82,17 @@ internal sealed class WorkBox : IDisposable
     public long Delayed => Get(CDelayed);
     public long Dead => Get(CDead);
     public long Bytes => Get(CBytes);
+
+    /// <summary>When this group queue started draining (070), or 0 when it is not draining.</summary>
+    public long DrainingSince => Get(CDrainingSince);
+
+    /// <summary>Marks the group queue draining from <paramref name="ticks"/>, or clears the mark with 0.</summary>
+    public void SetDrainingSince(long ticks)
+    {
+        var key = BoxKeys.Counter(Id, CDrainingSince);
+        if (ticks <= 0) _store.Delete(Batch, key);
+        else _store.Set(Batch, key, BoxKeys.I64(ticks));
+    }
 
     private long Get(byte counter) => BoxKeys.ReadI64(_store.Read(Batch, BoxKeys.Counter(Id, counter)));
 

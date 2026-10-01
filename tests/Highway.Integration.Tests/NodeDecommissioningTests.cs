@@ -349,20 +349,23 @@ public class NodeDecommissioningTests : IDisposable
         using var slow = new HighwayTestServer(o =>
         {
             o.MaxQueueBytes = Limit;
-            o.SubscriberRetirementThreshold = TimeSpan.FromSeconds(4);
+            // 2026-10-01: 4s was still too tight under a loaded full-suite run - the 2.5s wait
+            // stretched past the threshold and the group was (correctly) retired.
+            o.SubscriberRetirementThreshold = TimeSpan.FromSeconds(12);
         });
         var db = ConnectionMultiplexer.Connect(slow.ConnectionString).GetDatabase();
         const string channel = "dc.suspect";
 
         Register(db, "fading-node");
+        var registered = System.Diagnostics.Stopwatch.StartNew();
         db.Subscribe(channel, "fading-node");
 
-        // Past half (2s) but comfortably inside the whole threshold (4s).
-        await Task.Delay(2_500);
+        // Past half (6s) but comfortably inside the whole threshold (12s).
+        await Task.Delay(6_500);
         db.Execute("HW.PUBLISH", channel, Payload(64));
 
         (slow.Inspect.ListLength($"hw:q:{channel}@fading-node:q")).Should().Be(1,
-            "suspect is a warning, not a retirement - nothing is destroyed yet");
+            $"suspect is a warning, not a retirement - nothing is destroyed yet (published {registered.ElapsedMilliseconds}ms after registering; threshold 12000ms)");
 
         // HW.REPLAY returns an array of field/value arrays; ToString() on the outer entries
         // yields "N element(s)", so they have to be flattened before anything can be matched.

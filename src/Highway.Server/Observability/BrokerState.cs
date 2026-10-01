@@ -13,7 +13,8 @@ internal sealed record QueueStateDto(
     long InFlight,
     long DeadLettered,
     long Delayed,
-    bool IsSubscriberGroup);
+    bool IsSubscriberGroup,
+    bool Draining = false);   // 070: a group queue whose last member left
 
 /// <summary>
 /// The result of a state read. **Never an exception**: a view that cannot load must say so while

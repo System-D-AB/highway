@@ -84,14 +84,13 @@ internal sealed class HwDlqCommand : HighwayCommand
     {
         // 065: dead letters live in the target's box, oldest first from a durable head — nothing already
         // requeued or purged is ever re-walked. An unknown target answers empty / :0, never an error.
-        if (BoxCommandSupport.Find(ctx, _kind, _name) is not { } box)
+        using var _lock = BoxCommandSupport.LockLive(ctx, _kind, _name, create: false, out var resolved);
+        if (resolved is not { } box)
         {
             if (_action == ActionPeek) writer.EmptyArray();
             else writer.Integer(0);
             return;
         }
-
-        using var _lock = BoxCommandSupport.Lock(ctx, box);
         using var wb = BoxCommandSupport.Open(ctx, box, _kind);
         switch (_action)
         {

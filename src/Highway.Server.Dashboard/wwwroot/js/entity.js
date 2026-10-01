@@ -120,7 +120,7 @@ export async function render(container, options, params) {
                 <tr>
                     <td><a href="#/entity?kind=Group&name=${encodeURIComponent(g.name)}">${esc(g.name)}</a></td>
                     <td>${g.depth ?? 0} queued</td>
-                    <td>${g.deadLettered ? `<span class="state-absent">${g.deadLettered} dead</span>` : ''}</td>
+                    <td>${g.deadLettered ? `<span class="state-absent">${g.deadLettered} dead</span>` : ''}${g.draining ? ' <span class="state-absent" title="Its last member stopped subscribing: it receives nothing new and keeps its backlog until the retirement threshold">draining</span>' : ''}</td>
                 </tr>`).join('') + '</tbody></table>';
         }
 

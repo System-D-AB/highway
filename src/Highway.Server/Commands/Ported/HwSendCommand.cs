@@ -55,9 +55,8 @@ internal sealed class HwSendCommand : HighwayCommand
     protected override void Run(CommandContext ctx, RespWriter writer)
     {
         var entry = Envelope.EncodeRpcEntry(_messageIdBytes, _payloadBytes);
-        var box = BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, _queue);
-        using var _lock = BoxCommandSupport.Lock(ctx, box);
-        using var wb = BoxCommandSupport.Open(ctx, box, BoxKeys.Kind.Queue);
+        using var _lock = BoxCommandSupport.LockLive(ctx, BoxKeys.Kind.Queue, _queue, create: true, out var box);
+        using var wb = BoxCommandSupport.Open(ctx, box!.Value, BoxKeys.Kind.Queue);
 
         if (ctx.Options.MaxQueueBytes > 0)
         {

@@ -30,7 +30,8 @@ function stateBadge(entry) {
 function metrics(entry) {
     if (entry.depth === null || entry.depth === undefined) return '';
     const dlq = entry.deadLettered ? ` · <span class="state-absent">${entry.deadLettered} dead</span>` : '';
-    return `<td>${entry.depth} · ${esc(fullness(entry.bytes, entry.maxBytes))}${dlq}</td>`;
+    const draining = entry.draining ? ' · <span class="state-absent" title="Its last member stopped subscribing: it receives nothing new and keeps its backlog until the retirement threshold">draining</span>' : '';
+    return `<td>${entry.depth} · ${esc(fullness(entry.bytes, entry.maxBytes))}${dlq}${draining}</td>`;
 }
 
 function link(entry) {

@@ -40,14 +40,18 @@ public class DelayedDeliveryTests : IDisposable
         var db = await ConnectAsync();
         await db.SubscribeAsync(Channel, Group);
 
+        // Wall-clock test: the due time leaves seconds, not milliseconds, of slack, because a loaded
+        // full-suite run stalls a 200ms delay past a 600ms due time (seen 2026-10-01).
+        var due = TimeSpan.FromSeconds(3);
+        var published = System.Diagnostics.Stopwatch.StartNew();
         await db.ExecuteAsync("HW.PUBLISH", Channel, "later"u8.ToArray(),
-            "AT", TicksIn(TimeSpan.FromMilliseconds(600)).ToString());
+            "AT", TicksIn(due).ToString());
 
-        (await ReceiveCountAsync(db)).Should().Be(0, "the delivery time has not arrived");
+        (await ReceiveCountAsync(db)).Should().Be(0, $"the delivery time has not arrived ({published.ElapsedMilliseconds}ms of {due.TotalMilliseconds}ms)");
         await Task.Delay(200);
-        (await ReceiveCountAsync(db)).Should().Be(0, "still early");
+        (await ReceiveCountAsync(db)).Should().Be(0, $"still early ({published.ElapsedMilliseconds}ms of {due.TotalMilliseconds}ms)");
 
-        await Task.Delay(600);
+        await Task.Delay(due);
         (await ReceiveCountAsync(db)).Should().Be(1, "the delivery time has passed");
     }
 
