@@ -26,7 +26,11 @@ public class BoxLayoutTests
         return (store, () => { store.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); });
     }
 
-    private static byte[] Entry(string id, ushort attempts = 0) => Envelope.EncodeRpcEntry(Encoding.UTF8.GetBytes(id), Encoding.UTF8.GetBytes("p-" + id), attempts);
+    private static byte[] Entry(string id, ushort attempts = 0, ushort requeues = 0)
+    {
+        var b = Envelope.EncodeRpcEntry(Encoding.UTF8.GetBytes(id), Encoding.UTF8.GetBytes("p-" + id), attempts);
+        return requeues > 0 ? Envelope.WithLineage(b, requeues) : b;
+    }
 
     // ---------------------------------------------------------------- keys
 
@@ -104,10 +108,10 @@ public class BoxLayoutTests
 
     private sealed class Model
     {
-        public readonly List<(ulong Seq, string Id, ushort Attempts)> Ready = [];
-        public readonly Dictionary<ulong, (string Id, ushort Attempts, long Claim, string Node)> InFlight = [];
+        public readonly List<(ulong Seq, string Id, ushort Attempts, ushort Requeues)> Ready = [];
+        public readonly Dictionary<ulong, (string Id, ushort Attempts, long Claim, string Node, ushort Requeues)> InFlight = [];
         public readonly List<(long Due, string Id)> Delayed = [];
-        public readonly List<(string Id, ushort Attempts)> Dead = [];
+        public readonly List<(string Id, ushort Attempts, ushort Requeues)> Dead = [];
 
         public Model Clone()
         {
@@ -162,7 +166,7 @@ public class BoxLayoutTests
                 {
                     var id = "m" + nextId++;
                     wb.Enqueue(Entry(id));
-                    m.Ready.Add((0, id, 0));
+                    m.Ready.Add((0, id, 0, 0));
                     break;
                 }
                 case 2:
@@ -178,7 +182,7 @@ public class BoxLayoutTests
                     var promoted = wb.PromoteDue(now);
                     var due = m.Delayed.Where(d => d.Due <= now).OrderBy(d => d.Due).ToList();
                     promoted.Should().Be(due.Count, because);
-                    foreach (var d in due) { m.Delayed.Remove(d); m.Ready.Add((0, d.Id, 0)); }
+                    foreach (var d in due) { m.Delayed.Remove(d); m.Ready.Add((0, d.Id, 0, 0)); }
                     break;
                 }
                 case 4 or 5:
@@ -191,7 +195,7 @@ public class BoxLayoutTests
                     for (var i = 0; i < claimed.Count; i++)
                     {
                         m.Ready.RemoveAt(0);
-                        m.InFlight[claimed[i].Token] = (expected[i].Id, expected[i].Attempts, now, node);
+                        m.InFlight[claimed[i].Token] = (expected[i].Id, expected[i].Attempts, now, node, expected[i].Requeues);
                         claimed[i].Attempts.Should().Be(expected[i].Attempts, because);
                         held.Add(claimed[i].Token);
                     }
@@ -225,8 +229,8 @@ public class BoxLayoutTests
                     {
                         m.InFlight.Remove(token);
                         var next = (ushort)(f.Attempts + 1);
-                        if (next > maxAttempts) { m.Dead.Add((f.Id, next)); expectDead.Add(f.Id); }
-                        else m.Ready.Add((0, f.Id, next));
+                        if (next > maxAttempts) { m.Dead.Add((f.Id, next, f.Requeues)); expectDead.Add(f.Id); }
+                        else m.Ready.Add((0, f.Id, next, f.Requeues));
                     }
                     while (m.Dead.Count > maxDead) m.Dead.RemoveAt(0);
                     dead.Select(d => d.Id).Should().Equal(expectDead, because);
@@ -237,13 +241,13 @@ public class BoxLayoutTests
                     var node = "n" + rng.Next(3);
                     var mine = m.InFlight.Where(kv => kv.Value.Node == node).OrderBy(kv => kv.Key).ToList();
                     wb.RequeueNode(node).Should().Be(mine.Count, because);
-                    foreach (var (token, f) in mine) { m.InFlight.Remove(token); m.Ready.Add((0, f.Id, (ushort)(f.Attempts + 1))); }
+                    foreach (var (token, f) in mine) { m.InFlight.Remove(token); m.Ready.Add((0, f.Id, (ushort)(f.Attempts + 1), f.Requeues)); }
                     if (rng.Next(4) == 0)
                     {
                         var n = rng.Next(1, 3);
                         var take = m.Dead.Take(n).ToList();
                         wb.RequeueDead(n).Should().Be(take.Count, because);
-                        foreach (var d in take) { m.Dead.RemoveAt(0); m.Ready.Add((0, d.Id, 0)); }
+                        foreach (var d in take) { m.Dead.RemoveAt(0); m.Ready.Add((0, d.Id, 0, (ushort)(d.Requeues + 1))); }
                     }
                     break;
                 }
@@ -257,7 +261,7 @@ public class BoxLayoutTests
             check.InFlight.Should().Be(m.InFlight.Count, because);
             check.Delayed.Should().Be(m.Delayed.Count, because);
             check.Dead.Should().Be(m.Dead.Count, because);
-            check.Bytes.Should().Be(m.Ready.Sum(r => (long)Entry(r.Id, r.Attempts).Length) + m.Delayed.Sum(d => (long)Entry(d.Id).Length), because);
+            check.Bytes.Should().Be(m.Ready.Sum(r => (long)Entry(r.Id, r.Attempts, r.Requeues).Length) + m.Delayed.Sum(d => (long)Entry(d.Id).Length), because);
             check.PeekDead(100).Select(d => { DeadLetter.Decode(d.Value, out _, out var a, out _, out _); return a; })
                 .Should().Equal(m.Dead.Select(d => d.Attempts), because);
         }
@@ -270,4 +274,35 @@ public class BoxLayoutTests
             .Should().Be(m.Ready.Count + m.Delayed.Count, "nothing ready or delayed is ever lost (seed " + seed + ")");
     }
 
+    // ---- the id cache cannot be refilled with a retired id (072 review, finding 2) --------------
+
+    [Fact]
+    public void ALookupStartedBeforeARetirement_DoesNotCacheTheRetiredId()
+    {
+        // Catalog.Find reads the name index without the box lock and then caches what it read. Interleaving:
+        // the lookup notes the generation and reads box 7; the retirer commits and forgets 7; the lookup then
+        // caches. Before the generation it cached 7 again, and every path that trusts the cache under its
+        // locks (retire, leave, join) would act on a deleted box.
+        var rt = new BoxRuntime();
+        var generation = rt.Generation;                          // Find: before its read
+        rt.Forget(BoxKeys.Kind.Queue, "news@billing", 7);         // the retirement, committed, forgets
+        rt.RememberIf(BoxKeys.Kind.Queue, "news@billing", 7, generation);   // Find: caches what it read
+
+        rt.TryGetId(BoxKeys.Kind.Queue, "news@billing", out _).Should().BeFalse("the retirement happened after the read");
+
+        rt.RememberIf(BoxKeys.Kind.Queue, "news@billing", 9, rt.Generation);
+        rt.TryGetId(BoxKeys.Kind.Queue, "news@billing", out var live).Should().BeTrue();
+        live.Should().Be(9u, "a lookup that started after the retirement caches normally");
+    }
+
+    [Fact]
+    public void AnEpochReset_InvalidatesLookupsInFlight()
+    {
+        var rt = new BoxRuntime();
+        var generation = rt.Generation;
+        rt.Reset();
+        rt.RememberIf(BoxKeys.Kind.Service, "orders", 3, generation);
+
+        rt.TryGetId(BoxKeys.Kind.Service, "orders", out _).Should().BeFalse();
+    }
 }

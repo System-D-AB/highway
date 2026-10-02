@@ -14,6 +14,7 @@ internal sealed class ImmutableCatalog : ICatalog
     private readonly FrozenDictionary<Type, string> _messageTypeToChannelName;
     private readonly FrozenDictionary<Type, string> _messageTypeToQueueName;
     private readonly FrozenDictionary<string, QueueDescriptor> _queues;
+    private readonly FrozenDictionary<Type, DeadLetterDescriptor> _deadLettersByMessageType;
 
     /// <param name="services">Services this node hosts.</param>
     /// <param name="channels">Channels this node has local subscribers for.</param>
@@ -31,17 +32,22 @@ internal sealed class ImmutableCatalog : ICatalog
     /// Message type → queue name for every <c>[Queue]</c> contract in scope, processed here
     /// or not, so a node can send to a queue it does not process.
     /// </param>
+    /// <param name="deadLetters">Dead-letter handlers this node hosts (feature 073).</param>
     public ImmutableCatalog(
         IReadOnlyList<ServiceDescriptor> services,
         IReadOnlyList<ChannelDescriptor> channels,
         IReadOnlyDictionary<Type, string>? requestContracts = null,
         IReadOnlyDictionary<Type, string>? messageContracts = null,
         IReadOnlyList<QueueDescriptor>? queues = null,
-        IReadOnlyDictionary<Type, string>? queueContracts = null)
+        IReadOnlyDictionary<Type, string>? queueContracts = null,
+        IReadOnlyList<DeadLetterDescriptor>? deadLetters = null)
     {
         AllServices = services;
         AllChannels = channels;
         AllQueues = queues ?? [];
+        AllDeadLetters = deadLetters ?? [];
+
+        _deadLettersByMessageType = AllDeadLetters.ToFrozenDictionary(d => d.MessageType);
 
         _services = services.ToFrozenDictionary(s => s.Name, StringComparer.OrdinalIgnoreCase);
         _channels = channels.ToFrozenDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
@@ -115,6 +121,13 @@ internal sealed class ImmutableCatalog : ICatalog
 
     public string? GetChannelNameForMessageType(Type messageType)
         => _messageTypeToChannelName.GetValueOrDefault(messageType);
+
+    /// <inheritdoc/>
+    public IReadOnlyList<DeadLetterDescriptor> AllDeadLetters { get; }
+
+    /// <inheritdoc/>
+    public DeadLetterDescriptor? GetDeadLetter(Type contractType)
+        => _deadLettersByMessageType.GetValueOrDefault(contractType);
 
     public CatalogInfo ToCatalogInfo()
     {

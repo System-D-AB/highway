@@ -77,9 +77,14 @@ public class MessageProjectionTests
             [HighwayEventType.GroupRetired] = EventVisibility.Internal,
             [HighwayEventType.GroupDraining] = EventVisibility.Internal,      // 070: registry bookkeeping
             [HighwayEventType.MembershipRemoved] = EventVisibility.Internal,  // 070
+            [HighwayEventType.NodeNameShared] = EventVisibility.Internal,     // 072: the broker observing connections
             [HighwayEventType.NodeSuspect] = EventVisibility.Internal,
             [HighwayEventType.LeaseRenewed] = EventVisibility.Internal,
             [HighwayEventType.ProcessingCapExceeded] = EventVisibility.Internal,
+            // 073: dead-letter events
+            [HighwayEventType.DeadLetterResolved] = EventVisibility.Public,
+            [HighwayEventType.DeadLetterRequeueRefused] = EventVisibility.Public,
+            [HighwayEventType.DeadLetterFeedOverflow] = EventVisibility.Internal,
         };
 
         var all = Enum.GetValues<HighwayEventType>();

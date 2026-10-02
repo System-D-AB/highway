@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Text;
+using Highway.Server.Storage.Boxes;
 
 namespace Highway.Server.Internal;
 
@@ -75,5 +77,37 @@ internal static class DeadLetter
 
         reason        = data.Slice(HeaderSize, reasonLen);
         originalEntry = data.Slice(HeaderSize + reasonLen);
+    }
+
+    /// <summary>
+    /// Formats an opaque handle for a dead letter: <c>{box:x8}{seq:x16}</c> (24 hex characters).
+    /// </summary>
+    public static string FormatDeadId(uint box, ulong seq)
+        => $"{box:x8}{seq:x16}";
+
+    /// <summary>
+    /// Parses an opaque dead letter handle. Returns false when malformed or referencing a reserved system box.
+    /// </summary>
+    public static bool TryParseDeadId(ReadOnlySpan<char> text, out uint box, out ulong seq)
+    {
+        box = 0;
+        seq = 0;
+        if (text.Length != 24) return false;
+        return uint.TryParse(text[..8], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out box)
+            && ulong.TryParse(text[8..], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out seq)
+            && box >= BoxKeys.FirstWorkBox;
+    }
+
+    /// <summary>
+    /// Parses an opaque dead letter handle from ASCII bytes.
+    /// </summary>
+    public static bool TryParseDeadId(ReadOnlySpan<byte> raw, out uint box, out ulong seq)
+    {
+        box = 0;
+        seq = 0;
+        if (raw.Length != 24) return false;
+        Span<char> chars = stackalloc char[24];
+        for (var i = 0; i < 24; i++) chars[i] = (char)raw[i];
+        return TryParseDeadId(chars, out box, out seq);
     }
 }

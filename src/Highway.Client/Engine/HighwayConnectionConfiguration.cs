@@ -37,8 +37,10 @@ public static class HighwayConnectionConfiguration
 
         options.AbortOnConnectFail = true;
 
+        // 072: {node}@{instance}. '@' never occurs in a node name, so the broker splits on the last one
+        // and counts the processes behind a name; every connection this engine opens carries the same id.
         if (settings is HighwayOptions { NodeName.Length: > 0 } highwayOptions)
-            options.ClientName = Sanitise(highwayOptions.NodeName);
+            options.ClientName = Sanitise(highwayOptions.NodeName) + "@" + highwayOptions.InstanceId;
 
         if (settings is not null)
         {

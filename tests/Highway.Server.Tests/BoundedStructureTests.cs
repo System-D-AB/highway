@@ -48,6 +48,8 @@ public class BoundedStructureTests
         ("ChannelGroups", "s ch:{channel}:groups",      "EXEMPT: one entry per subscriber group; removed on retirement"),
         ("GroupMembers",  "s grp:{channel}@{group}:members", "EXEMPT: one entry per node backing the group (025); removed when a session stops declaring it (070) and deleted with the group"),
         ("NodeSubs",      "s reg:node:{node}:subs",     "EXEMPT: one entry per group a node declares; diffed by each session (070), deleted by BYE PURGE"),
+        ("FeedMembers",   "s feed:members:{target}",    "EXEMPT: one entry per node declaring the feed (073); removed when session stops declaring it or disconnects"),
+        ("NodeFeeds",     "s reg:node:{node}:feeds",    "EXEMPT: one entry per feed a node declares (073); diffed by each session, deleted by BYE PURGE"),
         ("RegistrationNodeList", "s reg:nodes",         "EXEMPT: one entry per registered node; pruned on departure (006)"),
         ("RegistrationService",  "s reg:svc:{service}", "EXEMPT: one entry per node hosting the service"),
         ("RegistrationNode",     "k reg:node:{node}",   "EXEMPT: one per node; expired by heartbeat timeout (006)"),
@@ -67,6 +69,7 @@ public class BoundedStructureTests
         ("Queue",         "q:{queue}:q",                "NOT STORED: as above, for a queue's box"),
         ("QueueDoorbell", "hw:door:q:{queue}",          "NOT STORED: a pub/sub doorbell channel, never persisted"),
         ("ServiceDoorbell","hw:door:svc:{service}",     "NOT STORED: as above"),
+        ("DeadLetterDoorbell","hw:door:dead:{target}",  "NOT STORED: a dead letter feed doorbell channel, never persisted"),
         ("ReplyDoorbell", "hw:door:rep",                "NOT STORED: as above"),
     ];
 

@@ -64,16 +64,30 @@ internal sealed class DefaultTypeScanner : ITypeScanner
         .ToList();
 
     private static ScanResult Build(
-        List<Type> contractTypes, List<Type> handlerTypes, IReadOnlyList<SkippedHandlerAssembly> skipped) => new()
+        List<Type> contractTypes, List<Type> handlerTypes, IReadOnlyList<SkippedHandlerAssembly> skipped)
     {
-        Services = DiscoverServices(handlerTypes),
-        Channels = DiscoverChannels(handlerTypes),
-        RequestContracts = DiscoverRequestContracts(contractTypes),
-        MessageContracts = DiscoverMessageContracts(contractTypes),
-        Queues = DiscoverQueues(handlerTypes),
-        QueueContracts = DiscoverQueueContracts(contractTypes),
-        SkippedHandlerAssemblies = skipped,
-    };
+        var services = DiscoverServices(handlerTypes);
+        var channels = DiscoverChannels(handlerTypes);
+        var requestContracts = DiscoverRequestContracts(contractTypes);
+        var messageContracts = DiscoverMessageContracts(contractTypes);
+        var queues = DiscoverQueues(handlerTypes);
+        var queueContracts = DiscoverQueueContracts(contractTypes);
+        var deadLetters = DiscoverDeadLetters(
+            handlerTypes, queueContracts, requestContracts, messageContracts,
+            queues, services, channels);
+
+        return new()
+        {
+            Services = services,
+            Channels = channels,
+            RequestContracts = requestContracts,
+            MessageContracts = messageContracts,
+            Queues = queues,
+            QueueContracts = queueContracts,
+            DeadLetters = deadLetters,
+            SkippedHandlerAssemblies = skipped,
+        };
+    }
 
     /// <summary>
     /// Structural handler detection for the skip report. Deliberately NOT the full discovery
@@ -83,7 +97,8 @@ internal sealed class DefaultTypeScanner : ITypeScanner
     internal static bool LooksLikeHandler(Type type)
         => type.GetInterfaces().Any(i => i.IsGenericType
                && (i.GetGenericTypeDefinition() == typeof(IProcess<>)
-                || i.GetGenericTypeDefinition() == typeof(ISubscribe<>)))
+                || i.GetGenericTypeDefinition() == typeof(ISubscribe<>)
+                || i.GetGenericTypeDefinition() == typeof(IDeadLetter<>)))
            || FindGenericBaseType(type, typeof(AsyncService<,>)) is not null;
 
     private static IReadOnlyList<SkippedHandlerAssembly> DiscoverSkipped(List<Assembly> excluded)
@@ -158,6 +173,10 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                 if (byMessageType.TryGetValue(messageType, out var existing))
                     throw new DuplicateQueueProcessorException(messageType, existing.ProcessorType, type);
 
+                var retry = messageType.GetCustomAttribute<RetryAttribute>();
+                if (retry is not null)
+                    RetryPolicy.Validate(retry, messageType);
+
                 byMessageType[messageType] = new QueueDescriptor
                 {
                     Name = attribute.Name,
@@ -165,6 +184,7 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                     ProcessorType = type,
                     Lifetime = type.GetCustomAttribute<ServiceLifetimeAttribute>()?.Lifetime
                                ?? HighwayServiceLifetime.Scoped,
+                    Retry = retry,
                 };
             }
         }
@@ -271,6 +291,11 @@ internal sealed class DefaultTypeScanner : ITypeScanner
             var isInternal = type.FullName?.Contains("Highway.Internal") == true
                           || type.FullName?.Contains("Highway.Private") == true;
 
+            var retry = requestType.GetCustomAttribute<RetryAttribute>()
+                     ?? type.GetCustomAttribute<RetryAttribute>();
+            if (retry is not null)
+                RetryPolicy.Validate(retry, requestType);
+
             results[serviceAttr.Name] = new ServiceDescriptor
             {
                 Name = serviceAttr.Name,
@@ -278,7 +303,8 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                 RequestType = requestType,
                 ResponseType = responseType,
                 Lifetime = lifetime,
-                IsInternal = isInternal
+                IsInternal = isInternal,
+                Retry = retry,
             };
         }
 
@@ -288,7 +314,7 @@ internal sealed class DefaultTypeScanner : ITypeScanner
     private static IReadOnlyList<ChannelDescriptor> DiscoverChannels(List<Type> allTypes)
     {
         var subscribeInterface = typeof(ISubscribe<>);
-        var channelMap = new Dictionary<string, (Type MessageType, List<SubscriberDescriptor> Subscribers, bool IsInternal)>(StringComparer.OrdinalIgnoreCase);
+        var channelMap = new Dictionary<string, (Type MessageType, List<SubscriberDescriptor> Subscribers, bool IsInternal, RetryAttribute? Retry)>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var type in allTypes)
         {
@@ -305,6 +331,10 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                     throw new ChannelAttributeMissingException(messageType);
 
                 RejectReservedCharacter("Channel", channelAttr.Name);
+
+                var retry = messageType.GetCustomAttribute<RetryAttribute>();
+                if (retry is not null)
+                    RetryPolicy.Validate(retry, messageType);
 
                 // Read lifetime
                 var lifetimeAttr = type.GetCustomAttribute<ServiceLifetimeAttribute>();
@@ -329,7 +359,7 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                     var isInternal = type.FullName?.Contains("Highway.Internal") == true
                                   || type.FullName?.Contains("Highway.Private") == true;
 
-                    channelMap[channelAttr.Name] = (messageType, new List<SubscriberDescriptor> { subscriber }, isInternal);
+                    channelMap[channelAttr.Name] = (messageType, new List<SubscriberDescriptor> { subscriber }, isInternal, retry);
                 }
             }
         }
@@ -339,7 +369,8 @@ internal sealed class DefaultTypeScanner : ITypeScanner
             Name = kvp.Key,
             MessageType = kvp.Value.MessageType,
             Subscribers = kvp.Value.Subscribers,
-            IsInternal = kvp.Value.IsInternal
+            IsInternal = kvp.Value.IsInternal,
+            Retry = kvp.Value.Retry,
         }).ToList();
     }
 
@@ -369,5 +400,86 @@ internal sealed class DefaultTypeScanner : ITypeScanner
     {
         if (name.Contains('@'))
             throw new ReservedCharacterException(attributeName, name, '@');
+    }
+
+    /// <summary>
+    /// Discovers <see cref="IDeadLetter{T}"/> implementations. Validates at most one per contract T
+    /// and that T is known to this application (feature 073).
+    /// </summary>
+    private static IReadOnlyList<DeadLetterDescriptor> DiscoverDeadLetters(
+        List<Type> handlerTypes,
+        IReadOnlyDictionary<Type, string> queueContracts,
+        IReadOnlyDictionary<Type, string> requestContracts,
+        IReadOnlyDictionary<Type, string> messageContracts,
+        IReadOnlyList<QueueDescriptor> queues,
+        IReadOnlyList<ServiceDescriptor> services,
+        IReadOnlyList<ChannelDescriptor> channels)
+    {
+        var deadLetterInterface = typeof(IDeadLetter<>);
+        var byMessageType = new Dictionary<Type, DeadLetterDescriptor>();
+
+        foreach (var type in handlerTypes)
+        {
+            foreach (var impl in type.GetInterfaces()
+                .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == deadLetterInterface))
+            {
+                var messageType = impl.GetGenericArguments()[0];
+
+                DeadLetterTargetKind targetKind;
+                string targetName;
+
+                if (queueContracts.TryGetValue(messageType, out var qName))
+                {
+                    targetKind = DeadLetterTargetKind.Queue;
+                    targetName = qName;
+                }
+                else if (requestContracts.TryGetValue(messageType, out var sName))
+                {
+                    targetKind = DeadLetterTargetKind.Service;
+                    targetName = sName;
+                }
+                else if (messageContracts.TryGetValue(messageType, out var cName))
+                {
+                    targetKind = DeadLetterTargetKind.Group;
+                    targetName = cName;
+                }
+                else if (queues.FirstOrDefault(q => q.MessageType == messageType)?.Name is { } hostedQueue)
+                {
+                    targetKind = DeadLetterTargetKind.Queue;
+                    targetName = hostedQueue;
+                }
+                else if (services.FirstOrDefault(s => s.RequestType == messageType)?.Name is { } hostedService)
+                {
+                    targetKind = DeadLetterTargetKind.Service;
+                    targetName = hostedService;
+                }
+                else if (channels.FirstOrDefault(c => c.MessageType == messageType)?.Name is { } hostedChannel)
+                {
+                    targetKind = DeadLetterTargetKind.Group;
+                    targetName = hostedChannel;
+                }
+                else
+                {
+                    throw new UnknownDeadLetterContractException(messageType, type);
+                }
+
+                if (byMessageType.TryGetValue(messageType, out var existing))
+                    throw new DuplicateDeadLetterHandlerException(messageType, existing.HandlerType, type);
+
+                var lifetimeAttr = type.GetCustomAttribute<ServiceLifetimeAttribute>();
+                var lifetime = lifetimeAttr?.Lifetime ?? HighwayServiceLifetime.Scoped;
+
+                byMessageType[messageType] = new DeadLetterDescriptor
+                {
+                    TargetKind = targetKind,
+                    TargetName = targetName,
+                    MessageType = messageType,
+                    HandlerType = type,
+                    Lifetime = lifetime,
+                };
+            }
+        }
+
+        return [.. byMessageType.Values];
     }
 }

@@ -86,6 +86,12 @@ public static class ServiceCollectionExtensions
                 queue.ProcessorType, queue.MessageType);
         }
 
+        foreach (var deadLetter in scanResult.DeadLetters)
+        {
+            deadLetter.InvokeDelegate = delegateCompiler.CompileDeadLetterDelegate(
+                deadLetter.HandlerType, deadLetter.MessageType);
+        }
+
         // 4. Build immutable catalog
         var catalog = new ImmutableCatalog(
             scanResult.Services,
@@ -93,7 +99,8 @@ public static class ServiceCollectionExtensions
             scanResult.RequestContracts,
             scanResult.MessageContracts,
             scanResult.Queues,
-            scanResult.QueueContracts);
+            scanResult.QueueContracts,
+            scanResult.DeadLetters);
 
         // 5. Register discovered types in DI
         CatalogDiRegistrar.Register(services, scanResult);
@@ -117,6 +124,7 @@ public static class ServiceCollectionExtensions
             Microsoft.Extensions.DependencyInjection.ServiceDescriptor.Singleton<IHostedService, HighwayEngineHostedService>());
 
         services.TryAddSingleton<IHighwayClient, HighwayClient>();
+        services.TryAddSingleton<IHighwayDeadLetters, HighwayDeadLetters>();
 
         // 8. Register the connection source — exactly one multiplexer per process, connected
         // lazily on first use with zero eager I/O during AddHighway. TryAdd defers to an

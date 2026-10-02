@@ -54,6 +54,8 @@ queues: a decommissioned subscriber's *messages* can be destroyed; an in-flight 
 `CallTimeout`, so a stuck request keeps being retried long after its caller gave up; the dead letter
 is then the only trace. This is why RPC backoff is off by default.
 
+**Dead letters and RPC.** When an RPC request exhausts its delivery attempts, it moves to the service's dead-letter space (`SVC <service>`) carrying its full diagnostic failure block. Dead-letter handlers (`IDeadLetter<T>`) can monitor RPC dead letters and resolve them with `Keep` (leaving them for operator analysis) or `Discard` (purging them). Attempting to requeue an RPC dead letter via handler resolution (`HW.DLQ RESOLVE ... REQUEUE`) is refused: the calling client has already timed out, its reply slot is gone, and no caller is waiting for the result.
+
 ## Wire surface
 
 `HW.CALL`, `HW.CLAIM SVC`, `HW.REPLY`, `HW.RESULT`, `HW.ACK`, and the discovery/registry commands

@@ -26,10 +26,11 @@ internal static class Catalog
     public static uint? Find(IHighwayStore store, IStoreBatch batch, BoxRuntime rt, BoxKeys.Kind kind, string name)
     {
         if (rt.TryGetId(kind, name, out var cached)) return cached;
+        var generation = rt.Generation;   // before the read: a retirement after it must win (072 review F2)
         var raw = store.Read(batch, BoxKeys.NameIndexKey(kind, name));
         if (raw is not { Length: 4 }) return null;
         var box = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(raw);
-        rt.Remember(kind, name, box);
+        rt.RememberIf(kind, name, box, generation);
         return box;
     }
 
@@ -44,6 +45,7 @@ internal static class Catalog
         using var _ = locks.Lock(LockName);
         using var batch = store.NewBatch();
         if (Find(store, batch, rt, kind, name) is { } raced) return raced;   // created while we waited
+        var generation = rt.Generation;
 
         var allocatorKey = BoxKeys.SystemKey(BoxKeys.Allocator);
         var next = (uint)Math.Max(BoxKeys.ReadI64(store.Read(batch, allocatorKey)), BoxKeys.FirstWorkBox);
@@ -54,7 +56,7 @@ internal static class Catalog
         BumpVersion(store, batch);
         batch.Commit();
 
-        rt.Remember(kind, name, next);
+        rt.RememberIf(kind, name, next, generation);
         return next;
     }
 

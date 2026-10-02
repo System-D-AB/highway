@@ -142,7 +142,7 @@ public class DlqCommandTests : IDisposable
 
         var badAction = async () => await db.ExecuteAsync("HW.DLQ", "DESTROY", "SVC", Service);
         (await badAction.Should().ThrowAsync<RedisServerException>())
-            .WithMessage("*HW_INVALID_ARG*expected PEEK, REQUEUE or PURGE*");
+            .WithMessage("*HW_INVALID_ARG*expected PEEK, REQUEUE, PURGE, RESOLVE or COUNT*");
 
         var badTarget = async () => await db.ExecuteAsync("HW.DLQ", "PEEK", "QUEUE", Service);
         (await badTarget.Should().ThrowAsync<RedisServerException>())

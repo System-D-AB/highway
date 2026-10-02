@@ -29,16 +29,33 @@ internal sealed class HwClaimCommand : HighwayCommand
     private string _name = null!;
     private string _node = null!;
     private int _count = 1;
+    private bool _isDead;
 
     private readonly List<WorkBox.DeadLettered> _deadLettered = [];
     private readonly List<WorkBox.JobFire> _jobs = [];
     private readonly List<string> _claimedIds = [];
+    private int _notificationsEnqueued;
+    private int _feedOverflowCount;
+    private string? _feedTarget;
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
     {
         var idx = 0;
-        if (!BoxCommandSupport.TryParseTarget(input.Next(ref idx), out _kind))
-            return Fail(HighwayErrors.InvalidArg, "target must be SVC or Q");
+        var first = input.Next(ref idx);
+        if (first.Length == 0) return Fail(HighwayErrors.InvalidArg, "HW.CLAIM requires a target: SVC <service> or Q <queue>, or DEAD SVC|Q <name>");
+
+        if (Encoding.ASCII.GetString(first).Equals("DEAD", StringComparison.OrdinalIgnoreCase))
+        {
+            _isDead = true;
+            if (!BoxCommandSupport.TryParseTarget(input.Next(ref idx), out _kind))
+                return Fail(HighwayErrors.InvalidArg, "target must be SVC or Q");
+        }
+        else
+        {
+            if (!BoxCommandSupport.TryParseTarget(first, out _kind))
+                return Fail(HighwayErrors.InvalidArg, "target must be SVC or Q");
+        }
+
         var nameOk = _kind == BoxKeys.Kind.Queue
             ? TryReadDerivedIdentifier(input, ref idx, "queue", ctx.Options.MaxIdentifierBytes, out _name)
             : TryReadIdentifier(input, ref idx, "service", ctx.Options.MaxIdentifierBytes, out _name);
@@ -59,26 +76,140 @@ internal sealed class HwClaimCommand : HighwayCommand
 
     protected override void Run(CommandContext ctx, RespWriter writer)
     {
-        using var _lock = BoxCommandSupport.LockLive(ctx, _kind, _name, create: true, out var resolved);
-        var box = resolved!.Value;
-        using var wb = BoxCommandSupport.Open(ctx, box, _kind);
+        if (_isDead)
+        {
+            var targetString = BoxCommandSupport.FeedTargetName(_kind, _name);
+            var feedLock = BoxCommandSupport.LockLive(ctx, BoxKeys.Kind.DeadFeed, targetString, create: false, out var resolved);
+            if (resolved is not { } feedBox)
+            {
+                feedLock.Dispose();
+                writer.EmptyArray();
+                return;
+            }
 
+            using (feedLock)
+            using (var wbFeed = BoxCommandSupport.Open(ctx, feedBox, BoxKeys.Kind.DeadFeed))
+            {
+                if (ctx.Options.Lease > TimeSpan.Zero)
+                {
+                    wbFeed.SweepLeases(
+                        ctx.NowTicks - ctx.Options.Lease.Ticks, ctx.NowTicks,
+                        ctx.Options.MaxDeliveryAttempts, ctx.Options.MaxDeadLetterEntries);
+                }
+
+                var claimed = wbFeed.Claim(_node, ctx.NowTicks, _count, targetString);
+                wbFeed.Commit();
+
+                if (claimed.Count == 0)
+                {
+                    writer.EmptyArray();
+                    return;
+                }
+
+                var rows = new List<IReadOnlyList<byte[]>>(claimed.Count);
+                foreach (var c in claimed)
+                {
+                    rows.Add([Encoding.ASCII.GetBytes(BoxCommandSupport.Token(feedBox, c.Token)), c.Id, c.Payload]);
+                    _claimedIds.Add(Encoding.UTF8.GetString(c.Id));
+                }
+                writer.ArrayOfArrays(rows);
+            }
+            return;
+        }
+
+        for (var attempt = 1; ; attempt++)
+        {
+            var targetLock = BoxCommandSupport.LockLive(ctx, _kind, _name, create: true, out var resolved);
+            var box = resolved!.Value;
+            var wb = BoxCommandSupport.Open(ctx, box, _kind);
+
+            if (_kind == BoxKeys.Kind.DeadFeed || wb.FeedOn == 0)
+            {
+                using (targetLock)
+                using (wb)
+                {
+                    ExecuteClaim(ctx, writer, box, wb, wbFeed: null, targetString: null);
+                    return;
+                }
+            }
+
+            // wb.FeedOn > 0: need both target and feed locks in canonical sorted order.
+            wb.Dispose();
+            targetLock.Dispose();
+
+            var targetString = BoxCommandSupport.FeedTargetName(_kind, _name);
+            var feedBox = BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.DeadFeed, targetString);
+
+            var locks = new[] { WorkBox.LockName(box), WorkBox.LockName(feedBox) };
+            using (ctx.Locks.LockMany(locks))
+            {
+                if (BoxCommandSupport.CanRetire(_kind, _name) && BoxCommandSupport.LiveBox(ctx, _kind, _name) != box)
+                {
+                    ctx.Boxes.Forget(_kind, _name, box);
+                    continue;
+                }
+                if (BoxCommandSupport.LiveBox(ctx, BoxKeys.Kind.DeadFeed, targetString) != feedBox)
+                {
+                    ctx.Boxes.Forget(BoxKeys.Kind.DeadFeed, targetString, feedBox);
+                    continue;
+                }
+
+                using var wbTarget = BoxCommandSupport.Open(ctx, box, _kind);
+                if (wbTarget.FeedOn > 0)
+                {
+                    using var wbFeed = BoxCommandSupport.Open(ctx, feedBox, BoxKeys.Kind.DeadFeed, sharedBatch: wbTarget.Batch);
+                    ExecuteClaim(ctx, writer, box, wbTarget, wbFeed, targetString);
+                }
+                else
+                {
+                    ExecuteClaim(ctx, writer, box, wbTarget, wbFeed: null, targetString: null);
+                }
+                return;
+            }
+        }
+    }
+
+    private void ExecuteClaim(
+        CommandContext ctx, RespWriter writer, uint box, WorkBox wb, WorkBox? wbFeed, string? targetString)
+    {
         if (_kind == BoxKeys.Kind.Queue)
         {
             _jobs.AddRange(wb.FireDueJobs(ctx.NowTicks, ctx.Options.MaxQueueBytes));
-            wb.PromoteDue(ctx.NowTicks);
         }
+        wb.PromoteDue(ctx.NowTicks);
 
         if (ctx.Options.Lease > TimeSpan.Zero)
-            _deadLettered.AddRange(wb.SweepLeases(
+        {
+            var dead = wb.SweepLeases(
                 ctx.NowTicks - ctx.Options.Lease.Ticks, ctx.NowTicks,
-                ctx.Options.MaxDeliveryAttempts, ctx.Options.MaxDeadLetterEntries));
+                ctx.Options.MaxDeliveryAttempts, ctx.Options.MaxDeadLetterEntries);
+            _deadLettered.AddRange(dead);
+
+            if (wbFeed is not null && dead.Count > 0)
+            {
+                _feedTarget = targetString;
+                foreach (var d in dead)
+                {
+                    var deadId = DeadLetter.FormatDeadId(box, d.Seq);
+                    var feedEntry = Envelope.EncodeRpcEntry(Encoding.UTF8.GetBytes(deadId), d.Record, 0);
+                    wbFeed.Enqueue(feedEntry);
+                    _notificationsEnqueued++;
+                }
+
+                if (ctx.Options.MaxDeadLetterEntries > 0)
+                {
+                    var dropped = wbFeed.TrimReady(ctx.Options.MaxDeadLetterEntries);
+                    _feedOverflowCount += dropped;
+                }
+            }
+        }
 
         if (_kind == BoxKeys.Kind.Service)
             RecoverDeadNodes(ctx, wb);
 
         var claimed = wb.Claim(_node, ctx.NowTicks, _count, BoxCommandSupport.StorageName(_kind, _name));
         wb.Commit();
+        wbFeed?.AfterCommit();
 
         if (claimed.Count == 0)
         {
@@ -118,6 +249,7 @@ internal sealed class HwClaimCommand : HighwayCommand
 
     protected override void AfterCommit(CommandContext ctx)
     {
+        if (_isDead) return;
         var service = _kind == BoxKeys.Kind.Service;
         foreach (var d in _deadLettered)
             ctx.Recorder.Record(
@@ -141,6 +273,15 @@ internal sealed class HwClaimCommand : HighwayCommand
             ctx.Recorder.Record(service ? HighwayEventType.RpcClaimed : HighwayEventType.QueueClaimed,
                 _name, nodeId: _node, requestId: id);
             if (!service) ctx.Metrics?.RecordDelivered();
+        }
+
+        if (_feedTarget is not null)
+        {
+            if (_notificationsEnqueued > 0)
+                ctx.Doorbell.Ring(HighwayKeys.DeadLetterDoorbell(_feedTarget), Encoding.UTF8.GetBytes(_feedTarget));
+            if (_feedOverflowCount > 0)
+                ctx.Recorder.Record(HighwayEventType.DeadLetterFeedOverflow, _feedTarget, count: _feedOverflowCount,
+                    errorCode: $"dropped {_feedOverflowCount} oldest notification(s) due to bound {ctx.Options.MaxDeadLetterEntries}");
         }
     }
 }

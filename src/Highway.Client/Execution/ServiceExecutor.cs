@@ -220,4 +220,19 @@ public sealed class ServiceExecutor
 
         return new ChannelResponse { TotalSubscribers = total, SuccessCalls = success };
     }
+
+    /// <summary>
+    /// Runs a dead-letter handler (feature 073).
+    /// </summary>
+    public async Task<DeadLetterAction> ExecuteDeadLetterAsync(
+        DeadLetterDescriptor descriptor, object deadLetterInstance, CancellationToken ct = default)
+    {
+        if (descriptor.InvokeDelegate is null)
+            throw new InvalidOperationException($"Dead-letter handler for '{descriptor.MessageType.FullName}' has no compiled delegate.");
+
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var handler = scope.ServiceProvider.GetRequiredService(descriptor.HandlerType);
+
+        return await descriptor.InvokeDelegate(handler, deadLetterInstance, ct).ConfigureAwait(false);
+    }
 }

@@ -60,6 +60,10 @@ public static class EventVisibilityMap
         HighwayEventType.JobFired => EventVisibility.Public,
         HighwayEventType.JobFireRefused => EventVisibility.Public,
 
+        // 073: dead-letter resolution and refusals are developer/operator facts
+        HighwayEventType.DeadLetterResolved => EventVisibility.Public,
+        HighwayEventType.DeadLetterRequeueRefused => EventVisibility.Public,
+
         // Everything else is the broker moving work around: claims, acknowledgements,
         // topology, lease renewals, retirement. Default rather than enumerated, because a
         // new event type is far more likely to be machinery than a developer-facing fact —

@@ -157,11 +157,32 @@ internal sealed class FlightRecorder : IDisposable
                 Interlocked.Add(ref _messagesDiscarded, discarded);
         }
 
-        // 070: changes to who receives a channel, and destruction, reach the broker log whatever the
-        // recorder's settings — "loud" must not depend on a diagnostics switch.
-        if (Logger is { } log && eventType is HighwayEventType.GroupRetired or HighwayEventType.GroupDraining
-                or HighwayEventType.MembershipRemoved)
-            log.LogWarning("[registry] {EventType} {Name} group={Group}: {Detail}", eventType, name, nodeId, errorCode);
+        // C7.1: a broken log sink must not fail the command that recorded — these run after its commit.
+        try
+        {
+            // 070: changes to who receives a channel, and destruction, reach the broker log whatever the
+            // recorder's settings — "loud" must not depend on a diagnostics switch.
+            if (Logger is { } log && eventType is HighwayEventType.GroupRetired or HighwayEventType.GroupDraining
+                    or HighwayEventType.MembershipRemoved)
+                log.LogWarning("[registry] {EventType} {Name} group={Group}: {Detail}", eventType, name, nodeId, errorCode);
+
+            // 072: processes sharing a node name — loud while it holds, one quiet line when it ends.
+            if (Logger is { } idLog && eventType == HighwayEventType.NodeNameShared)
+            {
+                if (count > 1)
+                    idLog.LogWarning(
+                        "[identity] Node '{Node}' is used by {Count} live processes: {Instances}. A node name must be one " +
+                        "process - shared names share one heartbeat (a dead copy is not detected) and one set of claims " +
+                        "(a copy that stops returns its siblings' work). Give each process its own NodeName.",
+                        name, count, errorCode);
+                else
+                    idLog.LogInformation("[identity] Node '{Node}' is used by one process again: {Instances}", name, errorCode);
+            }
+        }
+        catch (Exception)
+        {
+            Interlocked.Increment(ref _failures);
+        }
 
         if (!_options.RecorderEnabled)
             return;

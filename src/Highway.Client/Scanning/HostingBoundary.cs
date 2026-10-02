@@ -49,6 +49,7 @@ internal static class HostingBoundary
             .. result.Queues.Select(q => (q.ProcessorType.Assembly, q.ProcessorType)),
             .. result.Channels.SelectMany(c => c.Subscribers)
                 .Select(s => (s.ImplementationType.Assembly, s.ImplementationType)),
+            .. result.DeadLetters.Select(d => (d.HandlerType.Assembly, d.HandlerType)),
         ];
 
         return handlers

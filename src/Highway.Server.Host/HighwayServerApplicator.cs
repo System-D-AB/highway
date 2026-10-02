@@ -99,6 +99,7 @@ internal static class HighwayServerApplicator
         o.ReceiveDefaultCount = s.ReceiveDefaultCount;
         o.ReceiveMaxCount = s.ReceiveMaxCount;
         o.WaitForCommit = s.WaitForCommit;
+        o.DeadLetterAgeWarning = s.DeadLetterAgeWarning;
 
         o.Replication.StartAsReplica = s.Replication.StartAsReplica;
         o.Replication.ReplicaId = s.Replication.ReplicaId;

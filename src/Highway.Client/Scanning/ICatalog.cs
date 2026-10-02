@@ -40,4 +40,10 @@ public interface ICatalog
 
     /// <summary>The processor descriptor for a queue this node handles, or null.</summary>
     QueueDescriptor? GetQueue(string name);
+
+    /// <summary>Dead-letter handlers this node processes (feature 073).</summary>
+    IReadOnlyList<DeadLetterDescriptor> AllDeadLetters { get; }
+
+    /// <summary>Finds a dead-letter descriptor for a contract type, or null.</summary>
+    DeadLetterDescriptor? GetDeadLetter(Type contractType);
 }

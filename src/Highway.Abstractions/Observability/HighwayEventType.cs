@@ -195,4 +195,21 @@ public enum HighwayEventType
 
     /// <summary>A node stopped declaring a subscription whose group other members still back (070).</summary>
     MembershipRemoved = 28,
+
+    /// <summary>
+    /// The number of live processes using one node name crossed one (072): <c>Count</c> &gt; 1 when a second
+    /// process connected under the name, 1 when it is back to one. <c>Name</c> and <c>NodeId</c> are the
+    /// node, <c>ErrorCode</c> lists the instances (<c>id@address (host pid hosting)</c>). A node name must be
+    /// one process — shared names share one heartbeat and one set of claims.
+    /// </summary>
+    NodeNameShared = 29,
+
+    /// <summary>A dead letter was resolved by a handler or operator (073).</summary>
+    DeadLetterResolved = 30,
+
+    /// <summary>A dead-letter requeue was refused by MaxRequeues cap or because target is an RPC service (073).</summary>
+    DeadLetterRequeueRefused = 31,
+
+    /// <summary>A dead-letter feed reached its MaxDeadLetterEntries bound and dropped its oldest notification (073).</summary>
+    DeadLetterFeedOverflow = 32,
 }

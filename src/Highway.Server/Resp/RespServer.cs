@@ -29,10 +29,11 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
 {
     private readonly WebApplication _app;
     private readonly SubscriptionRegistry _registry;
-    private readonly ObservedAddressRegistry _observed = new();
+    private readonly InstanceRegistry _observed;
     private readonly Storage.Cache.IHighwayCacheStore? _cache;
     private readonly Storage.Cache.CacheSweeper? _cacheSweeper;
     private readonly HighwayMetrics _metrics;
+    private readonly DeadLetterSweeper? _deadLetterSweeper;
 
     public CommandDispatcher Dispatcher { get; }
     public IConnectionAuthenticator Authenticator { get; }
@@ -43,6 +44,9 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
 
     /// <summary>The flight recorder — exposed for HW.REPLAY-style test hooks.</summary>
     public FlightRecorder Recorder { get; }
+
+    /// <summary>Aged dead letter monitor (073).</summary>
+    internal DeadLetterSweeper? DeadLetterSweeper => _deadLetterSweeper;
 
     /// <summary>The loopback port Kestrel bound; valid after <see cref="StartAsync"/>.</summary>
     public int Port { get; private set; }
@@ -60,6 +64,7 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
         Authenticator = authenticator;
         MaxFrameBytes = Math.Max(options.MaxPayloadBytes, options.MaxCatalogBytes) + 4096; // payload + framing headroom
         Recorder = new FlightRecorder(options.Observability);
+        _observed = new InstanceRegistry(Recorder);   // 072: shared-name transitions reach the recorder and log
         _registry = new SubscriptionRegistry();
 
         var locks = new StripedLock();
@@ -86,9 +91,12 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
             replication,
             () => brokerState.QueuesAsync().GetAwaiter().GetResult().Value ?? [],
             Recorder,
-            storageProperty: store is RocksDbStore durable ? durable.SumProperty : null);   // 061 T8
+            storageProperty: store is RocksDbStore durable ? durable.SumProperty : null,
+            sampleFeeds: () => brokerState.DeadFeeds());
 
-        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication, _cache, _metrics);
+        _deadLetterSweeper = new DeadLetterSweeper(store, options, () => Recorder.Logger);
+
+        Dispatcher = new CommandDispatcher(store, locks, _registry, Recorder, options, replication, _cache, _metrics, _observed);
 
         // 044 R6: wipe the cache on every epoch change (mastership moved → cached data may be stale).
         if (replication is not null && _cache is not null)
@@ -204,12 +212,13 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
     public IDoorbell Doorbell => _registry;
 
     /// <summary>The node-name → observed-peer-address map (048), for the dashboard "Seen from" join.</summary>
-    public ObservedAddressRegistry ObservedAddresses => _observed;
+    public InstanceRegistry Instances => _observed;
 
     public async ValueTask DisposeAsync()
     {
         try { await _app.StopAsync(TimeSpan.FromSeconds(5)); } catch { /* best effort */ }
         await _app.DisposeAsync();
+        _deadLetterSweeper?.Dispose();
         _cacheSweeper?.Dispose();
         _cache?.Dispose();
         _metrics.Dispose();

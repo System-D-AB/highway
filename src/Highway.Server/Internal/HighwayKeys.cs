@@ -16,4 +16,7 @@ internal static class HighwayKeys
 
     /// <summary>Rung by HW.REPLY after writing the reply slot.  hw:door:rep</summary>
     public const string ReplyDoorbell = "hw:door:rep";
+
+    /// <summary>Rung when a notification is enqueued to a dead-letter feed (073).  hw:door:dead:{target}</summary>
+    public static string DeadLetterDoorbell(string target) => $"hw:door:dead:{target}";
 }

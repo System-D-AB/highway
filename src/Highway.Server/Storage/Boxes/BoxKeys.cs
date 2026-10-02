@@ -40,7 +40,7 @@ internal static class BoxKeys
     public const byte NodeIndex = 0x0A;      // [node][seq:8] -> empty
 
     /// <summary>Box kinds as stored in the name index. Queues include group queues (<c>{channel}@{group}</c>).</summary>
-    public enum Kind : byte { Service = 1, Queue = 2 }
+    public enum Kind : byte { Service = 1, Queue = 2, DeadFeed = 3 }
 
     // ---- builders ----
 

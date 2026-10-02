@@ -55,6 +55,18 @@ builder.Services.AddHighway(o =>
 Assembly scanning discovers your services, processors and subscribers at startup.
 Nothing is registered by hand.
 
+### Node names
+
+`NodeName` is the identity of **one process**: the broker tracks its liveness and the work it
+holds by that name. If you don't set it, Highway uses `{app}-{machine}`, plus `-{service}` when the
+process runs as a Windows service or in an IIS application pool. Three Windows services running the
+same binaries on one machine therefore show up as three nodes, with no configuration.
+
+Set it yourself when that default can't tell your copies apart — a console app started twice, or
+containers sharing a host name. Two live processes on one name share one heartbeat (a crashed copy
+is not noticed) and one set of claims (a copy that stops hands back its siblings' work); the broker
+logs a warning and the dashboard flags the node when that happens.
+
 ---
 
 ## RPC
@@ -289,8 +301,10 @@ await client.PublishAsync(new OrderPlaced
 
 ### Behavior
 
-- **Fan-out.** Every subscription group gets its own copy. By default each node
-  is its own group.
+- **Fan-out.** Every subscription group gets its own copy. By default the group is
+  `{app}-{machine}` — every application on every machine gets a copy, and copies of
+  one application on one machine share it. If you set `NodeName` yourself, the
+  default group is that name.
 - **Replicas.** To scale a subscriber horizontally *without* multiplying
   deliveries, give the replicas one `SubscriptionGroup`:
   ```csharp
@@ -414,6 +428,97 @@ services.AddHighway(o =>
     o.Server   = server.ConnectionString;
 });
 ```
+
+---
+
+## When a Message Dies (Dead Letters & Retries)
+
+When transient network partitions, downstream API failures, or poison payloads prevent a message from processing successfully, Highway provides retry scheduling, failure diagnostics, dead-letter feeds, and programmatic remediation.
+
+### Declarative Retry Policies (`[Retry]`)
+
+Annotate contracts with `[Retry]` to specify the maximum delivery attempts, backoff schedule, and requeue limits:
+
+```csharp
+[Queue("invoices.generate")]
+[Retry(MaxAttempts = 3, Backoff = "exp:500ms..30s:jitter", MaxRequeues = 5)]
+public sealed class GenerateInvoice : ISend
+{
+    public string InvoiceId { get; set; } = "";
+}
+```
+
+- **Backoff schedule formats:**
+  - `none`: retry immediately upon lease recovery.
+  - `fixed:<duration>` (e.g. `fixed:500ms`, `fixed:5s`).
+  - `exp:<min>..<max>[:jitter]` (e.g. `exp:100ms..10s`, `exp:500ms..30s:jitter`).
+- **Deterministic jitter:** Jitter uses deterministic integer FNV-1a hashing on `(messageId, attempt)`, ensuring identical rescheduling across WAL replays and replica failovers.
+- **Delayed space:** During lease recovery, failed entries are rescheduled to the target's delayed space (`now + backoff`) without blocking other work.
+
+### Dead-Letter Feeds (`IDeadLetter<T>`)
+
+When delivery attempts are exhausted, the message is atomically moved to the dead-letter list with full failure diagnostics (exception type, stack trace, original attempt count, and requeue lineage) and a notification is published to the target's dead-letter feed.
+
+To remediate dead letters programmatically, implement `IDeadLetter<T>`:
+
+```csharp
+public sealed class InvoiceDeadLetterHandler : IDeadLetter<GenerateInvoice>
+{
+    public Task<DeadLetterAction> HandleAsync(DeadLetter<GenerateInvoice> deadLetter, CancellationToken ct)
+    {
+        // Access failure diagnostics and payload
+        Console.WriteLine($"Dead letter {deadLetter.DeadLetterId} failed: {deadLetter.LastFailure?.Type}");
+
+        if (deadLetter.LastFailure?.Type == nameof(TimeoutException) && deadLetter.Requeues < 3)
+        {
+            // Requeue with an optional backoff
+            return Task.FromResult(DeadLetterAction.Requeue(TimeSpan.FromMinutes(2)));
+        }
+
+        // Keep in DLQ storage for manual operator inspection, or Discard to purge
+        return Task.FromResult(DeadLetterAction.Keep);
+    }
+}
+```
+
+- **Resolution Actions:**
+  - `DeadLetterAction.Keep`: Acknowledges the feed notification while keeping the dead letter safely stored in the DLQ for operator inspection.
+  - `DeadLetterAction.Discard`: Acknowledges the feed notification and purges the dead letter permanently from storage.
+  - `DeadLetterAction.Requeue(TimeSpan? after = null)`: Requeues the message to the live target queue (with an optional delay). If the message has reached `MaxRequeues`, the requeue is refused.
+- **Never re-fed automatically:** Highway never automatically re-feeds dead letters without explicit instructions from a handler or operator.
+- **Poison messages:** Payloads that fail JSON deserialization still dispatch to `IDeadLetter<T>` with `deadLetter.Message == null` and raw bytes preserved in `deadLetter.RawPayload`.
+- **RPC Dead Letters:** RPC services also support `IDeadLetter<T>`. Handlers can `Keep` or `Discard`, but cannot `Requeue` because the calling RPC client has already timed out.
+
+### Typed Operator API (`IHighwayDeadLetters`)
+
+For operational tools, admin portals, or custom CLI utilities, inject `IHighwayDeadLetters` via DI:
+
+```csharp
+public class OpsController
+{
+    private readonly IHighwayDeadLetters _dlq;
+
+    public OpsController(IHighwayDeadLetters dlq) => _dlq = dlq;
+
+    public async Task CheckInvoicesAsync()
+    {
+        // Non-destructive peek
+        var deadEntries = await _dlq.PeekAsync<GenerateInvoice>(count: 20);
+
+        foreach (var entry in deadEntries)
+        {
+            Console.WriteLine($"Found dead letter: {entry.DeadLetterId}, requeues: {entry.Requeues}");
+            
+            // Requeue specific entry by its deadId
+            await _dlq.RequeueAsync<GenerateInvoice>(entry.DeadLetterId, after: TimeSpan.FromSeconds(30));
+        }
+    }
+}
+```
+
+### Dashboard Management
+
+The Highway Server Dashboard includes a built-in Dead Letters panel on the entity details page. Operators can inspect unconsumed dead letters with payload previews and trigger point or batch Requeue / Purge actions protected by the dashboard API key.
 
 ---
 

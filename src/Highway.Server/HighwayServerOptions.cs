@@ -206,6 +206,12 @@ public sealed class HighwayServerOptions
     public int MaxDeadLetterEntries { get; set; } = 10_000;
 
     /// <summary>
+    /// Age after which an unconsumed dead letter on a target with no declared feed
+    /// triggers a broker warning log (feature 073). Default: 24 hours.
+    /// </summary>
+    public TimeSpan DeadLetterAgeWarning { get; set; } = TimeSpan.FromHours(24);
+
+    /// <summary>
     /// When <c>true</c>, a pub/sub message returned to its group queue after a lease
     /// expiry becomes claimable only after a delay that grows with the attempt count
     /// (feature 013). <b>Default: false.</b>

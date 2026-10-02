@@ -132,6 +132,7 @@ public sealed class ServerSection
     public int ReceiveDefaultCount { get; set; } = 10;
     public int ReceiveMaxCount { get; set; } = 500;
     public bool WaitForCommit { get; set; }
+    public TimeSpan DeadLetterAgeWarning { get; set; } = TimeSpan.FromHours(24);
     public ObservabilitySection Observability { get; set; } = new();
     public ReplicationSection Replication { get; set; } = new();
     public CacheSection Cache { get; set; } = new();

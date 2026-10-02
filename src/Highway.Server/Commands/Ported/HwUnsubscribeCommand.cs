@@ -41,9 +41,14 @@ internal sealed class HwUnsubscribeCommand : HighwayCommand
             var lockNames = BoxCommandSupport.GroupLockNames(ctx, _channel, [_group]);
             lockNames.Add(_channel);
             using var _lock = ctx.Locks.LockMany(lockNames);
-            var live = BoxCommandSupport.LiveBox(ctx, Storage.Boxes.BoxKeys.Kind.Queue, BoxCommandSupport.GroupQueue(_channel, _group));
+            var queue = BoxCommandSupport.GroupQueue(_channel, _group);
+            var live = BoxCommandSupport.LiveBox(ctx, Storage.Boxes.BoxKeys.Kind.Queue, queue);
             if (live is { } box && !lockNames.Contains(Storage.Boxes.WorkBox.LockName(box)))
             {
+                // The lock set came from a cached id that no longer names the group: drop it, or every retry
+                // recomputes the same stale set (072 review, finding 5).
+                if (ctx.Boxes.TryGetId(Storage.Boxes.BoxKeys.Kind.Queue, queue, out var stale) && stale != box)
+                    ctx.Boxes.Forget(Storage.Boxes.BoxKeys.Kind.Queue, queue, stale);
                 if (attempt >= 16)
                     throw new InvalidOperationException($"HW.UNSUBSCRIBE {_channel} {_group}: the group's box kept changing");
                 continue;

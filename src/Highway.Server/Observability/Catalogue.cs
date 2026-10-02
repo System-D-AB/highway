@@ -84,7 +84,14 @@ internal sealed record NodeDto(
     string? SeenFrom = null,
 
     /// <summary>The can-use half (024): reference-derived addressability, never "uses".</summary>
-    NodeUsesDto? Uses = null);
+    NodeUsesDto? Uses = null,
+
+    /// <summary>The live processes behind this name (072) — an observation, like <c>SeenFrom</c>.</summary>
+    IReadOnlyList<Resp.InstanceView>? Instances = null)
+{
+    /// <summary>More than one live process uses this name (072): they share one heartbeat and one set of claims.</summary>
+    public bool Shared => Instances is { Count: > 1 };
+}
 
 /// <summary>One recurring-job schedule, from HW.JOB LIST (feature 028).</summary>
 internal sealed record JobScheduleDto(

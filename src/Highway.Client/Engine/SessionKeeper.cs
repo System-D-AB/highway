@@ -32,13 +32,39 @@ internal sealed class SessionKeeper
 
     internal sealed record Job(string Queue, string Name, string Expression, byte[] Template);
 
+    internal sealed record DeadLetterDeclaration(string Kind, string Name);
+    internal sealed record PolicyDeclaration(string Kind, string Name, int MaxAttempts, string Backoff, int MaxRequeues);
+
+    /// <summary>
+    /// This process, for display (072): the broker keeps it in memory against the instance id the
+    /// connections carry, so its dashboard can say which processes stand behind a node name.
+    /// </summary>
+    internal sealed record Instance(string Id, string Host, int Pid, string? Hosting, DateTimeOffset Started, string Client)
+    {
+        public static Instance Of(HighwayOptions options)
+        {
+            DateTimeOffset started;
+            try { started = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime(); }
+            catch (Exception) { started = DateTimeOffset.UtcNow; }   // not readable everywhere; display only
+            var client = typeof(SessionKeeper).Assembly
+                .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "";
+            var plus = client.IndexOf('+');
+            return new Instance(options.InstanceId, Environment.MachineName, Environment.ProcessId,
+                options.HostingName, started, plus < 0 ? client : client[..plus]);
+        }
+    }
+
     public SessionKeeper(
         IHighwayConnection connection,
         string nodeName,
         CatalogInfo? catalog,
         IReadOnlyList<Subscription> subscriptions,
         IReadOnlyList<Job> jobs,
-        ILogger logger)
+        ILogger logger,
+        Instance? instance = null,
+        IReadOnlyList<DeadLetterDeclaration>? deadLetters = null,
+        IReadOnlyList<PolicyDeclaration>? policies = null)
     {
         _connection = connection;
         _nodeName = nodeName;
@@ -75,6 +101,44 @@ internal sealed class SessionKeeper
                 writer.WriteEndObject();
             }
             writer.WriteEndArray();
+            if (deadLetters is not null)
+            {
+                writer.WriteStartArray("deadLetters");
+                foreach (var d in deadLetters)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("kind", d.Kind);
+                    writer.WriteString("name", d.Name);
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+            }
+            if (policies is { Count: > 0 })
+            {
+                writer.WriteStartArray("policies");
+                foreach (var p in policies)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("kind", p.Kind);
+                    writer.WriteString("name", p.Name);
+                    writer.WriteNumber("maxAttempts", p.MaxAttempts);
+                    writer.WriteString("backoff", p.Backoff);
+                    writer.WriteNumber("maxRequeues", p.MaxRequeues);
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+            }
+            if (instance is not null)
+            {
+                writer.WriteStartObject("instance");
+                writer.WriteString("id", instance.Id);
+                writer.WriteString("host", instance.Host);
+                writer.WriteNumber("pid", instance.Pid);
+                if (instance.Hosting is not null) writer.WriteString("hosting", instance.Hosting);
+                writer.WriteString("started", instance.Started.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+                writer.WriteString("client", instance.Client);
+                writer.WriteEndObject();
+            }
             writer.WriteEndObject();
         }
         _sessionJson = buffer.ToArray();

@@ -66,7 +66,50 @@ public class MetricsTests
             "highway.replication.promotions", "highway.replication.demotions", "highway.replication.fences",
             "highway.queue.depth", "highway.queue.bytes", "highway.deadletters",
             "highway.recorder.dropped",
+            "highway.deadletters.resolved", "highway.deadletters.requeued", "highway.deadletter.feed.depth",
         });
+    }
+
+    [Fact]
+    public void DeadLetterMetrics_CountResolutionsAndFeedDepth()
+    {
+        var name = "Highway.Server.Test." + Guid.NewGuid().ToString("N");
+        using var probe = new Probe(name);
+        var feeds = new (string Target, long Depth)[] { ("orders", 5) };
+        using var metrics = new HighwayMetrics(
+            replication: null,
+            () => [],
+            Recorder(),
+            name,
+            sampleFeeds: () => feeds);
+
+        metrics.RecordDeadLetterResolved("ack", "handler");
+        metrics.RecordDeadLetterResolved("purge", "operator", 2);
+        metrics.RecordDeadLetterRequeued(3);
+        probe.Collect();
+
+        probe.Sum("highway.deadletters.requeued").Should().Be(3);
+
+        var resolvedAck = probe.Longs
+            .Where(x => x.Name == "highway.deadletters.resolved"
+                && x.Tags.Any(t => t.Key == "action" && (string?)t.Value == "ack")
+                && x.Tags.Any(t => t.Key == "by" && (string?)t.Value == "handler"))
+            .Sum(x => x.Value);
+        resolvedAck.Should().Be(1);
+
+        var resolvedPurge = probe.Longs
+            .Where(x => x.Name == "highway.deadletters.resolved"
+                && x.Tags.Any(t => t.Key == "action" && (string?)t.Value == "purge")
+                && x.Tags.Any(t => t.Key == "by" && (string?)t.Value == "operator"))
+            .Sum(x => x.Value);
+        resolvedPurge.Should().Be(2);
+
+        var feedDepth = probe.Longs
+            .Where(x => x.Name == "highway.deadletter.feed.depth"
+                && x.Tags.Any(t => t.Key == "target" && (string?)t.Value == "orders"))
+            .Select(x => x.Value)
+            .Single();
+        feedDepth.Should().Be(5);
     }
 
     [Fact]

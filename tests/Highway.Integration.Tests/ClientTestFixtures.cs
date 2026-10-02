@@ -25,8 +25,10 @@ internal sealed class EngineNode : IAsyncDisposable
     private readonly ServiceProvider _provider;
 
     public IHighwayClient Client { get; }
+    public IHighwayDeadLetters DeadLetters { get; }
     public IHighwayEngine Engine { get; }
     public string NodeName { get; }
+    public IServiceProvider Services => _provider;
 
     /// <summary>The client's connection source — the herd tests read its ActiveServer/roster (042-1d).</summary>
     public Highway.Client.Engine.HighwayConnectionSource Source
@@ -37,6 +39,7 @@ internal sealed class EngineNode : IAsyncDisposable
         _provider = provider;
         NodeName = nodeName;
         Client = provider.GetRequiredService<IHighwayClient>();
+        DeadLetters = provider.GetRequiredService<IHighwayDeadLetters>();
         Engine = provider.GetRequiredService<IHighwayEngine>();
     }
 

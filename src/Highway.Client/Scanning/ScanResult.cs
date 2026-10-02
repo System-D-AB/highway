@@ -51,6 +51,9 @@ public sealed class ScanResult
     /// a skipped handler is a decision, and decisions are said out loud.
     /// </summary>
     public IReadOnlyList<SkippedHandlerAssembly> SkippedHandlerAssemblies { get; init; } = [];
+
+    /// <summary>Dead-letter handlers this node hosts (feature 073).</summary>
+    public IReadOnlyList<DeadLetterDescriptor> DeadLetters { get; init; } = [];
 }
 
 /// <summary>An assembly whose handlers were found and deliberately not hosted (feature 024).</summary>

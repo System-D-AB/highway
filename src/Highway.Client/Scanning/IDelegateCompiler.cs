@@ -16,4 +16,10 @@ internal interface IDelegateCompiler
     /// Signature: (object subscriber, object message, CancellationToken ct) → Task
     /// </summary>
     Func<object, object, CancellationToken, Task> CompileSubscriberDelegate(Type subscriberType, Type messageType);
+
+    /// <summary>
+    /// Compiles a delegate for calling IDeadLetter&lt;T&gt;.HandleAsync(letter, ct).
+    /// Signature: (object handler, object deadLetter, CancellationToken ct) → Task&lt;DeadLetterAction&gt;
+    /// </summary>
+    Func<object, object, CancellationToken, Task<Highway.Abstractions.DeadLetterAction>> CompileDeadLetterDelegate(Type handlerType, Type messageType);
 }

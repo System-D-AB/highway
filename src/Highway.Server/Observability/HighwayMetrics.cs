@@ -38,6 +38,8 @@ internal sealed class HighwayMetrics : IDisposable
     private readonly Counter<long> _failed;
     private readonly Counter<long> _refused;
     private readonly Counter<long> _deadLettered;
+    private readonly Counter<long> _deadLettersResolved;
+    private readonly Counter<long> _deadLettersRequeued;
     private readonly Counter<long> _promotions;
     private readonly Counter<long> _demotions;
     private readonly Counter<long> _fences;
@@ -50,12 +52,15 @@ internal sealed class HighwayMetrics : IDisposable
     /// <param name="meterName">Overrides the meter name; production always uses the default
     /// <see cref="MeterName"/>. A test passes a unique name so its <c>MeterListener</c> never
     /// collects a parallel embedded server's identically-named instruments.</param>
+    /// <param name="storageProperty">Reads durable storage properties if available.</param>
+    /// <param name="sampleFeeds">Reads active dead-letter feed depths on demand.</param>
     public HighwayMetrics(
         ReplicationFeeder? replication,
         Func<IReadOnlyList<QueueStateDto>> sampleQueues,
         FlightRecorder recorder,
         string? meterName = null,
-        Func<string, long>? storageProperty = null)
+        Func<string, long>? storageProperty = null,
+        Func<IReadOnlyList<(string Target, long Depth)>>? sampleFeeds = null)
     {
         _meter = new Meter(meterName ?? MeterName);
 
@@ -67,6 +72,8 @@ internal sealed class HighwayMetrics : IDisposable
         _failed = _meter.CreateCounter<long>("highway.messages.failed", "{message}", "Deliveries reported failed (HW.FAIL).");
         _refused = _meter.CreateCounter<long>("highway.messages.refused", "{message}", "Sends refused for a full queue (HW.QSEND, QUEUE_FULL).");
         _deadLettered = _meter.CreateCounter<long>("highway.messages.deadlettered", "{message}", "Messages moved to the dead-letter list on exhausting their attempts.");
+        _deadLettersResolved = _meter.CreateCounter<long>("highway.deadletters.resolved", "{letter}", "Dead letters resolved, tagged by action (ack, requeue, purge) and by (handler, operator).");
+        _deadLettersRequeued = _meter.CreateCounter<long>("highway.deadletters.requeued", "{letter}", "Dead letters requeued back into their target.");
         _promotions = _meter.CreateCounter<long>("highway.replication.promotions", "{event}", "Times this node promoted to primary.");
         _demotions = _meter.CreateCounter<long>("highway.replication.demotions", "{event}", "Times this node demoted on a higher observed epoch.");
         _fences = _meter.CreateCounter<long>("highway.replication.fences", "{event}", "Times this node fenced itself (deadman backstop).");
@@ -97,6 +104,10 @@ internal sealed class HighwayMetrics : IDisposable
         _meter.CreateObservableGauge("highway.recorder.dropped", () => recorder.DroppedBudget, "{event}",
             "Flight-recorder events dropped rather than blocking a delivery.");
 
+        sampleFeeds ??= () => [];
+        _meter.CreateObservableGauge("highway.deadletter.feed.depth", () => FeedMeasurements(sampleFeeds), "{letter}",
+            "Declared dead-letter feed depth (labelled target).");
+
         // 061 T8: the storage engine's delete load, so a build-up of tombstones is visible here rather than
         // only in a CPU profile. Durable (RocksDB) brokers only; sampled only when a listener collects.
         if (storageProperty is not null)
@@ -126,6 +137,16 @@ internal sealed class HighwayMetrics : IDisposable
     public void RecordFailed() => _failed.Add(1);
     public void RecordRefused() => _refused.Add(1);
     public void RecordDeadLettered(long count) { if (count > 0) _deadLettered.Add(count); }
+    public void RecordDeadLetterResolved(string action, string by, long count = 1)
+    {
+        if (count > 0)
+        {
+            _deadLettersResolved.Add(count,
+                new KeyValuePair<string, object?>("action", action),
+                new KeyValuePair<string, object?>("by", by));
+        }
+    }
+    public void RecordDeadLetterRequeued(long count = 1) { if (count > 0) _deadLettersRequeued.Add(count); }
     public void RecordPromotion() => _promotions.Add(1);
     public void RecordDemotion() => _demotions.Add(1);
     public void RecordFence() => _fences.Add(1);
@@ -169,6 +190,13 @@ internal sealed class HighwayMetrics : IDisposable
     {
         foreach (var q in sampleQueues())
             yield return new(select(q), new KeyValuePair<string, object?>("queue", q.Name));
+    }
+
+    private static IEnumerable<Measurement<long>> FeedMeasurements(
+        Func<IReadOnlyList<(string Target, long Depth)>> sampleFeeds)
+    {
+        foreach (var (target, depth) in sampleFeeds())
+            yield return new(depth, new KeyValuePair<string, object?>("target", target));
     }
 
     public void Dispose() => _meter.Dispose();

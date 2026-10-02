@@ -81,4 +81,22 @@ internal sealed class ExpressionDelegateCompiler : IDelegateCompiler
         var lambda = Expression.Lambda<Func<object, object, CancellationToken, Task>>(call, subParam, msgParam, ctParam);
         return lambda.Compile();
     }
+
+    public Func<object, object, CancellationToken, Task<Highway.Abstractions.DeadLetterAction>> CompileDeadLetterDelegate(
+        Type handlerType, Type messageType)
+    {
+        var hdlParam = Expression.Parameter(typeof(object), "hdl");
+        var letParam = Expression.Parameter(typeof(object), "let");
+        var ctParam = Expression.Parameter(typeof(CancellationToken), "ct");
+
+        var castHdl = Expression.Convert(hdlParam, handlerType);
+        var deadLetterType = typeof(Highway.Abstractions.DeadLetter<>).MakeGenericType(messageType);
+        var castLet = Expression.Convert(letParam, deadLetterType);
+
+        var method = handlerType.GetMethod("HandleAsync", [deadLetterType, typeof(CancellationToken)])!;
+        var call = Expression.Call(castHdl, method, castLet, ctParam);
+
+        return Expression.Lambda<Func<object, object, CancellationToken, Task<Highway.Abstractions.DeadLetterAction>>>(
+            call, hdlParam, letParam, ctParam).Compile();
+    }
 }

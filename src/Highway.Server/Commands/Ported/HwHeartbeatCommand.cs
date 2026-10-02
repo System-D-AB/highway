@@ -148,6 +148,9 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
             }
             break;
         }
+
+        PurgeFeeds(ctx);
+
         writer.ThreeIntegers(_retired.Groups, _retired.Messages, _retired.Bytes);
     }
 
@@ -176,6 +179,85 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
                 targets[entry] = (entry[..at], entry[(at + 1)..]);
         }
         return [.. targets.Values];
+    }
+
+    private void PurgeFeeds(CommandContext ctx)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            List<(BoxKeys.Kind Kind, string Name)> targets;
+            using (var snap = ctx.Store.Snapshot())
+                targets = FeedPurgeTargets(ctx, snap);
+
+            if (targets.Count == 0) return;
+
+            var held = FeedLocksFor(ctx, targets);
+            using (ctx.Locks.LockMany(held))
+            {
+                using var snap = ctx.Store.Snapshot();
+                targets = FeedPurgeTargets(ctx, snap);
+                if (!FeedLocksFor(ctx, targets).IsSubsetOf(held))
+                {
+                    if (attempt >= MaxPurgeAttempts)
+                        throw new InvalidOperationException(
+                            $"BYE PURGE for '{_nodeId}': its feeds kept changing under {MaxPurgeAttempts} lock attempts");
+                    continue;
+                }
+
+                using var batch = ctx.Store.NewBatch();
+                foreach (var (kind, name) in targets)
+                {
+                    var targetString = BoxCommandSupport.FeedTargetName(kind, name);
+                    RegistrySupport.SetRemove(ctx.Store, batch, HighwayNames.FeedMembers(targetString), _nodeId);
+                    RegistrySupport.SetRemove(ctx.Store, batch, HighwayNames.NodeFeeds(_nodeId), targetString);
+
+                    var members = RegistrySupport.ReadSet(ctx.Store, snap, HighwayNames.FeedMembers(targetString));
+                    var remainingCount = members.Count(m => m != _nodeId);
+
+                    if (Catalog.Find(ctx.Store, batch, ctx.Boxes, kind, name) is { } tBox)
+                    {
+                        using var wbTarget = BoxCommandSupport.Open(ctx, tBox, kind, batch);
+                        wbTarget.SetFeedOn(remainingCount);
+                    }
+                    if (remainingCount == 0)
+                    {
+                        if (Catalog.Find(ctx.Store, batch, ctx.Boxes, BoxKeys.Kind.DeadFeed, targetString) is { } fBox)
+                        {
+                            using var wbFeed = BoxCommandSupport.Open(ctx, fBox, BoxKeys.Kind.DeadFeed, batch);
+                            if (wbFeed.DrainingSince == 0) wbFeed.SetDrainingSince(ctx.NowTicks);
+                        }
+                    }
+                }
+                ctx.Store.DeleteRange(batch, HighwayKeyspace.SetPrefix(HighwayNames.NodeFeeds(_nodeId)));
+                batch.Commit();
+            }
+            break;
+        }
+    }
+
+    private List<(BoxKeys.Kind Kind, string Name)> FeedPurgeTargets(CommandContext ctx, IStoreSnapshot snap)
+    {
+        var list = new List<(BoxKeys.Kind Kind, string Name)>();
+        foreach (var entry in RegistrySupport.ReadSet(ctx.Store, snap, HighwayNames.NodeFeeds(_nodeId)))
+        {
+            if (BoxCommandSupport.TryParseFeedTarget(entry, out var kind, out var name))
+                list.Add((kind, name));
+        }
+        return list;
+    }
+
+    private HashSet<string> FeedLocksFor(CommandContext ctx, IEnumerable<(BoxKeys.Kind Kind, string Name)> targets)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal) { _nodeId };
+        foreach (var (kind, name) in targets)
+        {
+            var targetString = BoxCommandSupport.FeedTargetName(kind, name);
+            if (BoxCommandSupport.Find(ctx, kind, name) is { } tBox)
+                names.Add(WorkBox.LockName(tBox));
+            if (BoxCommandSupport.Find(ctx, BoxKeys.Kind.DeadFeed, targetString) is { } fBox)
+                names.Add(WorkBox.LockName(fBox));
+        }
+        return names;
     }
 
     protected override void AfterCommit(CommandContext ctx)

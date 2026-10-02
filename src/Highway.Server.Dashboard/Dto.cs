@@ -109,6 +109,8 @@ internal sealed record CatalogueDto(
 /// <param name="Queues">List of hosted queues.</param>
 /// <param name="Channels">List of subscribed channels.</param>
 /// <param name="SeenFrom">Peer address of the node's live connection, or null if it has none right now.</param>
+/// <param name="Instances">The live processes behind the name (072).</param>
+/// <param name="Shared">More than one live process uses the name (072).</param>
 internal sealed record NodeRowDto(
     string Name,
     string State,
@@ -116,7 +118,9 @@ internal sealed record NodeRowDto(
     IReadOnlyList<string> Services,
     IReadOnlyList<string> Queues,
     IReadOnlyList<string> Channels,
-    string? SeenFrom);
+    string? SeenFrom,
+    IReadOnlyList<Highway.Server.Resp.InstanceView> Instances,
+    bool Shared);
 
 internal sealed record NodesDto(
     IReadOnlyList<NodeRowDto> Nodes,
@@ -232,6 +236,7 @@ internal sealed record NodeMessageRowDto(
 /// <param name="Failed">Failed count.</param>
 /// <param name="Unavailable">Reason if unavailable.</param>
 /// <param name="CanUse">Reference-derived addressability (024) — labelled "can use", never "uses".</param>
+/// <param name="Instances">The live processes behind the name (072).</param>
 internal sealed record NodeDetailDto(
     string Name,
     string State,
@@ -244,9 +249,47 @@ internal sealed record NodeDetailDto(
     int Processed,
     int Failed,
     string? Unavailable,
-    NodeCanUseDto? CanUse = null);
+    NodeCanUseDto? CanUse = null,
+    IReadOnlyList<Highway.Server.Resp.InstanceView>? Instances = null);
 
 internal sealed record NodeCanUseDto(
     IReadOnlyList<string> Services,
     IReadOnlyList<string> Queues,
     IReadOnlyList<string> Channels);
+
+internal sealed record DeadLetterRowDto(
+    string DeadId,
+    string? MessageId,
+    string? RequestId,
+    DateTimeOffset DeadLetteredAt,
+    int Attempts,
+    int Requeues,
+    string Reason,
+    string? FailureType,
+    string? FailureFirstType,
+    string? FailureDetail,
+    string? Payload,
+    string PayloadState);
+
+internal sealed record DeadLettersResponseDto(
+    IReadOnlyList<DeadLetterRowDto> Items,
+    bool ReadOnly,
+    string? ReadOnlyReason);
+
+internal sealed record DeadLetterRequeueRequest(
+    string Kind,
+    string Name,
+    string? DeadLetterId,
+    int? Count,
+    long? AfterMs);
+
+internal sealed record DeadLetterPurgeRequest(
+    string Kind,
+    string Name,
+    string? DeadLetterId,
+    int? Count);
+
+internal sealed record DeadLetterOperationResponse(
+    bool Success,
+    int AffectedCount,
+    string? Message);

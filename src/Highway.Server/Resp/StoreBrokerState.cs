@@ -15,10 +15,23 @@ namespace Highway.Server.Resp;
 /// not serve. Same DTOs, so <c>HighwayTestServer</c>'s hooks and the tests that call them are
 /// unchanged.
 /// </summary>
-internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions options, ObservedAddressRegistry? observed = null) : IBrokerState
+internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions options, InstanceRegistry? observed = null) : IBrokerState
 {
     public IReadOnlyList<(string Name, long Depth, long Bytes)> Queues()
         => [.. EachQueue().Select(q => (q.Name, q.Box.Ready, q.Box.Bytes))];
+
+    public IReadOnlyList<(string Target, long Depth)> DeadFeeds()
+    {
+        var rt = new Storage.Boxes.BoxRuntime();
+        using var batch = store.NewBatch();
+        var list = new List<(string Target, long Depth)>();
+        foreach (var (_, target, id) in Storage.Boxes.Catalog.List(store, batch, Storage.Boxes.BoxKeys.Kind.DeadFeed))
+        {
+            using var wb = new Storage.Boxes.WorkBox(store, rt, id, tracksBytes: false, batch);
+            list.Add((target, wb.Ready));
+        }
+        return list;
+    }
 
     /// <summary>Every queue box with its counters open (065) — no data is scanned.</summary>
     private IEnumerable<(string Name, Storage.Boxes.WorkBox Box)> EachQueue()
@@ -134,7 +147,8 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
             var seen = Commands.Ported.RegistrySupport.SeenTicks(store, snap, id, record);   // 060
             var dto = Observability.Catalogue.ReadNode(id, record, options.NodeExpiry, seen);
             // 048: attach the observed peer address (from CLIENT SETNAME), or leave null → "not connected".
-            nodes.Add(observed is null ? dto : dto with { SeenFrom = observed.AddressOf(dto.Name) });
+            // 072: and the live processes behind the name.
+            nodes.Add(observed is null ? dto : dto with { SeenFrom = observed.AddressOf(dto.Name), Instances = observed.InstancesOf(dto.Name) });
         }
         return nodes;
     }
@@ -189,5 +203,67 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
     {
         if (hosts.Count == 0) return EntityState.NeverDeclared;
         return nodes.Any(n => hosts.Contains(n.Name) && n.IsLive) ? EntityState.Live : EntityState.HostStale;
+    }
+
+    public Task<StateResult<IReadOnlyList<DeadLetterStateDto>>> DeadLettersAsync(
+        string kind, string name, int count = 20, CancellationToken ct = default)
+    {
+        try
+        {
+            var isService = kind.Equals("SVC", StringComparison.OrdinalIgnoreCase) || kind.Equals("service", StringComparison.OrdinalIgnoreCase);
+            var boxKind = isService ? Storage.Boxes.BoxKeys.Kind.Service : Storage.Boxes.BoxKeys.Kind.Queue;
+
+            var rt = new Storage.Boxes.BoxRuntime();
+            using var batch = store.NewBatch();
+            var boxId = Storage.Boxes.Catalog.Find(store, batch, rt, boxKind, name);
+            if (boxId is null)
+                return Task.FromResult(StateResult<IReadOnlyList<DeadLetterStateDto>>.Ok([]));
+
+            using var wb = new Storage.Boxes.WorkBox(store, rt, boxId.Value, tracksBytes: true, batch);
+            var entries = wb.PeekDead(count);
+            var rows = new List<DeadLetterStateDto>(entries.Count);
+
+            foreach (var (key, raw) in entries)
+            {
+                var seq = Storage.Boxes.BoxKeys.TrailingSeq(key);
+                var deadId = Internal.DeadLetter.FormatDeadId(boxId.Value, seq);
+
+                Internal.DeadLetter.Decode(raw, out var ticks, out var attempts, out var reason, out var original);
+                Internal.Envelope.TryGetLineage(original, out var requeues, out var withoutLineage);
+                Internal.Envelope.DecodeRpcEntry(withoutLineage, out var id, out var payload, out _);
+
+                string? failureType = null;
+                string? failureFirstType = null;
+                string? failureDetail = null;
+
+                if (Internal.Envelope.TryGetFailureBlock(withoutLineage, out var block, out _))
+                {
+                    Internal.Envelope.DecodeFailureBlock(block, out var type, out var firstType, out var detail);
+                    failureType = Encoding.UTF8.GetString(type);
+                    if (firstType.Length > 0)
+                        failureFirstType = Encoding.UTF8.GetString(firstType);
+                    failureDetail = Encoding.UTF8.GetString(detail);
+                }
+
+                rows.Add(new DeadLetterStateDto(
+                    DeadId: deadId,
+                    MessageId: isService ? null : Encoding.UTF8.GetString(id),
+                    RequestId: isService ? Encoding.UTF8.GetString(id) : null,
+                    DeadLetteredAt: new DateTimeOffset(ticks, TimeSpan.Zero),
+                    Attempts: attempts,
+                    Requeues: requeues,
+                    Reason: Encoding.UTF8.GetString(reason),
+                    FailureType: failureType,
+                    FailureFirstType: failureFirstType,
+                    FailureDetail: failureDetail,
+                    Payload: payload.ToArray()));
+            }
+
+            return Task.FromResult(StateResult<IReadOnlyList<DeadLetterStateDto>>.Ok((IReadOnlyList<DeadLetterStateDto>)rows));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(StateResult<IReadOnlyList<DeadLetterStateDto>>.Fail($"could not read dead letters: {ex.Message}"));
+        }
     }
 }

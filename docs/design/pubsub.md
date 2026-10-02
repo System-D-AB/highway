@@ -27,7 +27,7 @@ name makes several replicas one logical subscriber.
 subscriber group has its own derived queue named `{channel}@{group}`, with the same lease,
 acknowledgement, attempt counter and dead-letter list as any other queue (`@` is reserved in
 identifiers for this). This is why pub/sub inherits durability, competing-replica consumption and
-dead-lettering for free — there is one delivery engine underneath, two verbs on top.
+dead-lettering for free — there is one delivery engine underneath, two verbs on top. Dead letters for a subscriber group live in the group's dead-letter space, addressed as `Q {channel}@{group}` on `HW.DLQ` and `q:{channel}@{group}` for dead-letter feeds (`IDeadLetter<T>`). Retry policies declared via `[Retry]` apply per group queue, and requeuing a dead letter restores it to that specific group's queue.
 
 **Fan-out is atomic and per-group.** `HW.PUBLISH` enqueues into *every* registered group's queue in
 one commit, holding every group's lock — all groups or none, so a crash never leaves a partial

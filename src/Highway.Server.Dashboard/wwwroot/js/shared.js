@@ -66,6 +66,32 @@ export async function getJson(source, url) {
     }
 }
 
+/**
+ * Posts JSON, reporting failure under `source` and clearing it on success.
+ */
+export async function postJson(source, url, body) {
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+            const err = await response.text();
+            reportError(source, `HTTP ${response.status}: ${err}`);
+            return null;
+        }
+        clearError(source);
+        return await response.json();
+    } catch (e) {
+        reportError(source, e.message || 'request failed');
+        return null;
+    }
+}
+
 // ---- formatting ------------------------------------------------------------
 
 export function bytes(n) {

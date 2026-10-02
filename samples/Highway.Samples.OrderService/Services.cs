@@ -122,7 +122,22 @@ public sealed class AlwaysFailsProcessor(ILogger<AlwaysFailsProcessor> logger)
 {
     public Task ProcessAsync(AlwaysFails message, CancellationToken ct = default)
     {
-        logger.LogWarning("  [queue] deliberately failing '{Reason}' — this will dead-letter", message.Reason);
+        logger.LogWarning("  [queue] deliberately failing '{Reason}' — this will retry and then dead-letter", message.Reason);
         throw new InvalidOperationException($"This processor always fails: {message.Reason}");
+    }
+}
+
+/// <summary>
+/// Dead-letter remediation handler (feature 073).
+/// Receives dead-lettered messages when MaxAttempts is exhausted, logs diagnosis, and resolves.
+/// </summary>
+public sealed class AlwaysFailsDeadLetterHandler(ILogger<AlwaysFailsDeadLetterHandler> logger)
+    : IDeadLetter<AlwaysFails>
+{
+    public Task<DeadLetterAction> HandleAsync(DeadLetter<AlwaysFails> letter, CancellationToken ct = default)
+    {
+        logger.LogWarning("  [dlq] message '{Id}' dead-lettered (Attempts={Attempts}, Reason={Reason}, Failure={Failure}). Resolving with DISCARD.",
+            letter.Id, letter.Attempts, letter.Reason, letter.LastFailure?.Type);
+        return Task.FromResult(DeadLetterAction.Discard);
     }
 }

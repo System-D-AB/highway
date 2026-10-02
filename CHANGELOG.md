@@ -31,6 +31,11 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   only. See the 5.0 row of [`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md).
 - Replication declares the storage format in both directions (`HW.REPL.HELLO ... FORMAT 4`, and the
   primary's reply echoes its own).
+- **The default `NodeName` includes the hosting name** (feature 072). A process running as a Windows
+  service or in an IIS application pool now defaults to `{app}-{machine}-{service}` instead of
+  `{app}-{machine}`, so several services from the same binaries on one machine are separate nodes. The
+  default `SubscriptionGroup` keeps the old value, `{app}-{machine}`, so those copies still share one
+  group and pub/sub behaves as before. An explicitly set `NodeName` or `SubscriptionGroup` is unchanged.
 
 ### Fixed
 
@@ -59,6 +64,27 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
 - Races between publish and claim, fail and touch, and job update and job fire on one queue: every
   operation on a queue now holds that queue's lock.
 - The dashboard and metrics no longer scan the whole keyspace to list queues.
+- The dashboard showed a node whose name contains a space as "not connected": the client sanitises the
+  connection name and the broker compared the raw one (072).
+- A failing broker log sink could fail a command after its commit, through the registry log lines 070
+  added; those writes are now guarded like every other diagnostic (C7.1, 072).
+
+### Added
+
+- **Dead-letter contracts & declarative retry policies** (feature 073).
+  - Strongly-typed `IDeadLetter<T>` contract handlers to consume dead-letter feed notifications (`HW.CLAIM DEAD`) and resolve them atomically with `Keep()`, `Discard()`, or `Requeue(delay)`.
+  - Poison payload resilience: deserialization failures dispatch to `IDeadLetter<T>` with `Message = null` and raw payload preserved.
+  - Lineage tracking trailer `[0xFE][u16 requeues]` on queue entries; RPC dead letters permit inspection/purging but refuse requeuing.
+  - Typed operator API `IHighwayDeadLetters` (`PeekAsync`, `CountAsync`, `RequeueAsync`, `PurgeAsync`, `RequeueAllAsync`, `PurgeAllAsync`) for management across services, queues, and subscriber groups.
+  - Declarative retry policies via `[Retry(MaxAttempts, Backoff, MaxRequeues)]` supporting fixed, exponential, and deterministic integer-only FNV-1a jitter rescheduling into delayed space before dead-lettering.
+  - Server dashboard Dead Letters panel on entity details page with payload previews and API key authentication.
+  - Observability: metrics `highway.deadletters.resolved`, `highway.deadletters.requeued`, gauge `highway.deadletter.feed.depth`, flight recorder events (`DeadLetterResolved`, `DeadLetterRequeueRefused`, `DeadLetterFeedOverflow`), and warning sweeper for unconsumed dead letters older than `DeadLetterAgeWarning` (default 24h).
+- **The broker sees every process** (feature 072). Each client process names its connections with a
+  random instance id (`CLIENT SETNAME <node>@<instance>`) and describes itself in `HW.SESSION` (host,
+  pid, hosting name, start time, version). The broker counts the processes behind each node name, logs
+  a Warning and records `NodeNameShared` when more than one live process uses a name — they would share
+  one heartbeat and one set of claims — and the dashboard's Nodes view shows a process count, flags a
+  shared name, and lists each node's processes. In memory only; nothing is stored or replicated.
 
 ### Improved
 

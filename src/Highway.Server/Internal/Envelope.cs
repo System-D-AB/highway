@@ -220,15 +220,65 @@ internal static class Envelope
     /// <summary>Marks the last four bytes of an entry that carries a failure block.</summary>
     public const uint FailureMagic = 0xFE15FA11;
 
+    /// <summary>Marks the byte preceding the 2-byte requeue count in a lineage trailer (feature 073).</summary>
+    public const byte LineageMarker = 0xFE;
+
     private const int FailureTrailer = 4 + 4;   // [u32 blockLen][u32 magic]
     private const int FailureBlockHeader = 2 + 2 + 4;
+    private const int LineageTrailerLen = 1 + 2; // [u8 0xFE][u16 requeues]
 
     /// <summary>
-    /// Removes the failure trailer, if present, so the remaining span is the entry exactly
-    /// as it would have been framed without one. Called at the head of every decode.
+    /// Reads the requeue lineage count if this entry carries a lineage trailer (feature 073).
+    /// Framing: <c>[...entry...][failure block?][u8 0xFE][u16 requeues]</c>
+    /// </summary>
+    public static bool TryGetLineage(
+        ReadOnlySpan<byte> entry,
+        out ushort requeues,
+        out ReadOnlySpan<byte> withoutLineage)
+    {
+        requeues = 0;
+        withoutLineage = entry;
+
+        if (entry.Length < LineageTrailerLen)
+            return false;
+
+        if (entry[entry.Length - LineageTrailerLen] != LineageMarker)
+            return false;
+
+        requeues = BinaryPrimitives.ReadUInt16BigEndian(entry.Slice(entry.Length - 2));
+        withoutLineage = entry.Slice(0, entry.Length - LineageTrailerLen);
+        return true;
+    }
+
+    /// <summary>Removes the lineage trailer, if present.</summary>
+    public static ReadOnlySpan<byte> StripLineage(ReadOnlySpan<byte> entry)
+        => TryGetLineage(entry, out _, out var withoutLineage) ? withoutLineage : entry;
+
+    /// <summary>
+    /// Returns <paramref name="entry"/> with a lineage trailer carrying <paramref name="requeues"/>.
+    /// If <paramref name="requeues"/> is 0, any existing lineage trailer is stripped.
+    /// </summary>
+    public static byte[] WithLineage(ReadOnlySpan<byte> entry, ushort requeues)
+    {
+        var bare = StripLineage(entry);
+        if (requeues == 0) return bare.ToArray();
+
+        var buf = new byte[bare.Length + LineageTrailerLen];
+        bare.CopyTo(buf);
+        buf[bare.Length] = LineageMarker;
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(bare.Length + 1), requeues);
+        return buf;
+    }
+
+    /// <summary>
+    /// Removes the lineage and failure trailers, if present, so the remaining span is the entry exactly
+    /// as it would have been framed without them. Called at the head of every decode.
     /// </summary>
     public static ReadOnlySpan<byte> StripFailureBlock(ReadOnlySpan<byte> entry)
-        => TryGetFailureBlock(entry, out _, out var withoutBlock) ? withoutBlock : entry;
+    {
+        var withoutLineage = StripLineage(entry);
+        return TryGetFailureBlock(withoutLineage, out _, out var withoutBlock) ? withoutBlock : withoutLineage;
+    }
 
     /// <summary>
     /// Reads the failure block, if this entry has one. <paramref name="withoutBlock"/> is the
@@ -240,6 +290,7 @@ internal static class Envelope
         out ReadOnlySpan<byte> withoutBlock)
     {
         block = default;
+        entry = StripLineage(entry);
         withoutBlock = entry;
 
         if (entry.Length < FailureTrailer)
@@ -312,8 +363,8 @@ internal static class Envelope
     }
 
     /// <summary>
-    /// Copies the failure block from <paramref name="source"/> onto <paramref name="rebuilt"/>,
-    /// or returns <paramref name="rebuilt"/> unchanged when there is none.
+    /// Copies the failure block and lineage from <paramref name="source"/> onto <paramref name="rebuilt"/>,
+    /// or returns <paramref name="rebuilt"/> unchanged when there are none.
     ///
     /// <para><b>Call this at every point an entry is re-encoded.</b> An entry is rebuilt from
     /// its decoded parts in four places — claim (RPC, queue and channel) and the lease sweep's
@@ -323,22 +374,27 @@ internal static class Envelope
     /// was not, so the block survived the requeue and then vanished at the next claim.</para>
     /// </summary>
     public static byte[] CarryFailureBlock(ReadOnlySpan<byte> source, byte[] rebuilt)
-        => TryGetFailureBlock(source, out var block, out _) ? WithFailureBlock(rebuilt, block) : rebuilt;
+    {
+        TryGetLineage(source, out var requeues, out _);
+        var withBlock = TryGetFailureBlock(source, out var block, out _) ? WithFailureBlock(rebuilt, block) : rebuilt;
+        return requeues > 0 ? WithLineage(withBlock, requeues) : withBlock;
+    }
 
     /// <summary>
     /// Returns <paramref name="entry"/> carrying <paramref name="block"/>, replacing any block
     /// it already had. Attaching to an entry that has none is what makes the trailer additive;
-    /// replacing is what makes a second report cheap.
+    /// replacing is what makes a second report cheap. Preserves any existing lineage trailer.
     /// </summary>
     public static byte[] WithFailureBlock(ReadOnlySpan<byte> entry, ReadOnlySpan<byte> block)
     {
+        TryGetLineage(entry, out var requeues, out _);
         var bare = StripFailureBlock(entry);
         var buf = new byte[bare.Length + block.Length + FailureTrailer];
         bare.CopyTo(buf);
         block.CopyTo(buf.AsSpan(bare.Length));
         BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(bare.Length + block.Length), (uint)block.Length);
         BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(bare.Length + block.Length + 4), FailureMagic);
-        return buf;
+        return requeues > 0 ? WithLineage(buf, requeues) : buf;
     }
 
     // -------------------------------------------------------------------------

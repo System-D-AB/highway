@@ -33,6 +33,12 @@ internal static class HighwayNames
     /// </summary>
     public static string NodeSubs(string nodeId) => $"reg:node:{nodeId}:subs";
 
+    /// <summary>Nodes listening to a dead-letter feed (073).</summary>
+    public static string FeedMembers(string target) => $"feed:members:{target}";
+
+    /// <summary>The dead-letter feed targets a node declared (073).</summary>
+    public static string NodeFeeds(string nodeId) => $"reg:node:{nodeId}:feeds";
+
     /// <summary>All registered node ids.</summary>
     public const string RegistrationNodeList = "reg:nodes";
 

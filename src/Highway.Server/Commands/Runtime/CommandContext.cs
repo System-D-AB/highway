@@ -62,6 +62,12 @@ internal sealed class CommandContext
     /// <summary>The box runtime (065). A context built without one (unit tests) gets a private one: always correct, never cached.</summary>
     public Storage.Boxes.BoxRuntime Boxes { get; }
 
+    /// <summary>
+    /// The live process view (072), or null when none is wired (in-process command tests). Display only:
+    /// <c>HW.SESSION</c> hands it what a process said about itself; no command reads it to decide anything.
+    /// </summary>
+    public Resp.InstanceRegistry? Instances { get; }
+
     public CommandContext(
         IHighwayStore store,
         StripedLock locks,
@@ -72,7 +78,8 @@ internal sealed class CommandContext
         ReplicationFeeder? replication = null,
         HighwayMetrics? metrics = null,
         SweepThrottle? sweeps = null,
-        Storage.Boxes.BoxRuntime? boxes = null)
+        Storage.Boxes.BoxRuntime? boxes = null,
+        Resp.InstanceRegistry? instances = null)
     {
         Store = store;
         Locks = locks;
@@ -84,5 +91,6 @@ internal sealed class CommandContext
         Metrics = metrics;
         Sweeps = sweeps;
         Boxes = boxes ?? new Storage.Boxes.BoxRuntime();
+        Instances = instances;
     }
 }

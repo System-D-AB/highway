@@ -14,6 +14,37 @@ documentation defect and loses it.
 
 ---
 
+## 2026-10-02 — feature 073 (Dead-Letter Contracts & Retry Policies)
+
+**Libraries:** protocol **5.0** (Highway 3.0), storage format 4.
+**Ran:** three-process topology:
+- `Highway.Samples.Broker` (`--port 6530 --dashboard-port 7530 --lease-seconds 1`)
+- `Highway.Samples.OrderService` hosting `AlwaysFailsProcessor` and `AlwaysFailsDeadLetterHandler` (`IDeadLetter<AlwaysFails>`)
+- `Highway.Samples.Storefront` triggering `poison` command (`AlwaysFails` with `[Retry(MaxAttempts = 3, Backoff = "fixed:500ms")]`)
+
+### Observed Execution
+1. Storefront queued `AlwaysFails` on `poison.queue`.
+2. OrderService claimed the message and failed on delivery.
+3. Broker delayed redelivery by 500ms according to the fixed retry backoff policy.
+4. After exhausting the 3 retry attempts, the message was moved to `poison.queue` DLQ storage.
+5. Broker emitted a dead-letter notification to the feed box (`hw:feed:dlq:q:poison.queue`) and rang `hw:door:dlq:q:poison.queue`.
+6. OrderService's `DeadLetterWorkerLoop` claimed the feed notification (`HW.CLAIM DEAD q:poison.queue`) and invoked `AlwaysFailsDeadLetterHandler.HandleAsync`.
+7. Handler logged:
+   `[dlq] message '{Id}' dead-lettered (Attempts=4, Reason=MAX_ATTEMPTS). Resolving with DISCARD.`
+8. The handler returned `DeadLetterAction.Discard`, and `DeadLetterWorkerLoop` resolved the feed notification via `HW.DLQ RESOLVE <token> DISCARD`, purging the dead letter atomically.
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| Contract scanning of `[Retry]` | ✅ Extracted and sent in `HW.SESSION` |
+| Broker-side lease retry rescheduling | ✅ Rescheduled to delayed space according to 500ms fixed schedule |
+| Dead-letter feed notification & claim | ✅ `HW.CLAIM DEAD` claimed notification |
+| `IDeadLetter<T>` handler execution | ✅ Invoked automatically by client worker loop |
+| Atomic resolution (`DISCARD`) | ✅ Resolved via `HW.DLQ RESOLVE` and purged from DLQ storage |
+
+---
+
 ## 2026-09-15 — feature 042 (replication T3–T9)
 
 **Libraries:** protocol **4.7** (`HW.REPL.SNAPSHOT`/`PROMOTE`/`FENCE`/`STATUS`/`WITNESS`, `-NOTPRIMARY`).
@@ -782,3 +813,43 @@ Exit code 0. The verb path returns immediately — no host is built.
 | `product.md` package list updated | ✅ |
 | All 107 hosting tests pass | ✅ |
 | All 69 server host tests pass (re-pointed, behavior preserved) | ✅ |
+
+## 2026-10-01 — feature 072 (Process identity)
+
+**Changed:** `HighwayOptions` — the default `NodeName` gains the hosting name (Windows service / IIS
+application pool); the default `SubscriptionGroup` keeps the pre-072 value; every connection is named
+`<node>@<instance>`; `HW.SESSION` describes the process.
+**Ran:** `Highway.Samples.Broker` (port 6610, dashboard 7610), `Highway.Samples.OrderService`, and two
+`Highway.Samples.Storefront` processes started with the **same** `--node shop-1`. The samples set
+`NodeName` explicitly, so their names are unchanged.
+
+### `/api/nodes` while both storefronts ran
+
+```
+order-service-1  live  processes=1  shared=False
+shop-1           live  processes=2  shared=True    instances d8a671121286 (pid 48164), e3754da42d12 (pid 61088)
+```
+
+### Broker log (host name redacted)
+
+```
+14:01:36 warn: Highway.Registry[0] [identity] Node 'shop-1' is used by 2 live processes:
+         d8a671121286@127.0.0.1:51037 (<host> pid 48164), e3754da42d12@127.0.0.1:51040. A node name must be
+         one process - shared names share one heartbeat (a dead copy is not detected) and one set of claims ...
+14:01:59 info: Highway.Registry[0] [identity] Node 'shop-1' is used by one process again:
+         e3754da42d12@127.0.0.1:51040 (<host> pid 61088)
+```
+
+The second instance is listed without host/pid in the warning: the warning fires when its connection
+is named, just before its `HW.SESSION` arrives. The dashboard shows both once the session lands.
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| Order placed through storefront → order service → event back to storefront | ✅ `ORD-6694` |
+| One process per explicitly named sample node | ✅ |
+| Two processes, one name: counted, flagged, one Warning | ✅ |
+| Back to one process: one Information line | ✅ |
+| The hazard it reports, observed: the first copy's clean exit (`BYE`) deregistered `shop-1` while the second still ran | ✅ (the node vanished from `/api/nodes` until the survivor's next beat re-declared it) |
+

@@ -29,5 +29,5 @@ internal interface IRespServerHost
     void RemoveSubscriber(string connectionId);
 
     /// <summary>The node-name → observed-peer-address map (048), fed by <c>CLIENT SETNAME</c>.</summary>
-    ObservedAddressRegistry ObservedAddresses { get; }
+    InstanceRegistry Instances { get; }
 }

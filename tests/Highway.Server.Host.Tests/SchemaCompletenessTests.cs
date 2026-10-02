@@ -42,6 +42,7 @@ public class SchemaCompletenessTests
         ["ReceiveDefaultCount"] = "server.receiveDefaultCount",
         ["ReceiveMaxCount"] = "server.receiveMaxCount",
         ["WaitForCommit"] = "server.waitForCommit",
+        ["DeadLetterAgeWarning"] = "server.deadLetterAgeWarning",
     };
 
     private static readonly Dictionary<string, string> ServerSections = new()

@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Highway.Server.Dashboard;
 
@@ -97,7 +98,8 @@ internal static class DashboardEndpoints
                 // an operator do arithmetic; "stale 4m" does not (022 R2.2).
                 n.IsLive ? "live" : n.SinceLastSeen > TimeSpan.FromHours(1) ? "absent" : "stale",
                 n.SinceLastSeen.TotalSeconds,
-                n.Services, n.Queues, n.Channels, n.SeenFrom)).ToArray();
+                n.Services, n.Queues, n.Channels, n.SeenFrom,
+                n.Instances ?? [], n.Shared)).ToArray();
 
             return Results.Json(new NodesDto(rows, null));
         });
@@ -141,7 +143,8 @@ internal static class DashboardEndpoints
                 messages.Count(m => m.Outcome == "Processed"),
                 messages.Count(m => m.Outcome is "Failed" or "DeadLettered"),
                 node is null ? result.Unavailable ?? "this node is not in the registry" : null,
-                node?.Uses is { } u ? new NodeCanUseDto(u.Services, u.Queues, u.Channels) : null));
+                node?.Uses is { } u ? new NodeCanUseDto(u.Services, u.Queues, u.Channels) : null,
+                node?.Instances ?? []));
         });
 
         // Recurring-job schedules (028). Hosted-ness is computed HERE: the browser must not
@@ -385,13 +388,197 @@ internal static class DashboardEndpoints
                 catch (OperationCanceledException) { }
                 finally
                 {
-                    recorder.Unsubscribe(stream);
+                recorder.Unsubscribe(stream);
                 }
             }
             finally
             {
                 registry.Release();
             }
+        });
+
+        // Dead letters (feature 073)
+        app.MapGet("/api/deadletters", async (string kind, string name, int? count, IBrokerState state, FlightRecorder recorder, DashboardOptions options) =>
+        {
+            var limit = count is > 0 ? Math.Min(count.Value, 500) : 20;
+            var targetKind = kind.Equals("service", StringComparison.OrdinalIgnoreCase) || kind.Equals("SVC", StringComparison.OrdinalIgnoreCase)
+                ? "SVC"
+                : "Q";
+
+            var result = await state.DeadLettersAsync(targetKind, name, limit);
+            if (result.Value is null)
+                return Results.Json(new DeadLettersResponseDto([], options.ApiKey is null, result.Unavailable));
+
+            var capture = GetCaptureMode(recorder, name);
+            var replayEnabled = recorder.Enabled && recorder.Options.ReplayEnabled;
+
+            var rows = result.Value.Select(dl =>
+            {
+                string? payloadStr = null;
+                string payloadState;
+
+                if (!recorder.Enabled || !replayEnabled)
+                {
+                    payloadState = "disabled";
+                }
+                else if (capture == PayloadCapture.Off)
+                {
+                    payloadState = "not-captured";
+                }
+                else if (capture == PayloadCapture.HeadersOnly)
+                {
+                    payloadState = "headers-only";
+                }
+                else if (dl.Payload is { Length: > 0 })
+                {
+                    payloadState = "captured";
+                    try
+                    {
+                        payloadStr = System.Text.Encoding.UTF8.GetString(dl.Payload);
+                    }
+                    catch
+                    {
+                        payloadStr = Convert.ToBase64String(dl.Payload);
+                    }
+                }
+                else
+                {
+                    payloadState = "not-captured";
+                }
+
+                return new DeadLetterRowDto(
+                    dl.DeadId,
+                    dl.MessageId,
+                    dl.RequestId,
+                    dl.DeadLetteredAt,
+                    dl.Attempts,
+                    dl.Requeues,
+                    dl.Reason,
+                    dl.FailureType,
+                    dl.FailureFirstType,
+                    dl.FailureDetail,
+                    payloadStr,
+                    payloadState);
+            }).ToArray();
+
+            var isReadOnly = options.ApiKey is null;
+            var readOnlyReason = isReadOnly
+                ? "No dashboard API key is configured on the broker. Dead-letter operations are read-only."
+                : null;
+
+            return Results.Json(new DeadLettersResponseDto(rows, isReadOnly, readOnlyReason));
+        });
+
+        app.MapPost("/api/deadletters/requeue", (DeadLetterRequeueRequest req, Highway.Server.Resp.CommandDispatcher? dispatcher, DashboardOptions options, ILoggerFactory loggerFactory, HttpContext ctx) =>
+        {
+            if (options.ApiKey is null)
+            {
+                return Results.Problem("Dashboard actions require an API key to be configured on the broker.", statusCode: StatusCodes.Status403Forbidden);
+            }
+
+            if (dispatcher is null)
+            {
+                return Results.Problem("Command dispatcher is not available.", statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var remoteIp = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var logger = loggerFactory.CreateLogger("Highway.Server.Dashboard");
+
+            var targetKind = req.Kind.Equals("service", StringComparison.OrdinalIgnoreCase) || req.Kind.Equals("SVC", StringComparison.OrdinalIgnoreCase) ? "SVC" : "Q";
+            var writer = new Highway.Server.Commands.Runtime.RespWriter();
+            var frame = new List<byte[]>
+            {
+                "HW.DLQ"u8.ToArray(),
+                "REQUEUE"u8.ToArray(),
+                System.Text.Encoding.ASCII.GetBytes(targetKind),
+                System.Text.Encoding.ASCII.GetBytes(req.Name)
+            };
+
+            if (!string.IsNullOrWhiteSpace(req.DeadLetterId))
+            {
+                frame.Add("ID"u8.ToArray());
+                frame.Add(System.Text.Encoding.ASCII.GetBytes(req.DeadLetterId));
+            }
+            else
+            {
+                frame.Add("COUNT"u8.ToArray());
+                frame.Add(System.Text.Encoding.ASCII.GetBytes((req.Count ?? 1).ToString()));
+            }
+
+            if (req.AfterMs is { } ms && ms > 0)
+            {
+                frame.Add("AFTER"u8.ToArray());
+                frame.Add(System.Text.Encoding.ASCII.GetBytes(ms.ToString()));
+            }
+
+            dispatcher.Dispatch(frame, writer);
+
+            var reply = writer.ToArray();
+            if (reply.Length > 3 && reply[0] == (byte)':')
+            {
+                var numStr = System.Text.Encoding.ASCII.GetString(reply.AsSpan(1, reply.Length - 3));
+                int.TryParse(numStr, out var affected);
+                logger.LogInformation("Dashboard operator at {RemoteIp} requeued {Count} dead letter(s) on {Kind}:{Name} (id: {DeadLetterId}, afterMs: {AfterMs})",
+                    remoteIp, affected, targetKind, req.Name, req.DeadLetterId, req.AfterMs);
+                return Results.Json(new DeadLetterOperationResponse(true, affected, $"Requeued {affected} dead letter(s)."));
+            }
+
+            var errText = reply.Length > 0 ? System.Text.Encoding.UTF8.GetString(reply) : "unknown error";
+            logger.LogWarning("Dashboard operator at {RemoteIp} failed to requeue on {Kind}:{Name}: {Error}", remoteIp, targetKind, req.Name, errText);
+            return Results.Problem(errText, statusCode: StatusCodes.Status400BadRequest);
+        });
+
+        app.MapPost("/api/deadletters/purge", (DeadLetterPurgeRequest req, Highway.Server.Resp.CommandDispatcher? dispatcher, DashboardOptions options, ILoggerFactory loggerFactory, HttpContext ctx) =>
+        {
+            if (options.ApiKey is null)
+            {
+                return Results.Problem("Dashboard actions require an API key to be configured on the broker.", statusCode: StatusCodes.Status403Forbidden);
+            }
+
+            if (dispatcher is null)
+            {
+                return Results.Problem("Command dispatcher is not available.", statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var remoteIp = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var logger = loggerFactory.CreateLogger("Highway.Server.Dashboard");
+
+            var targetKind = req.Kind.Equals("service", StringComparison.OrdinalIgnoreCase) || req.Kind.Equals("SVC", StringComparison.OrdinalIgnoreCase) ? "SVC" : "Q";
+            var writer = new Highway.Server.Commands.Runtime.RespWriter();
+            var frame = new List<byte[]>
+            {
+                "HW.DLQ"u8.ToArray(),
+                "PURGE"u8.ToArray(),
+                System.Text.Encoding.ASCII.GetBytes(targetKind),
+                System.Text.Encoding.ASCII.GetBytes(req.Name)
+            };
+
+            if (!string.IsNullOrWhiteSpace(req.DeadLetterId))
+            {
+                frame.Add("ID"u8.ToArray());
+                frame.Add(System.Text.Encoding.ASCII.GetBytes(req.DeadLetterId));
+            }
+            else
+            {
+                frame.Add("COUNT"u8.ToArray());
+                frame.Add(System.Text.Encoding.ASCII.GetBytes((req.Count ?? 1).ToString()));
+            }
+
+            dispatcher.Dispatch(frame, writer);
+
+            var reply = writer.ToArray();
+            if (reply.Length > 3 && reply[0] == (byte)':')
+            {
+                var numStr = System.Text.Encoding.ASCII.GetString(reply.AsSpan(1, reply.Length - 3));
+                int.TryParse(numStr, out var affected);
+                logger.LogInformation("Dashboard operator at {RemoteIp} purged {Count} dead letter(s) on {Kind}:{Name} (id: {DeadLetterId})",
+                    remoteIp, affected, targetKind, req.Name, req.DeadLetterId);
+                return Results.Json(new DeadLetterOperationResponse(true, affected, $"Purged {affected} dead letter(s)."));
+            }
+
+            var errText = reply.Length > 0 ? System.Text.Encoding.UTF8.GetString(reply) : "unknown error";
+            logger.LogWarning("Dashboard operator at {RemoteIp} failed to purge on {Kind}:{Name}: {Error}", remoteIp, targetKind, req.Name, errText);
+            return Results.Problem(errText, statusCode: StatusCodes.Status400BadRequest);
         });
     }
 

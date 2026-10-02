@@ -35,6 +35,9 @@ internal sealed class CommandHarness : IDisposable
     public StripedLock Locks => _locks;
     public Highway.Server.Storage.Boxes.BoxRuntime Boxes => _boxes;
 
+    /// <summary>The live process view handed to commands (072); null unless a test sets one.</summary>
+    public Highway.Server.Resp.InstanceRegistry? Instances { get; set; }
+
     /// <summary>
     /// Runs <paramref name="command"/> with the given string args at wall-clock
     /// <paramref name="nowTicks"/> (default: a fixed test clock) and returns the raw RESP
@@ -45,7 +48,7 @@ internal sealed class CommandHarness : IDisposable
         var replication = _store is Highway.Server.Storage.Rocks.RocksDbStore rocks
             ? rocks.Replication
             : null;
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes, instances: Instances);
         var input = CommandInput.FromStrings(args);
         var writer = new RespWriter();
         command.Execute(ctx, input, writer);

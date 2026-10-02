@@ -63,7 +63,7 @@ capability whose absence made people misuse `PublishAsync`.
 
 ### C1.4 — A message that cannot be processed stops being retried, **and says why**
 
-**Status: Met** — feature 013 for the stopping, feature 015 for the why.
+**Status: Met** — feature 013 for the stopping, feature 015 for the why, feature 073 for programmatic remediation, retry policies, and resolution guarantees.
 
 `MaxDeliveryAttempts` bounds redelivery; exhaustion moves the message to a dead-letter list
 atomically. `HW.DLQ PEEK / REQUEUE / PURGE` operate on it. The queue inherits this on day one
@@ -84,6 +84,12 @@ says so explicitly rather than showing blanks.
 Failure detail honours feature 002's per-name `PayloadCapture`, because an exception message
 routinely contains application data. The **type** survives every mode: it is metadata, and it
 is the one field that makes a dead letter diagnosable at all.
+
+#### Feature 073 additions: Programmatic remediation, retry policies, and resolution atomicity
+- **Notification & feeds:** Target exhaustion pushes a notification into a dedicated feed box (`hw:feed:dlq:{kind}:{name}`) and rings the doorbell `hw:door:dlq:{kind}:{name}`. Handlers implementing `IDeadLetter<T>` consume these feeds via `HW.CLAIM DEAD` under lease.
+- **Never re-fed automatically:** Highway never automatically retries or re-feeds unconsumed dead letters to live queues. Automatic re-feeding creates runaway retry loops; requeuing requires explicit instruction from a dead-letter handler (`HW.DLQ RESOLVE <token> REQUEUE`) or an operator (`IHighwayDeadLetters.RequeueAsync` / dashboard).
+- **Atomic at-most-once resolution:** Resolution of a dead letter is strictly atomic. A claim token (`feedBox.feedSeq`) locks the feed entry and target dead-letter entry; settling with `KEEP`, `DISCARD`, or `REQUEUE` removes the feed notification and updates the target box in a single commit. Two workers or operators can never double-process or concurrently requeue the same dead letter.
+- **Declarative retry policies:** Contracts declare `[Retry(MaxAttempts = n, Backoff = "exp:500ms..30s:jitter", MaxRequeues = m)]`. During lease recovery, transient failures are rescheduled to delayed space with deterministic integer FNV-1a jitter (preserving bit-identical replica replication and WAL replay) before being dead-lettered. When resolved with `REQUEUE`, attempts to exceed `MaxRequeues` are refused with `HW_REQUEUE_LIMIT`.
 
 ### C1.5 — A send can be deferred
 
@@ -143,7 +149,9 @@ let a fast subscriber deny a slow one the message, which is not fan-out.
 **Within a group, replicas compete** (025). Nodes sharing a `SubscriptionGroup` claim from the
 group's one queue with the group as the claimant; each message is processed once per group, by
 whichever replica claims it. The default — group = node name — keeps every node its own group,
-which is the pre-025 behavior exactly. `[Idempotent]` markers are group-scoped, so a redelivery
+which is the pre-025 behavior exactly. *(Since 072: when the node name itself is defaulted, the
+group defaults to `{app}-{machine}` — the pre-072 default node name — so copies of one application
+on one machine, which now get distinct node names, still share one group; see C7.7.)* `[Idempotent]` markers are group-scoped, so a redelivery
 suppressed for one replica is suppressed for its siblings too.
 
 ### C2.2 — A delivered and acknowledged message is gone
@@ -626,6 +634,10 @@ have. A consumer that dies because its diagnostics died is worse than one with n
 
 Losing the diagnosis is survivable. Losing the thing being diagnosed is not.
 
+*(072: the recorder's broker-log lines — membership changes since 070, shared node names since 072 —
+are guarded too. They run after a command's commit, and before 072 a throwing log sink could have
+failed that command's reply.)*
+
 ### C7.2 — Diagnostic detail obeys the same capture switch as payloads
 
 **Status: Met** — feature 015.
@@ -639,10 +651,15 @@ a dead letter diagnosable at all.
 
 ### C7.3 — A node's address is an observation, never a declaration
 
-**Status: Met** — feature 023.
+**Status: Met** — feature 023; the source corrected by 048, extended to processes by 072.
 
-The broker reports where it currently sees a node connected from, taken from the live connection
-(`CLIENT SETNAME` on connect, `CLIENT LIST` on read). It is labelled **"seen from"** everywhere it
+The broker reports where it currently sees a node connected from, taken from the live connection:
+the client names it with `CLIENT SETNAME` and the broker keeps an in-memory map of named
+connections, dropped as each connection closes. *(This entry said `CLIENT LIST` until 2026-10-01;
+048 replaced that read with the named-connection map and the text was not updated.)* Since 072 the
+same map counts the **processes** behind a name (C7.7), and what each process says about itself in
+`HW.SESSION` (host, pid, hosting name, version) is held there too — in memory, for display, under
+the same rule. It is labelled **"seen from"** everywhere it
 appears, and it is **absent** — not stale — for a node that is registered but not connected.
 
 Highway never asks a node what its address is, and never stores one. A node behind NAT, in a
@@ -682,6 +699,29 @@ gauges sample the live feeder/store only when a listener collects, never on the 
 instrument names, units and labels are the documented contract in
 [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md) § "Metric emission". Health/readiness endpoints
 are the sibling machine channel (C7.6).
+
+### C7.7 — A node name is one process, and the broker says when it is not — feature 072
+
+**Status: Met** (072, 3.0).
+
+A node name is a processing identity: the broker tracks liveness, claims and memberships by it. Two
+live processes sharing one name share one heartbeat — a dead copy is not detected while a sibling
+beats — and one set of claims — a copy that stops cleanly (`BYE`) returns work its siblings are still
+processing. `HighwayOptions.NodeName` has always said it must be unique per process; 3.0 makes that
+the default and checks it:
+
+- **Default:** `{app}-{machine}-{hosting}` when the process runs as a Windows service or in an IIS
+  application pool, else `{app}-{machine}`. Several services from the same binaries on one machine
+  get distinct names with no configuration. An explicit name is never altered.
+- **Detection:** every connection carries a random per-process instance id
+  (`CLIENT SETNAME <node>@<instance>`, [protocol](../HIGHWAY-PROTOCOL.md#served-resp-commands)). When
+  more than one live process uses a name the broker logs a Warning naming each, records
+  `NodeNameShared`, and the dashboard flags the node; one line again when it is back to one.
+
+**Limits.** Detection is an observation, not enforcement — a second process is never refused, because
+a rolling restart legitimately overlaps (and may produce one warning and one recovery line). Processes
+the default cannot tell apart (a console application started twice, or an explicit name copied between
+services) are detected, not renamed.
 
 ### C7.6 — Readiness is role-driven, so infrastructure routes around a failover — feature 052
 
@@ -813,7 +853,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C1.1 | Sent message processed at least once | ✅ Met |
 | C1.2 | Survives until processed | ✅ Met |
 | C1.3 | Sending needs no running consumer | ✅ Met |
-| C1.4 | Unprocessable messages stop being retried, and say why | ✅ Met (013 + 015) |
+| C1.4 | Unprocessable messages stop being retried, and say why | ✅ Met (013 + 015 + 073) |
 | C1.5 | Sends can be deferred | ✅ Machinery met (013) |
 | C1.6 | A handler may outlive the lease without duplication | ✅ Met (019) |
 | C2.1 | At-least-once per registered group | ✅ Met |
@@ -842,6 +882,7 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C7.2 | Diagnostic detail obeys the payload capture switch | ✅ Met (015) |
 | C7.5 | Metrics emitted, no exporter dependency | ✅ Met (051) |
 | C7.6 | Readiness is role-driven for LB routing | ✅ Met (052) |
+| C7.7 | A node name is one process; a shared name is reported | ✅ Met (072, 3.0) |
 | C6.1 | Cannot reach the network unauthenticated by accident | ✅ Met |
 | C6.2 | Credentials never logged | ✅ Met |
 | C6.3 | Auth failures permanent and legible | ✅ Met |

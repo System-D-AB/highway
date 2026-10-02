@@ -22,9 +22,28 @@ function hostsSummary(node) {
 // container, or under a load balancer the peer address is true and not reachable, and
 // "seen from" is the whole difference between honest and misleading here.
 function seenFrom(node) {
+    const addresses = [...new Set((node.instances || []).map((i) => i.seenFrom))];
+    if (addresses.length > 1) {
+        return `<span class="mono" title="${esc(addresses.join(', '))}">${addresses.length} addresses</span>`;
+    }
     return node.seenFrom
         ? `<span class="mono" title="Peer address of this node's connection, as the broker sees it">${esc(node.seenFrom)}</span>`
         : '<span class="muted" title="Registered, but not connected right now">not connected</span>';
+}
+
+// 072: how many live processes stand behind the name. More than one is a warning, not a
+// count to admire: they share one heartbeat (a dead copy is not noticed) and one set of claims
+// (a copy that stops hands back its siblings' work).
+export const SHARED_TITLE = 'processes share this name. They share one heartbeat, so a dead copy is not '
+    + 'detected, and one set of claims, so a copy that stops returns its siblings’ work. '
+    + 'Give each process its own NodeName.';
+
+function processes(node) {
+    const n = (node.instances || []).length;
+    if (n === 0) return '<span class="muted">—</span>';
+    return node.shared
+        ? `<span class="state-stale" title="${esc(`${n} ${SHARED_TITLE}`)}">${n} ⚠</span>`
+        : '1';
 }
 
 function row(node) {
@@ -35,17 +54,18 @@ function row(node) {
     return `<tr>
         <td><a href="#/node?name=${encodeURIComponent(node.name)}">${esc(node.name)}</a></td>
         <td>${state}</td>
+        <td>${processes(node)}</td>
         <td>${seenFrom(node)}</td>
         <td>${hostsSummary(node)}</td>
     </tr>`;
 }
 
-const HEAD = '<thead><tr><th>Node</th><th>State</th><th>Seen from</th><th>Hosts</th></tr></thead>';
+const HEAD = '<thead><tr><th>Node</th><th>State</th><th>Processes</th><th>Seen from</th><th>Hosts</th></tr></thead>';
 
 function table(nodes, emptyText) {
     const rows = nodes.map(row).join('');
     return `<table class="grid">${HEAD}
-        <tbody>${rows || `<tr><td colspan="4" class="muted">${esc(emptyText)}</td></tr>`}</tbody>
+        <tbody>${rows || `<tr><td colspan="5" class="muted">${esc(emptyText)}</td></tr>`}</tbody>
     </table>`;
 }
 

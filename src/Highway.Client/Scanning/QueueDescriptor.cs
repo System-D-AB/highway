@@ -25,4 +25,7 @@ public sealed class QueueDescriptor
 
     /// <summary>Pre-compiled delegate: (processor, message, ct) → Task.</summary>
     public Func<object, object, CancellationToken, Task>? InvokeDelegate { get; set; }
+
+    /// <summary>Optional retry policy configured via [Retry] (feature 073).</summary>
+    public RetryAttribute? Retry { get; init; }
 }

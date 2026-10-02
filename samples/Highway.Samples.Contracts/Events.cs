@@ -63,11 +63,12 @@ public sealed record GenerateInvoice : ISend
 public sealed record ReconcileOrders : ISend;
 
 /// <summary>
-/// Deliberately fails every time, to demonstrate dead-lettering (feature 013).
+/// Deliberately fails every time, to demonstrate dead-lettering and retry policies (feature 013 + 073).
 /// After MaxDeliveryAttempts the message leaves the queue and lands in the DLQ, where
-/// <c>HW.DLQ PEEK Q poison.queue</c> can find it — instead of looping forever.
+/// an IDeadLetter handler receives it and HW.DLQ inspects it.
 /// </summary>
 [Queue("poison.queue")]
+[Retry(MaxAttempts = 3, Backoff = "fixed:500ms")]
 public sealed record AlwaysFails : ISend
 {
     public string Reason { get; init; } = "";

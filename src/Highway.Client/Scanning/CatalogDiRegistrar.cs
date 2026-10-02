@@ -36,6 +36,14 @@ internal static class CatalogDiRegistrar
                 queue.ProcessorType,
                 MapLifetime(queue.Lifetime)));
         }
+
+        foreach (var deadLetter in scanResult.DeadLetters)
+        {
+            services.Add(new Microsoft.Extensions.DependencyInjection.ServiceDescriptor(
+                deadLetter.HandlerType,
+                deadLetter.HandlerType,
+                MapLifetime(deadLetter.Lifetime)));
+        }
     }
 
     private static ServiceLifetime MapLifetime(HighwayServiceLifetime lifetime) => lifetime switch

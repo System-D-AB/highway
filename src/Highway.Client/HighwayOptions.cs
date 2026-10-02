@@ -11,9 +11,11 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     /// <summary>
     /// Unique name for this node in the cluster.
     ///
-    /// Defaults to a stable value — <c>{entry-assembly-name}-{machine-name}</c> —
-    /// so a restarted process resumes its subscriber group and processing identity
-    /// instead of orphaning them.
+    /// Defaults to a stable value — <c>{entry-assembly-name}-{machine-name}</c>, plus
+    /// <c>-{hosting-name}</c> when the process runs as a Windows service or in an IIS
+    /// application pool (feature 072) — so a restarted process resumes its processing
+    /// identity instead of orphaning it, and copies of one application on one machine
+    /// (several services from the same binaries) are still told apart.
     ///
     /// <para>
     /// MUST be unique per live process instance: two live processes sharing a name
@@ -23,7 +25,23 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     /// every command carrying it (feature 004.1, Requirement 3).
     /// </para>
     /// </summary>
-    public string NodeName { get; set; } = DefaultNodeName();
+    public string NodeName
+    {
+        get => _nodeName ??= DefaultNodeName();
+        set { _nodeName = value; NodeNameIsDefault = false; }
+    }
+
+    private string? _nodeName;
+
+    /// <summary>True until <see cref="NodeName"/> is set explicitly (072: decides the default group).</summary>
+    internal bool NodeNameIsDefault { get; private set; } = true;
+
+    /// <summary>
+    /// This engine's process identity on the broker (072): random, 12 lowercase hex characters, never
+    /// persisted. It suffixes every connection name (<c>CLIENT SETNAME {node}@{instance}</c>), so the
+    /// broker can count the processes behind one node name.
+    /// </summary>
+    internal string InstanceId { get; } = System.Security.Cryptography.RandomNumberGenerator.GetHexString(12, lowercase: true);
 
     /// <summary>
     /// Connection string for the Highway server (Garnet/Redis endpoint).
@@ -238,8 +256,10 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     /// subscription group <b>compete</b> for one copy of each published message; nodes with
     /// distinct groups each receive <b>their own copy</b>.
     ///
-    /// <para>Default <c>null</c> → the group is <see cref="NodeName"/>, which reproduces the
-    /// original behavior exactly: every node is its own group, every node gets a copy. Set it
+    /// <para>Default <c>null</c> → the group is <see cref="NodeName"/> when that is set explicitly,
+    /// and <c>{entry-assembly-name}-{machine-name}</c> when it is defaulted (072) — the value the
+    /// default node name had before 072, so copies of one application on one machine keep sharing
+    /// one group even though each now has its own node name. Set it
     /// to one stable name per logical application ("billing") and scale replicas freely —
     /// they will share the group's queue through the ordinary claim machinery.</para>
     ///
@@ -250,7 +270,7 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     public string? SubscriptionGroup { get; set; }
 
     /// <summary>The group pub/sub actually uses: <see cref="SubscriptionGroup"/> or <see cref="NodeName"/>.</summary>
-    internal string EffectiveSubscriptionGroup => SubscriptionGroup ?? NodeName;
+    internal string EffectiveSubscriptionGroup => SubscriptionGroup ?? (NodeNameIsDefault ? BaseName() : NodeName);
 
     /// <summary>Recurring-job declarations (feature 028). See <see cref="JobsOptions"/>.</summary>
     public JobsOptions Jobs { get; } = new();
@@ -282,9 +302,33 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
         return this;
     }
 
-    private static string DefaultNodeName()
+    /// <summary>The pre-072 default node name: <c>{entry-assembly-name}-{machine-name}</c>.</summary>
+    internal static string BaseName()
     {
         var appName = Assembly.GetEntryAssembly()?.GetName().Name ?? "highway-node";
-        return $"{appName}-{Environment.MachineName}";
+        return ProcessHosting.Compose(appName, Environment.MachineName);
     }
+
+    /// <summary>The hosting name of this process (072), detected once per options object.</summary>
+    internal string? HostingName
+    {
+        get
+        {
+            if (!_hostingDetected)
+            {
+                _hostingName = HostingDetector();
+                _hostingDetected = true;
+            }
+            return _hostingName;
+        }
+    }
+
+    private string? _hostingName;
+    private bool _hostingDetected;
+
+    /// <summary>Test seam (072): what detects the hosting name. Per options object, so tests can run in parallel.</summary>
+    internal Func<string?> HostingDetector { get; set; } = ProcessHosting.DetectHostingName;
+
+    private string DefaultNodeName()
+        => HostingName is { } hosting ? ProcessHosting.Compose(BaseName(), hosting) : BaseName();
 }

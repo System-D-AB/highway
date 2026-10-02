@@ -7,6 +7,7 @@
 // PROCESSED is what came through it. A node declaring a service it has never served
 // is a misconfiguration, and neither list shows that on its own.
 import { esc, getJson, since, setActiveView } from './shared.js';
+import { SHARED_TITLE } from './nodes.js';
 
 const OUTCOME_CLASS = {
     Processed: 'state-live',
@@ -51,6 +52,32 @@ function canUse(d) {
 
     return `<h3>Can use <span class="muted">— references the contract; not proof of calling</span></h3>
             <div class="declared">${groups}</div>`;
+}
+
+// 072: the live processes behind this name, with what each said about itself. An observation:
+// it describes the connections the broker holds now, and is gone when they are.
+function instances(d) {
+    const list = d.instances || [];
+    if (list.length === 0) return '';
+
+    const warn = list.length > 1
+        ? `<p class="state-stale">⚠ ${list.length} ${esc(SHARED_TITLE)}</p>`
+        : '';
+    const rows = list.map((i) => `<tr>
+        <td class="mono">${esc(i.id)}</td>
+        <td class="mono">${esc(i.seenFrom)}</td>
+        <td>${esc(i.host ?? '—')}</td>
+        <td>${esc(i.pid ?? '—')}</td>
+        <td>${esc(i.hosting ?? '—')}</td>
+        <td>${esc(clock(i.started))}</td>
+        <td>${esc(i.client ?? '—')}</td>
+    </tr>`).join('');
+
+    return `<h3>Processes</h3>${warn}
+        <table class="grid">
+            <thead><tr><th>Instance</th><th>Seen from</th><th>Host</th><th>PID</th><th>Hosting</th><th>Started</th><th>Client</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
 }
 
 function row(m) {
@@ -101,6 +128,8 @@ export async function render(container, options, params) {
                 <span class="state-live">${d.processed} processed</span>
                 ${d.failed > 0 ? ` · <span class="state-absent">${d.failed} failed</span>` : ''}
             </p>
+
+            ${instances(d)}
 
             <h3>Declares</h3>
             <div class="declared">${groups || '<p class="muted">Declares nothing.</p>'}</div>

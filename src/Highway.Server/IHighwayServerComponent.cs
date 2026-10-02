@@ -29,4 +29,9 @@ internal sealed record HighwayComponentContext(
     /// what has happened (020). The recorder answers the second question; this answers the
     /// first.
     /// </summary>
-    IBrokerState BrokerState);
+    IBrokerState BrokerState,
+
+    /// <summary>
+    /// In-process command dispatcher for components that need to execute operator actions.
+    /// </summary>
+    Resp.CommandDispatcher? Dispatcher = null);

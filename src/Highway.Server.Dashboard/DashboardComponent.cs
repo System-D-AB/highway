@@ -56,6 +56,8 @@ internal sealed class DashboardComponent : IHighwayServerComponent
             builder.Services.AddSingleton(new DashboardInfo(_context.Endpoint));
             builder.Services.AddSingleton(_context.BrokerState);
             builder.Services.AddSingleton(new StreamRegistry(_options.MaxConcurrentStreams));
+            if (_context.Dispatcher is not null)
+                builder.Services.AddSingleton(_context.Dispatcher);
 
             _app = builder.Build();
 

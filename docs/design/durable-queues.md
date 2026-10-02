@@ -67,9 +67,9 @@ delivery. The message stays claimed and the lease sweep recovers it on the norma
 recorded reason is what turns a bare "failed *n* times" dead letter into something an operator can
 diagnose without correlating logs across every worker.
 
-**Dead-lettering is bounded retry.** Once a message exceeds its delivery-attempt cap the sweep
-moves it to the queue's **dead-letter queue** instead of retrying forever, carrying its failure
-block. The DLQ is inspectable and re-drivable through its own command family.
+**Dead-lettering is bounded retry and notification.** Once a message exceeds its delivery-attempt cap (or configured `[Retry]` attempts), the sweep moves it to the queue's **dead-letter queue** instead of retrying forever, carrying its failure block and lineage trailer. The DLQ is inspectable and re-drivable through `HW.DLQ` and `IHighwayDeadLetters`. When a dead-letter consumer (`IDeadLetter<T>`) is registered, dead-lettering also pushes a notification to the target's feed box (`BoxKeys.Kind.DeadFeed`) and rings `hw:door:dlq:q:{queue}`. Handlers claim notifications via `HW.CLAIM DEAD` and resolve them atomically (`KEEP`, `DISCARD`, or `REQUEUE`). Highway never automatically re-feeds dead letters without handler or operator command.
+
+**Declarative retry policies.** Queue contracts annotate messages with `[Retry(MaxAttempts = n, Backoff = "exp:500ms..30s:jitter", MaxRequeues = m)]`. During lease recovery sweeps, failed messages are rescheduled into delayed space with deterministic integer FNV-1a jitter before exhausting attempts and dead-lettering. Lineage trailers (`[0xFE][u16 requeues]`) track successive requeue cycles, enforcing `MaxRequeues` limits during handler remediation.
 
 **Deferred delivery** uses an absolute UTC time, not a relative delay, so a restart cannot re-delay a
 message. A deferred send is invisible to workers until its time passes, when a claim promotes it into

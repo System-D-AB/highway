@@ -47,6 +47,8 @@ internal sealed class CommandDispatcher
     /// <summary>The box runtime (065) — exposed for readers outside commands (broker state, inspection).</summary>
     internal Storage.Boxes.BoxRuntime Boxes => _boxes;
 
+    private readonly InstanceRegistry? _instances;   // 072: HW.SESSION's instance descriptions
+
     public CommandDispatcher(
         IHighwayStore store,
         StripedLock locks,
@@ -55,8 +57,10 @@ internal sealed class CommandDispatcher
         HighwayServerOptions options,
         Highway.Server.Storage.Rocks.ReplicationFeeder? replication = null,
         Highway.Server.Storage.Cache.IHighwayCacheStore? cache = null,
-        HighwayMetrics? metrics = null)
+        HighwayMetrics? metrics = null,
+        InstanceRegistry? instances = null)
     {
+        _instances = instances;
         _store = store;
         _locks = locks;
         _doorbell = doorbell;
@@ -202,7 +206,7 @@ internal sealed class CommandDispatcher
         var args = new byte[frame.Count - 1][];
         for (var i = 1; i < frame.Count; i++) args[i - 1] = frame[i];
 
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps, _boxes);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps, _boxes, _instances);
         var command = entry.Factory();
 
         // HW.CALL carries the RPC request/latency instruments (051 R1): time the server-side

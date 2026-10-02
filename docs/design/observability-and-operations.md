@@ -42,16 +42,24 @@ diagnosed is not.
 the recorder live, which is why it isn't a separate package), it shows recorder health and event
 browsing with live SSE tailing, plus the replication views — role and slots, a "seen from" node
 address, and a succession view over the roster. It reflects reality: a node's address appears only
-while connected, and degraded replication states are surfaced rather than left to infer.
+while connected, and degraded replication states are surfaced rather than left to infer. The Nodes
+view counts the **processes** behind each node name and flags a name more than one live process
+uses (feature 072, C7.7); a node's page lists them — instance, seen from, host, pid, hosting name,
+start time and client version.
+
+**Dead-letter management (feature 073).** The Entity details page features a Dead Letters panel displaying unconsumed dead letters with their deadId, attempts, requeue lineage, failure reason, diagnostic stack traces, and decoded/raw payload previews. Operators can inspect entries without side effects, or trigger point/batch Requeue and Purge actions. Mutating actions require the dashboard API key (`X-API-Key` or Bearer token); unauthenticated viewers retain a safe read-only preview.
 
 **Logs to disk.** The broker writes rolling daily log files (console + file) so a
 Windows-service or systemd deployment has a durable operational record, not just stdout.
 
-**Metrics (feature 051).** The broker exposes a `Highway.Server` meter and the client a
+**Metrics (features 051, 073).** The broker exposes a `Highway.Server` meter and the client a
 `Highway.Client` meter through the in-box `System.Diagnostics.Metrics` API — replication
 role/epoch/lag and promotions/demotions/fences, queue depth/bytes and dead-letters, RPC
 throughput/latency/errors, connections and recorder drops; the client adds RPC latency and a
-`failovers` counter (the caller-side view of a master change). Same posture as the spans: no OTel
+`failovers` counter (the caller-side view of a master change). Feature 073 adds dead-letter metrics:
+`highway.deadletters.resolved` (labeled by action and resolver), `highway.deadletters.requeued`, and
+the observable gauge `highway.deadletter.feed.depth`, alongside flight recorder events
+`DeadLetterResolved`, `DeadLetterRequeueRefused`, and `DeadLetterFeedOverflow`, and a periodic warning sweeper for dead letters older than `DeadLetterAgeWarning` (default 24h) with no declared feed. Same posture as the spans: no OTel
 dependency, and zero cost when unobserved — counters do a cheap `Add`, and the observable gauges
 sample the live feeder/store only when a listener collects. The application wires the exporter:
 

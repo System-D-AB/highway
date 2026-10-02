@@ -1,3 +1,4 @@
+using Highway.Abstractions;
 using Highway.Client.Execution;
 using Highway.Client.Scanning;
 using Microsoft.Extensions.DependencyInjection;
@@ -250,6 +251,36 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 }
             }
 
+            foreach (var deadLetter in _catalog.AllDeadLetters)
+            {
+                var wake = new LoopWake();
+                var loop = new DeadLetterWorkerLoop(
+                    deadLetter, _connection, executor, _options.NodeName, group, wake,
+                    _loggerFactory.CreateLogger($"Highway.DeadLetter.{deadLetter.TargetName}"),
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
+
+                loopTasks.Add(Task.Run(
+                    () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
+                    CancellationToken.None));
+                wakes.Add(wake);
+
+                if (_options.DoorbellsEnabled)
+                {
+                    var dlWake = wake;
+                    try
+                    {
+                        await _connection.SubscribeDeadLetterDoorbellAsync(
+                            loop.FeedTarget, _ => dlWake.Signal(), ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Could not subscribe to the doorbell for dead letter feed '{Target}'; the backstop sweep still drives it",
+                            loop.FeedTarget);
+                    }
+                }
+            }
+
             await watcher.StartAsync(ct).ConfigureAwait(false);
 
             // 3. The session (068 C3): subscriber groups (025 — the group is the logical consumer,
@@ -270,13 +301,35 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                     Wire.HighwayJson.EncodeEnvelope(_options.NodeName, job.Template)));
             }
 
+            var policies = new List<SessionKeeper.PolicyDeclaration>();
+            foreach (var q in _catalog.AllQueues)
+            {
+                if (q.Retry is not null)
+                    policies.Add(new SessionKeeper.PolicyDeclaration("Q", q.Name, q.Retry.MaxAttempts, q.Retry.Backoff, q.Retry.MaxRequeues));
+            }
+            foreach (var c in _catalog.AllChannels)
+            {
+                if (c.Retry is not null)
+                    policies.Add(new SessionKeeper.PolicyDeclaration("Q", $"{c.Name}@{group}", c.Retry.MaxAttempts, c.Retry.Backoff, c.Retry.MaxRequeues));
+            }
+            foreach (var s in _catalog.AllServices)
+            {
+                if (s.Retry is not null)
+                    policies.Add(new SessionKeeper.PolicyDeclaration("SVC", s.Name, s.Retry.MaxAttempts, s.Retry.Backoff, s.Retry.MaxRequeues));
+            }
+
             _session = new SessionKeeper(
                 _connection,
                 _options.NodeName,
                 _options.HeartbeatEnabled ? _catalog.ToCatalogInfo() : null,
                 [.. _catalog.AllChannels.Select(c => new SessionKeeper.Subscription(c.Name, group))],
                 jobs,
-                _loggerFactory.CreateLogger<SessionKeeper>());
+                _loggerFactory.CreateLogger<SessionKeeper>(),
+                SessionKeeper.Instance.Of(_options),
+                [.. _catalog.AllDeadLetters.Select(d => new SessionKeeper.DeadLetterDeclaration(
+                    d.TargetKind == DeadLetterTargetKind.Service ? "SVC" : "Q",
+                    d.TargetKind == DeadLetterTargetKind.Group ? $"{d.TargetName}@{group}" : d.TargetName))],
+                policies);
 
             // Declared before reporting Running, so the node is discoverable, subscribed and scheduling
             // the moment StartAsync returns; a failure here fails the start.
@@ -320,10 +373,13 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             }
 
             _logger.LogInformation(
-                "Highway engine running: node '{Node}', server '{Server}', {Services} services, {Channels} channels, doorbells {Doorbells}",
-                // Redacted: this string routinely carries a password now, and Information
-                // level reaches every configured log sink (feature 012).
-                _options.NodeName, ConnectionStringRedactor.Redact(_options.Server),
+                "Highway engine running: node '{Node}' instance {Instance} (hosting '{Hosting}', subscription group '{Group}'), " +
+                "server '{Server}', {Services} services, {Channels} channels, doorbells {Doorbells}",
+                // 072: the whole identity, so an operator can see why two processes did or did not get
+                // distinct names. Redacted server: this string routinely carries a password now, and
+                // Information level reaches every configured log sink (feature 012).
+                _options.NodeName, _options.InstanceId, _options.HostingName ?? "none", _options.EffectiveSubscriptionGroup,
+                ConnectionStringRedactor.Redact(_options.Server),
                 _catalog.AllServices.Count, _catalog.AllChannels.Count,
                 _options.DoorbellsEnabled ? "on" : "off");
         }

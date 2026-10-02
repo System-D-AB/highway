@@ -6,7 +6,7 @@
 //
 // Correlation, outcomes and counts are all computed on the server. Nothing in this
 // file groups events or decides what "acknowledged" means.
-import { esc, getJson, bytes, fullness, setActiveView } from './shared.js';
+import { esc, getJson, postJson, bytes, fullness, setActiveView } from './shared.js';
 
 const OUTCOME_CLASS = {
     Processed: 'state-live',
@@ -101,9 +101,10 @@ export async function render(container, options, params) {
     const kind = params.get('kind') || 'Unknown';
 
     const refresh = async () => {
-        const [catalogue, data] = await Promise.all([
+        const [catalogue, data, deadData] = await Promise.all([
             getJson('catalogue', 'api/catalogue'),
             getJson('messages', `api/messages/${encodeURIComponent(name)}`),
+            getJson('deadletters', `api/deadletters?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}&count=50`),
         ]);
 
         const entries = catalogue?.entries || [];
@@ -122,6 +123,73 @@ export async function render(container, options, params) {
                     <td>${g.depth ?? 0} queued</td>
                     <td>${g.deadLettered ? `<span class="state-absent">${g.deadLettered} dead</span>` : ''}${g.draining ? ' <span class="state-absent" title="Its last member stopped subscribing: it receives nothing new and keeps its backlog until the retirement threshold">draining</span>' : ''}</td>
                 </tr>`).join('') + '</tbody></table>';
+        }
+
+        // Dead Letters section (feature 073)
+        html += '<h3>Dead Letters</h3>';
+        if (deadData?.readOnly && deadData.readOnlyReason) {
+            html += `<p class="muted" style="margin-bottom: 0.5rem; color: #e6a23c;">${esc(deadData.readOnlyReason)}</p>`;
+        }
+
+        const deadItems = deadData?.items || [];
+        if (deadItems.length === 0) {
+            html += '<p class="muted">No dead letters currently stored.</p>';
+        } else {
+            if (!deadData?.readOnly) {
+                html += `<div style="margin-bottom: 0.75rem; display: flex; gap: 0.5rem;">
+                    <button type="button" class="btn btn-sm btn-requeue-all" data-kind="${esc(kind)}" data-name="${esc(name)}">Requeue All (${deadItems.length})</button>
+                    <button type="button" class="btn btn-sm btn-purge-all" data-kind="${esc(kind)}" data-name="${esc(name)}">Purge All (${deadItems.length})</button>
+                </div>`;
+            }
+
+            html += `<table class="grid dead-letters-table">
+                <thead><tr>
+                    <th>Dead ID</th>
+                    <th>Message / Request ID</th>
+                    <th>Dead-Lettered</th>
+                    <th>Attempts</th>
+                    <th>Requeues</th>
+                    <th>Failure</th>
+                    <th>Payload Preview</th>
+                    ${deadData?.readOnly ? '' : '<th>Actions</th>'}
+                </tr></thead>
+                <tbody>` + deadItems.map((dl) => {
+                    const idDisplay = dl.messageId ? esc(dl.messageId) : dl.requestId ? esc(dl.requestId) : '—';
+                    let payloadPreview = '—';
+                    if (dl.payloadState === 'captured') {
+                        payloadPreview = dl.payload ? `<code title="${esc(dl.payload)}">${esc(dl.payload.length > 40 ? dl.payload.substring(0, 40) + '…' : dl.payload)}</code>` : '<span class="muted">empty</span>';
+                    } else if (dl.payloadState === 'headers-only') {
+                        payloadPreview = '<span class="muted">[headers only]</span>';
+                    } else if (dl.payloadState === 'not-captured') {
+                        payloadPreview = '<span class="muted">[not captured]</span>';
+                    } else {
+                        payloadPreview = '<span class="muted">[disabled]</span>';
+                    }
+
+                    const failureDisplay = dl.failureType
+                        ? `<span class="state-absent" title="${esc(dl.failureDetail || '')}">${esc(dl.failureType)}</span>`
+                        : `<span class="muted">${esc(dl.reason || '—')}</span>`;
+
+                    let actions = '';
+                    if (!deadData?.readOnly) {
+                        actions = `<td>
+                            <button type="button" class="btn btn-xs btn-requeue" data-id="${esc(dl.deadId)}" data-kind="${esc(kind)}" data-name="${esc(name)}">Requeue</button>
+                            <button type="button" class="btn btn-xs btn-requeue-after" data-id="${esc(dl.deadId)}" data-kind="${esc(kind)}" data-name="${esc(name)}">Requeue After…</button>
+                            <button type="button" class="btn btn-xs btn-purge" data-id="${esc(dl.deadId)}" data-kind="${esc(kind)}" data-name="${esc(name)}">Purge</button>
+                        </td>`;
+                    }
+
+                    return `<tr>
+                        <td><code>${esc(dl.deadId)}</code></td>
+                        <td>${idDisplay}</td>
+                        <td>${endpoint(dl.deadLetteredAt)}</td>
+                        <td>${dl.attempts}</td>
+                        <td>${dl.requeues}</td>
+                        <td>${failureDisplay}</td>
+                        <td>${payloadPreview}</td>
+                        ${actions}
+                    </tr>`;
+                }).join('') + '</tbody></table>';
         }
 
         html += '<h3>Messages</h3>';
@@ -143,7 +211,72 @@ export async function render(container, options, params) {
                  <span class="muted">the transport underneath, for debugging Highway itself</span></p>`;
 
         container.innerHTML = html;
+
+        // Wire event listeners for dead letter actions
+        container.querySelectorAll('.btn-requeue').forEach((btn) => {
+            btn.onclick = async () => {
+                const id = btn.getAttribute('data-id');
+                const k = btn.getAttribute('data-kind');
+                const n = btn.getAttribute('data-name');
+                btn.disabled = true;
+                await postJson('deadletters', 'api/deadletters/requeue', { kind: k, name: n, deadLetterId: id });
+                await refresh();
+            };
+        });
+
+        container.querySelectorAll('.btn-requeue-after').forEach((btn) => {
+            btn.onclick = async () => {
+                const id = btn.getAttribute('data-id');
+                const k = btn.getAttribute('data-kind');
+                const n = btn.getAttribute('data-name');
+                const secondsStr = prompt('Delay before requeue (seconds):', '10');
+                if (secondsStr === null) return;
+                const sec = parseFloat(secondsStr);
+                if (isNaN(sec) || sec <= 0) {
+                    alert('Invalid delay.');
+                    return;
+                }
+                btn.disabled = true;
+                await postJson('deadletters', 'api/deadletters/requeue', { kind: k, name: n, deadLetterId: id, afterMs: Math.round(sec * 1000) });
+                await refresh();
+            };
+        });
+
+        container.querySelectorAll('.btn-purge').forEach((btn) => {
+            btn.onclick = async () => {
+                const id = btn.getAttribute('data-id');
+                const k = btn.getAttribute('data-kind');
+                const n = btn.getAttribute('data-name');
+                if (!confirm(`Purge dead letter ${id}?`)) return;
+                btn.disabled = true;
+                await postJson('deadletters', 'api/deadletters/purge', { kind: k, name: n, deadLetterId: id });
+                await refresh();
+            };
+        });
+
+        container.querySelectorAll('.btn-requeue-all').forEach((btn) => {
+            btn.onclick = async () => {
+                const k = btn.getAttribute('data-kind');
+                const n = btn.getAttribute('data-name');
+                if (!confirm(`Requeue all dead letters for ${n}?`)) return;
+                btn.disabled = true;
+                await postJson('deadletters', 'api/deadletters/requeue', { kind: k, name: n, count: 500 });
+                await refresh();
+            };
+        });
+
+        container.querySelectorAll('.btn-purge-all').forEach((btn) => {
+            btn.onclick = async () => {
+                const k = btn.getAttribute('data-kind');
+                const n = btn.getAttribute('data-name');
+                if (!confirm(`Purge all dead letters for ${n}?`)) return;
+                btn.disabled = true;
+                await postJson('deadletters', 'api/deadletters/purge', { kind: k, name: n, count: 500 });
+                await refresh();
+            };
+        });
     };
 
     setActiveView(refresh, options.pollIntervalMs);
 }
+

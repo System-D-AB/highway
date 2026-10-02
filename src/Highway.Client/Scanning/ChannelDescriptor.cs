@@ -1,3 +1,5 @@
+using Highway.Abstractions;
+
 namespace Highway.Client.Scanning;
 
 /// <summary>
@@ -16,4 +18,7 @@ public sealed class ChannelDescriptor
 
     /// <summary>Whether this is an internal Highway channel.</summary>
     public bool IsInternal { get; init; }
+
+    /// <summary>Optional retry policy configured via [Retry] (feature 073).</summary>
+    public RetryAttribute? Retry { get; init; }
 }

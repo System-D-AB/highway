@@ -26,6 +26,13 @@ internal sealed class WorkBox : IDisposable
 {
     private const byte CHead = 1, CNextSeq = 2, CReady = 3, CInFlight = 4, CDelayed = 5, CDead = 6, CBytes = 7, CDeadHead = 8;
     private const byte CDrainingSince = 9;   // 070: a group queue whose last member left (ticks; absent = not draining)
+    private const byte CFeedOn = 10;         // 073: >= 1 node is declaring a feed for this target (count; absent = 0)
+    private const byte CMaxRequeues = 11;    // 073: retry policy max requeues (default 3)
+    private const byte CMaxAttempts = 12;    // 073: retry policy max attempts (absent = server option)
+    private const byte CBackoffKind = 13;    // 073: 0=none, 1=fixed, 2=exp
+    private const byte CBackoffMin = 14;     // 073: min backoff ticks
+    private const byte CBackoffMax = 15;     // 073: max backoff ticks
+    private const byte CJitter = 16;         // 073: 1=deterministic jitter, 0=none
     private const int SweepPage = 256;
 
     private readonly IHighwayStore _store;
@@ -92,6 +99,58 @@ internal sealed class WorkBox : IDisposable
         var key = BoxKeys.Counter(Id, CDrainingSince);
         if (ticks <= 0) _store.Delete(Batch, key);
         else _store.Set(Batch, key, BoxKeys.I64(ticks));
+    }
+
+    /// <summary>Number of nodes currently declaring a feed for this target (073), or 0 when no feed is declared.</summary>
+    public long FeedOn => Get(CFeedOn);
+
+    /// <summary>Sets the number of active feed members for this target (073).</summary>
+    public void SetFeedOn(long count)
+    {
+        var key = BoxKeys.Counter(Id, CFeedOn);
+        if (count <= 0) _store.Delete(Batch, key);
+        else _store.Set(Batch, key, BoxKeys.I64(count));
+    }
+
+    /// <summary>Maximum number of requeues permitted for this target by policy (073), or default 3.</summary>
+    public int MaxRequeues => Get(CMaxRequeues) is var v && v > 0 ? (int)v : 3;
+
+    /// <summary>Sets the max requeues policy for this target (073).</summary>
+    public void SetMaxRequeues(int max)
+    {
+        var key = BoxKeys.Counter(Id, CMaxRequeues);
+        if (max <= 0) _store.Delete(Batch, key);
+        else _store.Set(Batch, key, BoxKeys.I64(max));
+    }
+
+    /// <summary>Returns the configured retry policy for this target, or server defaults (073).</summary>
+    public Highway.Abstractions.RetryPolicy GetRetryPolicy()
+    {
+        var maxAttempts = (int)Get(CMaxAttempts);
+        var kind = (Highway.Abstractions.BackoffKind)Get(CBackoffKind);
+        var min = TimeSpan.FromTicks(Get(CBackoffMin));
+        var max = TimeSpan.FromTicks(Get(CBackoffMax));
+        var jitter = Get(CJitter) != 0;
+        var maxRequeues = Get(CMaxRequeues) is var mr && mr > 0 ? (int)mr : 3;
+        return new Highway.Abstractions.RetryPolicy(maxAttempts, kind, min, max, jitter, maxRequeues);
+    }
+
+    /// <summary>Sets the retry policy for this target (073).</summary>
+    public void SetRetryPolicy(Highway.Abstractions.RetryPolicy policy)
+    {
+        SetCounter(CMaxAttempts, policy.MaxAttempts);
+        SetCounter(CBackoffKind, (long)policy.BackoffKind);
+        SetCounter(CBackoffMin, policy.MinBackoff.Ticks);
+        SetCounter(CBackoffMax, policy.MaxBackoff.Ticks);
+        SetCounter(CJitter, policy.Jitter ? 1 : 0);
+        SetCounter(CMaxRequeues, policy.MaxRequeues);
+    }
+
+    private void SetCounter(byte counter, long value)
+    {
+        var key = BoxKeys.Counter(Id, counter);
+        if (value == 0 && counter is not CMaxRequeues) _store.Delete(Batch, key);
+        else _store.Set(Batch, key, BoxKeys.I64(value));
     }
 
     private long Get(byte counter) => BoxKeys.ReadI64(_store.Read(Batch, BoxKeys.Counter(Id, counter)));
@@ -246,7 +305,7 @@ internal sealed class WorkBox : IDisposable
     // Recovery
     // =====================================================================================
 
-    internal readonly record struct DeadLettered(string Id, ushort Attempts);
+    internal readonly record struct DeadLettered(string Id, ushort Attempts, ulong Seq, byte[] Record);
 
     /// <summary>
     /// Recovers claims whose lease started before <paramref name="leaseExpiry"/>: each returns to ready
@@ -255,6 +314,7 @@ internal sealed class WorkBox : IDisposable
     /// </summary>
     public List<DeadLettered> SweepLeases(long leaseExpiry, long nowTicks, int maxAttempts, int maxDeadEntries)
     {
+        var policy = GetRetryPolicy();
         var outcomes = new List<DeadLettered>();
         var floor = _rt.Floor(Id, BoxKeys.Lease);
         var page = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Lease), BoxKeys.TicksFloor(Id, BoxKeys.Lease, floor), SweepPage);
@@ -269,7 +329,7 @@ internal sealed class WorkBox : IDisposable
             _store.Delete(Batch, key);
             if (ReadInFlight(seq) is not { } rec) continue;   // index entry without a claim: just drop it
             RemoveInFlight(seq, rec);
-            Redeliver(rec.Entry, nowTicks, maxAttempts, maxDeadEntries, outcomes);
+            Redeliver(rec.Entry, nowTicks, maxAttempts, maxDeadEntries, outcomes, policy);
         }
         if (exhausted) _raises.Add((BoxKeys.Lease, leaseExpiry));
         else if (processed > 0) _raises.Add((BoxKeys.Lease, BoxKeys.TicksAt(page[processed - 1].Key)));
@@ -304,17 +364,31 @@ internal sealed class WorkBox : IDisposable
         return count;
     }
 
-    private void Redeliver(byte[] entry, long nowTicks, int maxAttempts, int maxDeadEntries, List<DeadLettered> outcomes)
+    private void Redeliver(byte[] entry, long nowTicks, int maxAttempts, int maxDeadEntries, List<DeadLettered> outcomes, Highway.Abstractions.RetryPolicy policy)
     {
         Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
         var next = Envelope.NextAttempt(attempts);
         var rebuilt = Envelope.CarryFailureBlock(entry, Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), next));
-        if (maxAttempts > 0 && next > maxAttempts)
+        var effectiveMax = policy.MaxAttempts > 0 ? policy.MaxAttempts : maxAttempts;
+        if (effectiveMax > 0 && next > effectiveMax)
         {
-            PushDead(DeadLetter.Encode(nowTicks, next, DeadLetter.MaxAttempts, rebuilt), maxDeadEntries);
-            outcomes.Add(new DeadLettered(Encoding.UTF8.GetString(id), next));
+            var record = DeadLetter.Encode(nowTicks, next, DeadLetter.MaxAttempts, rebuilt);
+            var deadSeq = PushDead(record, maxDeadEntries);
+            outcomes.Add(new DeadLettered(Encoding.UTF8.GetString(id), next, deadSeq, record));
             return;
         }
+
+        if (policy.BackoffKind != Highway.Abstractions.BackoffKind.None)
+        {
+            var messageId = Encoding.UTF8.GetString(id);
+            var delayTicks = policy.CalculateBackoffTicks(messageId, next);
+            if (delayTicks > 0)
+            {
+                EnqueueDelayed(rebuilt, nowTicks + delayTicks);
+                return;
+            }
+        }
+
         Enqueue(rebuilt);
     }
 
@@ -356,7 +430,7 @@ internal sealed class WorkBox : IDisposable
     // Dead letters
     // =====================================================================================
 
-    private void PushDead(byte[] record, int maxEntries)
+    internal ulong PushDead(byte[] record, int maxEntries)
     {
         var seq = NextSeq();
         _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.Dead, seq), record);
@@ -364,25 +438,100 @@ internal sealed class WorkBox : IDisposable
         if (maxEntries > 0)
             while (Get(CDead) > maxEntries)
                 if (TakeDead(1, _ => { }) == 0) break;
+        return seq;
+    }
+
+    /// <summary>
+    /// Drops the oldest ready entries until the ready count is at or below <paramref name="maxEntries"/>.
+    /// Returns how many were dropped (073).
+    /// </summary>
+    public int TrimReady(int maxEntries)
+    {
+        if (maxEntries <= 0) return 0;
+        var dropped = 0;
+        while (Get(CReady) > maxEntries)
+        {
+            var head = (ulong)Get(CHead);
+            var scan = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Ready), BoxKeys.Seq(Id, BoxKeys.Ready, head), 1);
+            if (scan.Count == 0) break;
+            var (key, entry) = scan[0];
+            _store.Delete(Batch, key);
+            var seq = BoxKeys.TrailingSeq(key);
+            _store.Set(Batch, BoxKeys.Counter(Id, CHead), BoxKeys.I64((long)(seq + 1)));
+            Add(CReady, -1);
+            if (TracksBytes) Add(CBytes, -entry.Length);
+            dropped++;
+        }
+        return dropped;
     }
 
     /// <summary>The oldest dead letters, without removing them.</summary>
     public IReadOnlyList<(byte[] Key, byte[] Value)> PeekDead(int count)
         => count <= 0 ? [] : _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Dead), BoxKeys.Seq(Id, BoxKeys.Dead, (ulong)Get(CDeadHead)), count);
 
+    /// <summary>Reads a specific dead letter record by sequence, or null when absent or already settled.</summary>
+    public byte[]? ReadDead(ulong seq)
+        => _store.Read(Batch, BoxKeys.Seq(Id, BoxKeys.Dead, seq));
+
     /// <summary>
-    /// Returns the oldest dead letters to ready with attempts reset to zero and the failure block dropped —
-    /// an operator fixed something, so the message starts clean (as <c>HW.DLQ REQUEUE</c> always did).
+    /// Returns the oldest dead letters to ready with attempts reset to zero, failure block dropped,
+    /// and lineage incremented (as <c>HW.DLQ REQUEUE</c> always did).
     /// </summary>
     public int RequeueDead(int count)
         => TakeDead(count, record =>
         {
             DeadLetter.Decode(record, out _, out _, out _, out var original);
-            Enqueue(Reencode(original.ToArray(), keepAttempts: false));
+            Envelope.TryGetLineage(original, out var requeues, out var withoutLineage);
+            var nextRequeues = (ushort)(requeues + 1);
+            var bare = Envelope.StripFailureBlock(withoutLineage);
+            var clean = Reencode(bare.ToArray(), keepAttempts: false);
+            Enqueue(Envelope.WithLineage(clean, nextRequeues));
         });
 
     /// <summary>Deletes the oldest dead letters.</summary>
     public int PurgeDead(int count) => TakeDead(count, _ => { });
+
+    /// <summary>Deletes a specific dead letter by sequence. False when absent (already purged, requeued, or evicted).</summary>
+    public bool PurgeDead(ulong seq)
+    {
+        var key = BoxKeys.Seq(Id, BoxKeys.Dead, seq);
+        if (_store.Read(Batch, key) is null) return false;
+        _store.Delete(Batch, key);
+        Add(CDead, -1);
+        if (seq == (ulong)Get(CDeadHead))
+            _store.Set(Batch, BoxKeys.Counter(Id, CDeadHead), BoxKeys.I64((long)(seq + 1)));
+        return true;
+    }
+
+    /// <summary>
+    /// Requeues a specific dead letter by sequence with attempts reset to zero and lineage incremented.
+    /// False when absent.
+    /// </summary>
+    public bool RequeueDead(ulong seq, TimeSpan? after = null, long nowTicks = 0)
+    {
+        var key = BoxKeys.Seq(Id, BoxKeys.Dead, seq);
+        var record = _store.Read(Batch, key);
+        if (record is null) return false;
+
+        _store.Delete(Batch, key);
+        Add(CDead, -1);
+        if (seq == (ulong)Get(CDeadHead))
+            _store.Set(Batch, BoxKeys.Counter(Id, CDeadHead), BoxKeys.I64((long)(seq + 1)));
+
+        DeadLetter.Decode(record, out _, out _, out _, out var original);
+        Envelope.TryGetLineage(original, out var requeues, out var withoutLineage);
+        var nextRequeues = (ushort)(requeues + 1);
+        var bare = Envelope.StripFailureBlock(withoutLineage);
+        var clean = Reencode(bare.ToArray(), keepAttempts: false);
+        var rebuilt = Envelope.WithLineage(clean, nextRequeues);
+
+        if (after is { } delay && delay > TimeSpan.Zero)
+            EnqueueDelayed(rebuilt, nowTicks + delay.Ticks);
+        else
+            Enqueue(rebuilt);
+
+        return true;
+    }
 
     private int TakeDead(int count, Action<byte[]> each)
     {
@@ -396,7 +545,7 @@ internal sealed class WorkBox : IDisposable
             each(record);
             taken++;
         }
-        if (taken > 0) _store.Set(Batch, BoxKeys.Counter(Id, CDeadHead), BoxKeys.I64((long)head));
+        if (taken > 0) _store.Set(Batch, BoxKeys.Counter(Id, CDeadHead), BoxKeys.I64((long)(head)));
         return taken;
     }
 

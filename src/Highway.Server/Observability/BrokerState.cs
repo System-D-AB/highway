@@ -53,4 +53,22 @@ internal interface IBrokerState
 
     /// <summary>Replication role/epoch/slots (042 T4). Unavailable on an ephemeral broker.</summary>
     Task<StateResult<IReadOnlyDictionary<string, string>>> ReplicationAsync(CancellationToken ct = default);
+
+    /// <summary>Dead letters for a queue, service, or subscriber group (feature 073).</summary>
+    Task<StateResult<IReadOnlyList<DeadLetterStateDto>>> DeadLettersAsync(
+        string kind, string name, int count = 20, CancellationToken ct = default);
 }
+
+/// <summary>Dead-letter entry state for dashboard inspection (feature 073).</summary>
+internal sealed record DeadLetterStateDto(
+    string DeadId,
+    string? MessageId,
+    string? RequestId,
+    DateTimeOffset DeadLetteredAt,
+    int Attempts,
+    int Requeues,
+    string Reason,
+    string? FailureType,
+    string? FailureFirstType,
+    string? FailureDetail,
+    byte[] Payload);

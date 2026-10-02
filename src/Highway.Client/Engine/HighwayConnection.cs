@@ -1,4 +1,5 @@
 using System.Globalization;
+using Highway.Abstractions;
 using Highway.Client.Wire;
 using StackExchange.Redis;
 
@@ -26,6 +27,19 @@ internal enum WorkKind { Service, Queue }
 /// the message's id, and its payload.
 /// </summary>
 internal readonly record struct ClaimedWork(string Token, string Id, byte[] Payload);
+internal readonly record struct DeadLetterResolutionResult(bool Held, string Status, string Detail);
+
+/// <summary>Raw representation of an entry returned by HW.DLQ PEEK.</summary>
+public sealed record RawDeadLetterPeekEntry(
+    string DeadLetterId,
+    DateTimeOffset DeadLetteredAt,
+    int Attempts,
+    int Requeues,
+    string Reason,
+    string Id,
+    byte[] Payload,
+    FailureInfo? LastFailure,
+    FailureInfo? FirstFailure);
 
 /// <summary>
 /// The wire surface of <see cref="HighwayConnection"/> — every HW.* command shape and doorbell
@@ -59,6 +73,17 @@ internal interface IHighwayConnection
     // Doorbells (latency only, never correctness)
     Task SubscribeDoorbellAsync(string channel, Action<string> onMessage, CancellationToken ct = default);
     Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default);
+    Task SubscribeDeadLetterDoorbellAsync(string target, Action<string> onNotification, CancellationToken ct = default);
+
+    // Dead letters (feature 073)
+    Task<ClaimedWork?> ClaimDeadAsync(WorkKind kind, string name, string nodeId, CancellationToken ct = default);
+    Task<DeadLetterResolutionResult> ResolveDeadLetterAsync(string token, DeadLetterAction action, CancellationToken ct = default);
+    Task<IReadOnlyList<RawDeadLetterPeekEntry>> DlqPeekAsync(string targetKind, string targetName, int count, CancellationToken ct = default);
+    Task<long> DlqCountAsync(string targetKind, string targetName, CancellationToken ct = default);
+    Task<bool> DlqRequeueAsync(string targetKind, string targetName, string deadLetterId, TimeSpan? after = null, CancellationToken ct = default);
+    Task<int> DlqRequeueAllAsync(string targetKind, string targetName, int max, TimeSpan? after = null, CancellationToken ct = default);
+    Task<bool> DlqPurgeAsync(string targetKind, string targetName, string deadLetterId, CancellationToken ct = default);
+    Task<int> DlqPurgeAllAsync(string targetKind, string targetName, int max, CancellationToken ct = default);
 
     // Deduplication (feature 013)
     Task<IdempotencyClaim> ClaimIdempotencyAsync(string name, string id, TimeSpan window, CancellationToken ct = default);
@@ -362,6 +387,217 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
         => SendAsync(async () =>
             (long)(await _db.ExecuteAsync("HW.FAIL", token, exceptionType, detail).ConfigureAwait(false)) == 1, ct);
 
+    /// <summary>
+    /// HW.CLAIM DEAD SVC|Q &lt;name&gt; &lt;nodeId&gt; → one claimed dead-letter notification, or null when nothing is due.
+    /// </summary>
+    public Task<ClaimedWork?> ClaimDeadAsync(WorkKind kind, string name, string nodeId, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            var result = await _db.ExecuteAsync("HW.CLAIM", "DEAD", kind == WorkKind.Service ? "SVC" : "Q", name, nodeId).ConfigureAwait(false);
+            if (result is null || result.IsNull) return default(ClaimedWork?);
+            var rows = (RedisResult[])result!;
+            if (rows.Length == 0) return default(ClaimedWork?);
+            var row = (RedisResult[])rows[0]!;
+            return new ClaimedWork((string)row[0]!, (string)row[1]!, (byte[])row[2]!);
+        }, ct);
+
+    /// <summary>
+    /// HW.DLQ RESOLVE &lt;token&gt; KEEP|DISCARD|REQUEUE [AFTER &lt;ms&gt;]
+    /// </summary>
+    public Task<DeadLetterResolutionResult> ResolveDeadLetterAsync(string token, DeadLetterAction action, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            RedisResult result;
+            if (action.Type == DeadLetterAction.ActionType.Keep)
+            {
+                result = await _db.ExecuteAsync("HW.DLQ", "RESOLVE", token, "KEEP").ConfigureAwait(false);
+            }
+            else if (action.Type == DeadLetterAction.ActionType.Discard)
+            {
+                result = await _db.ExecuteAsync("HW.DLQ", "RESOLVE", token, "DISCARD").ConfigureAwait(false);
+            }
+            else // Requeue
+            {
+                if (action.After is { } after && after > TimeSpan.Zero)
+                {
+                    var ms = (long)after.TotalMilliseconds;
+                    if (ms < 1) ms = 1;
+                    result = await _db.ExecuteAsync("HW.DLQ", "RESOLVE", token, "REQUEUE", "AFTER", ms.ToString()).ConfigureAwait(false);
+                }
+                else
+                {
+                    result = await _db.ExecuteAsync("HW.DLQ", "RESOLVE", token, "REQUEUE").ConfigureAwait(false);
+                }
+            }
+
+            if (result is null || result.IsNull) return new DeadLetterResolutionResult(false, "", "");
+            if (result.Resp2Type == ResultType.Integer)
+            {
+                var val = (long)result;
+                return new DeadLetterResolutionResult(val != 0, val != 0 ? "done" : "notheld", "");
+            }
+            if (result.Resp2Type == ResultType.Array)
+            {
+                var rows = (RedisResult[])result!;
+                var status = rows.Length > 0 ? (string)rows[0]! : "";
+                var detail = rows.Length > 1 ? (string)rows[1]! : "";
+                return new DeadLetterResolutionResult(true, status, detail);
+            }
+            return new DeadLetterResolutionResult(true, result.ToString() ?? "", "");
+        }, ct);
+
+    /// <summary>HW.DLQ PEEK &lt;targetKind&gt; &lt;targetName&gt; COUNT &lt;count&gt;</summary>
+    public Task<IReadOnlyList<RawDeadLetterPeekEntry>> DlqPeekAsync(string targetKind, string targetName, int count, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            var result = await _db.ExecuteAsync("HW.DLQ", "PEEK", targetKind, targetName, "COUNT", count.ToString()).ConfigureAwait(false);
+            if (result is null || result.IsNull || result.Resp2Type != ResultType.Array)
+                return (IReadOnlyList<RawDeadLetterPeekEntry>)Array.Empty<RawDeadLetterPeekEntry>();
+
+            var rows = (RedisResult[])result!;
+            var list = new List<RawDeadLetterPeekEntry>(rows.Length);
+            foreach (var rowObj in rows)
+            {
+                if (rowObj.Resp2Type != ResultType.Array) continue;
+                var row = (RedisResult[])rowObj!;
+
+                string deadLetterId = "";
+                DateTimeOffset deadLetteredAt = default;
+                int attempts = 0;
+                int requeues = 0;
+                string reason = "";
+                string id = "";
+                byte[] payload = [];
+                string? failureType = null;
+                string? failureFirstType = null;
+                string? failureDetail = null;
+
+                for (var i = 0; i + 1 < row.Length; i += 2)
+                {
+                    var key = (string)row[i]!;
+                    var val = row[i + 1];
+                    switch (key)
+                    {
+                        case "deadId":
+                            deadLetterId = (string)val!;
+                            break;
+                        case "deadLetteredAt":
+                            if (DateTimeOffset.TryParse((string)val!, out var dto))
+                                deadLetteredAt = dto;
+                            break;
+                        case "attempts":
+                            int.TryParse((string)val!, out attempts);
+                            break;
+                        case "requeues":
+                            int.TryParse((string)val!, out requeues);
+                            break;
+                        case "reason":
+                            reason = (string)val!;
+                            break;
+                        case "messageId":
+                        case "requestId":
+                            id = (string)val!;
+                            break;
+                        case "payload":
+                            payload = (byte[])val!;
+                            break;
+                        case "failureType":
+                            failureType = (string)val!;
+                            break;
+                        case "failureFirstType":
+                            failureFirstType = (string)val!;
+                            break;
+                        case "failureDetail":
+                            failureDetail = System.Text.Encoding.UTF8.GetString((byte[])val!);
+                            break;
+                    }
+                }
+
+                FailureInfo? lastFailure = failureType is not null ? new FailureInfo(failureType, failureDetail ?? "") : null;
+                FailureInfo? firstFailure = failureFirstType is not null ? new FailureInfo(failureFirstType, failureDetail ?? "") : null;
+
+                list.Add(new RawDeadLetterPeekEntry(
+                    deadLetterId,
+                    deadLetteredAt,
+                    attempts,
+                    requeues,
+                    reason,
+                    id,
+                    payload,
+                    lastFailure,
+                    firstFailure));
+            }
+
+            return (IReadOnlyList<RawDeadLetterPeekEntry>)list;
+        }, ct);
+
+    /// <summary>HW.DLQ COUNT &lt;targetKind&gt; &lt;targetName&gt;</summary>
+    public Task<long> DlqCountAsync(string targetKind, string targetName, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            var result = await _db.ExecuteAsync("HW.DLQ", "COUNT", targetKind, targetName).ConfigureAwait(false);
+            if (result is null || result.IsNull) return 0L;
+            return (long)result;
+        }, ct);
+
+    /// <summary>HW.DLQ REQUEUE &lt;targetKind&gt; &lt;targetName&gt; ID &lt;deadLetterId&gt; [AFTER &lt;ms&gt;]</summary>
+    public Task<bool> DlqRequeueAsync(string targetKind, string targetName, string deadLetterId, TimeSpan? after = null, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            RedisResult result;
+            if (after is { } delay && delay > TimeSpan.Zero)
+            {
+                var ms = (long)delay.TotalMilliseconds;
+                if (ms < 1) ms = 1;
+                result = await _db.ExecuteAsync("HW.DLQ", "REQUEUE", targetKind, targetName, "ID", deadLetterId, "AFTER", ms.ToString()).ConfigureAwait(false);
+            }
+            else
+            {
+                result = await _db.ExecuteAsync("HW.DLQ", "REQUEUE", targetKind, targetName, "ID", deadLetterId).ConfigureAwait(false);
+            }
+
+            if (result is null || result.IsNull) return false;
+            return (long)result > 0;
+        }, ct);
+
+    /// <summary>HW.DLQ REQUEUE &lt;targetKind&gt; &lt;targetName&gt; COUNT &lt;max&gt; [AFTER &lt;ms&gt;]</summary>
+    public Task<int> DlqRequeueAllAsync(string targetKind, string targetName, int max, TimeSpan? after = null, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            RedisResult result;
+            if (after is { } delay && delay > TimeSpan.Zero)
+            {
+                var ms = (long)delay.TotalMilliseconds;
+                if (ms < 1) ms = 1;
+                result = await _db.ExecuteAsync("HW.DLQ", "REQUEUE", targetKind, targetName, "COUNT", max.ToString(), "AFTER", ms.ToString()).ConfigureAwait(false);
+            }
+            else
+            {
+                result = await _db.ExecuteAsync("HW.DLQ", "REQUEUE", targetKind, targetName, "COUNT", max.ToString()).ConfigureAwait(false);
+            }
+
+            if (result is null || result.IsNull) return 0;
+            return (int)(long)result;
+        }, ct);
+
+    /// <summary>HW.DLQ PURGE &lt;targetKind&gt; &lt;targetName&gt; ID &lt;deadLetterId&gt;</summary>
+    public Task<bool> DlqPurgeAsync(string targetKind, string targetName, string deadLetterId, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            var result = await _db.ExecuteAsync("HW.DLQ", "PURGE", targetKind, targetName, "ID", deadLetterId).ConfigureAwait(false);
+            if (result is null || result.IsNull) return false;
+            return (long)result > 0;
+        }, ct);
+
+    /// <summary>HW.DLQ PURGE &lt;targetKind&gt; &lt;targetName&gt; COUNT &lt;max&gt;</summary>
+    public Task<int> DlqPurgeAllAsync(string targetKind, string targetName, int max, CancellationToken ct = default)
+        => SendAsync(async () =>
+        {
+            var result = await _db.ExecuteAsync("HW.DLQ", "PURGE", targetKind, targetName, "COUNT", max.ToString()).ConfigureAwait(false);
+            if (result is null || result.IsNull) return 0;
+            return (int)(long)result;
+        }, ct);
+
     /// <summary>HW.REPLY &lt;requestId&gt; &lt;payload&gt;</summary>
     public Task ReplyAsync(string requestId, byte[] envelope, CancellationToken ct = default)
         => SendAsync(async () =>
@@ -429,6 +665,12 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     /// </summary>
     public Task SubscribeQueueDoorbellAsync(string queue, Action<string> onMessage, CancellationToken ct = default)
         => SubscribeDoorbellAsync($"hw:door:q:{queue}", onMessage, ct);
+
+    /// <summary>
+    /// Subscribes to a dead-letter doorbell — a latency optimisation, never correctness (073).
+    /// </summary>
+    public Task SubscribeDeadLetterDoorbellAsync(string target, Action<string> onNotification, CancellationToken ct = default)
+        => SubscribeDoorbellAsync($"hw:door:dead:{target}", onNotification, ct);
 
     // -------------------------------------------------------------------------
     // Deduplication (feature 013)

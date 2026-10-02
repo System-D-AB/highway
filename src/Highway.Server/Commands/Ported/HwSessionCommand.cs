@@ -7,6 +7,7 @@ using Highway.Abstractions.Observability;
 using Highway.Server.Storage.Boxes;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
+using Microsoft.Extensions.Logging;
 
 namespace Highway.Server.Commands.Ported;
 
@@ -42,19 +43,26 @@ internal sealed class HwSessionCommand : HighwayCommand
 {
     private const int MaxJobs = 256;
     private const int MaxSubscriptions = 1024;
+    private const int MaxDeadLetters = 1024;
+    private const int MaxPolicies = 1024;
     private const int MaxPlanAttempts = 16;   // 070 review F1: re-plan when the locked plan needs more locks
 
     private sealed record JobDecl(string Queue, string Job, string Expression, JobExpression Parsed, byte[] Template);
+    private sealed record PolicyDecl(BoxKeys.Kind Kind, string Name, Highway.Abstractions.RetryPolicy Policy, string BackoffStr);
 
     private string _node = null!;
     private byte[]? _catalog;
     private string[] _services = [];
     private readonly List<(string Channel, string Group)> _subscriptions = [];
     private bool _subscriptionsDeclared;
+    private readonly List<(BoxKeys.Kind Kind, string Name)> _deadLetters = [];
+    private bool _deadLettersDeclared;
+    private readonly List<PolicyDecl> _policies = [];
     private readonly List<(string Channel, string Group)> _joined = [];
     private readonly List<(string Channel, string Group, BoxCommandSupport.LeaveOutcome Outcome)> _left = [];
     private readonly List<JobDecl> _jobs = [];
     private readonly List<(string Queue, string Job, string Detail)> _jobChanges = [];
+    private Resp.InstanceMeta? _instance;
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
     {
@@ -117,12 +125,107 @@ internal sealed class HwSessionCommand : HighwayCommand
                 if (_jobs.Count > MaxJobs)
                     return Fail(HighwayErrors.InvalidArg, $"at most {MaxJobs} jobs per session");
             }
+
+            if (root.TryGetProperty("deadLetters", out var deadLetters) && deadLetters.ValueKind != JsonValueKind.Null)
+            {
+                if (deadLetters.ValueKind != JsonValueKind.Array)
+                    return Fail(HighwayErrors.InvalidArg, "'deadLetters' must be an array");
+                _deadLettersDeclared = true;
+                foreach (var d in deadLetters.EnumerateArray())
+                {
+                    if (d.ValueKind != JsonValueKind.Object)
+                        return Fail(HighwayErrors.InvalidArg, "each deadLetter entry must be an object");
+                    if (!d.TryGetProperty("kind", out var k) || k.ValueKind != JsonValueKind.String || k.GetString() is not { } kindStr)
+                        return Fail(HighwayErrors.InvalidArg, "deadLetter: 'kind' is required");
+                    if (!BoxCommandSupport.TryParseTarget(Encoding.ASCII.GetBytes(kindStr), out var kind))
+                        return Fail(HighwayErrors.InvalidArg, "deadLetter: kind must be SVC or Q");
+                    if (!d.TryGetProperty("name", out var n) || n.ValueKind != JsonValueKind.String || n.GetString() is not { } name)
+                        return Fail(HighwayErrors.InvalidArg, "deadLetter: 'name' is required");
+
+                    var nameBytes = Encoding.UTF8.GetBytes(name);
+                    var nameOk = kind == BoxKeys.Kind.Queue
+                        ? Identifier.IsValidAllowingAt(nameBytes, ctx.Options.MaxIdentifierBytes)
+                        : Identifier.IsValid(nameBytes, ctx.Options.MaxIdentifierBytes);
+                    if (!nameOk)
+                        return Fail(HighwayErrors.InvalidArg, "deadLetter: " + IdentifierErrorDetail(nameBytes, "name", ctx.Options.MaxIdentifierBytes));
+
+                    _deadLetters.Add((kind, name));
+                }
+                if (_deadLetters.Count > MaxDeadLetters)
+                    return Fail(HighwayErrors.InvalidArg, $"at most {MaxDeadLetters} deadLetters per session");
+            }
+
+            if (root.TryGetProperty("policies", out var policies) && policies.ValueKind != JsonValueKind.Null)
+            {
+                if (policies.ValueKind != JsonValueKind.Array)
+                    return Fail(HighwayErrors.InvalidArg, "'policies' must be an array");
+                foreach (var p in policies.EnumerateArray())
+                {
+                    if (p.ValueKind != JsonValueKind.Object)
+                        return Fail(HighwayErrors.InvalidArg, "each policy entry must be an object");
+                    if (!p.TryGetProperty("kind", out var k) || k.ValueKind != JsonValueKind.String || k.GetString() is not { } kindStr)
+                        return Fail(HighwayErrors.InvalidArg, "policy: 'kind' is required");
+                    if (!BoxCommandSupport.TryParseTarget(Encoding.ASCII.GetBytes(kindStr), out var kind))
+                        return Fail(HighwayErrors.InvalidArg, "policy: kind must be SVC or Q");
+                    if (!p.TryGetProperty("name", out var n) || n.ValueKind != JsonValueKind.String || n.GetString() is not { } name)
+                        return Fail(HighwayErrors.InvalidArg, "policy: 'name' is required");
+
+                    var nameBytes = Encoding.UTF8.GetBytes(name);
+                    var nameOk = kind == BoxKeys.Kind.Queue
+                        ? Identifier.IsValidAllowingAt(nameBytes, ctx.Options.MaxIdentifierBytes)
+                        : Identifier.IsValid(nameBytes, ctx.Options.MaxIdentifierBytes);
+                    if (!nameOk)
+                        return Fail(HighwayErrors.InvalidArg, "policy: " + IdentifierErrorDetail(nameBytes, "name", ctx.Options.MaxIdentifierBytes));
+
+                    var maxAttempts = p.TryGetProperty("maxAttempts", out var ma) && ma.TryGetInt32(out var mai) ? mai : 0;
+                    if (maxAttempts < 0) return Fail(HighwayErrors.InvalidArg, "policy: maxAttempts cannot be negative");
+
+                    var maxRequeues = p.TryGetProperty("maxRequeues", out var mr) && mr.TryGetInt32(out var mri) ? mri : 3;
+                    if (maxRequeues < 0) return Fail(HighwayErrors.InvalidArg, "policy: maxRequeues cannot be negative");
+
+                    var backoffStr = p.TryGetProperty("backoff", out var bo) && bo.ValueKind == JsonValueKind.String ? bo.GetString() : "none";
+                    Highway.Abstractions.BackoffKind backoffKind;
+                    TimeSpan minBackoff;
+                    TimeSpan maxBackoff;
+                    bool jitter;
+                    try
+                    {
+                        (backoffKind, minBackoff, maxBackoff, jitter) = Highway.Abstractions.RetryPolicy.ParseBackoff(backoffStr);
+                    }
+                    catch (FormatException ex)
+                    {
+                        return Fail(HighwayErrors.InvalidArg, "policy: " + ex.Message);
+                    }
+
+                    _policies.Add(new PolicyDecl(kind, name, new Highway.Abstractions.RetryPolicy(maxAttempts, backoffKind, minBackoff, maxBackoff, jitter, maxRequeues), backoffStr ?? "none"));
+                }
+                if (_policies.Count > MaxPolicies)
+                    return Fail(HighwayErrors.InvalidArg, $"at most {MaxPolicies} policies per session");
+            }
+
+            _instance = ReadInstance(root);
         }
         catch (JsonException ex)
         {
             return Fail(HighwayErrors.InvalidArg, "session JSON does not parse: " + ex.Message);
         }
         return true;
+    }
+
+    /// <summary>
+    /// The optional <c>instance</c> object (072): what the process says about itself, kept in memory for
+    /// display. Read leniently — a missing or mistyped field is null, and an object without a valid id is
+    /// ignored — because a display detail must never fail a session.
+    /// </summary>
+    private static Resp.InstanceMeta? ReadInstance(JsonElement root)
+    {
+        if (!root.TryGetProperty("instance", out var i) || i.ValueKind != JsonValueKind.Object) return null;
+        string? Str(string name) => i.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+        if (Str("id") is not { } id) return null;
+        int? pid = i.TryGetProperty("pid", out var pp) && pp.ValueKind == JsonValueKind.Number && pp.TryGetInt32(out var n) ? n : null;
+        DateTimeOffset? started = DateTimeOffset.TryParse(Str("started"), System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal, out var at) ? at : null;
+        return new Resp.InstanceMeta(id, Str("host"), pid, Str("hosting"), started, Str("client"));
     }
 
     /// <summary>
@@ -176,7 +279,10 @@ internal sealed class HwSessionCommand : HighwayCommand
         // 2. Memberships (070): join what is declared and not yet held, leave what is no longer declared.
         ApplySubscriptions(ctx);
 
-        // 2. Job schedules, each in its queue's box under that box's lock.
+        // 3. Dead-letter feed memberships (073): join what is declared and not yet held, leave what is no longer declared.
+        ApplyDeadLetters(ctx);
+
+        // 4. Job schedules, each in its queue's box under that box's lock.
         foreach (var job in _jobs)
         {
             var box = BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, job.Queue);
@@ -189,6 +295,24 @@ internal sealed class HwSessionCommand : HighwayCommand
                 _jobChanges.Add((job.Queue, job.Job, $"{previous} => {job.Expression}"));
         }
 
+        // 5. Retry policies, each in its target's box under that box's lock (073).
+        foreach (var policyDecl in _policies)
+        {
+            var box = BoxCommandSupport.Ensure(ctx, policyDecl.Kind, policyDecl.Name);
+            using var _ = BoxCommandSupport.Lock(ctx, box);
+            using var wb = BoxCommandSupport.Open(ctx, box, policyDecl.Kind);
+            var previous = wb.GetRetryPolicy();
+            wb.SetRetryPolicy(policyDecl.Policy);
+            wb.Commit();
+            if (previous != Highway.Abstractions.RetryPolicy.None && previous != policyDecl.Policy)
+            {
+                ctx.Recorder.Logger?.LogWarning(
+                    "Retry policy for {Kind}:{Name} changed from {Previous} to {New}",
+                    policyDecl.Kind, policyDecl.Name, previous, policyDecl.Policy);
+            }
+        }
+
+        if (_instance is not null) ctx.Instances?.Describe(_node, _instance);   // 072: after the commit, display only
         writer.SimpleString("OK");
     }
 
@@ -290,6 +414,146 @@ internal sealed class HwSessionCommand : HighwayCommand
             return true;
         using var wb = BoxCommandSupport.Open(ctx, box, BoxKeys.Kind.Queue);
         return wb.DrainingSince == 0;
+    }
+
+    /// <summary>
+    /// The dead-letter feed diff (073). Complete-set semantics: a node that stops declaring a feed leaves it;
+    /// when the last member leaves a feed, the feed drains (CFeedOn = 0 on target, DrainingSince set on feed box).
+    /// </summary>
+    private void ApplyDeadLetters(CommandContext ctx)
+    {
+        var store = ctx.Store;
+        var declared = _deadLetters.Distinct().ToList();
+        var declaredNames = declared.Select(d => BoxCommandSupport.FeedTargetName(d.Kind, d.Name)).ToHashSet(StringComparer.Ordinal);
+
+        (List<(BoxKeys.Kind Kind, string Name)> Join, List<(BoxKeys.Kind Kind, string Name)> Leave) Plan(IStoreSnapshot snap)
+        {
+            var join = declared.Where(d => !HoldsFeed(ctx, snap, d.Kind, d.Name)).ToList();
+            var leave = new List<(BoxKeys.Kind Kind, string Name)>();
+            if (_deadLettersDeclared)
+            {
+                foreach (var entry in RegistrySupport.ReadSet(store, snap, HighwayNames.NodeFeeds(_node)))
+                {
+                    if (!declaredNames.Contains(entry) && BoxCommandSupport.TryParseFeedTarget(entry, out var k, out var n))
+                        leave.Add((k, n));
+                }
+            }
+            return (join, leave);
+        }
+
+        HashSet<string> LocksFor(IEnumerable<(BoxKeys.Kind Kind, string Name)> changes)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal) { _node };
+            foreach (var (kind, name) in changes)
+            {
+                var targetString = BoxCommandSupport.FeedTargetName(kind, name);
+                if (BoxCommandSupport.Find(ctx, kind, name) is { } tBox)
+                    names.Add(WorkBox.LockName(tBox));
+                if (BoxCommandSupport.Find(ctx, BoxKeys.Kind.DeadFeed, targetString) is { } fBox)
+                    names.Add(WorkBox.LockName(fBox));
+            }
+            return names;
+        }
+
+        for (var attempt = 1; ; attempt++)
+        {
+            List<(BoxKeys.Kind Kind, string Name)> join, leave;
+            using (var snap = store.Snapshot())
+                (join, leave) = Plan(snap);
+            if (join.Count == 0 && leave.Count == 0) return;
+
+            // Ensure boxes for joins before taking locks so box IDs exist in catalog and runtime cache
+            foreach (var (kind, name) in join)
+            {
+                BoxCommandSupport.Ensure(ctx, kind, name);
+                BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.DeadFeed, BoxCommandSupport.FeedTargetName(kind, name));
+            }
+
+            var held = LocksFor(join.Concat(leave));
+            using (ctx.Locks.LockMany(held))
+            {
+                using var snap = store.Snapshot();
+                (join, leave) = Plan(snap);
+                if (join.Count == 0 && leave.Count == 0) return;
+                if (!LocksFor(join.Concat(leave)).IsSubsetOf(held))
+                {
+                    if (attempt >= MaxPlanAttempts)
+                        throw new InvalidOperationException(
+                            $"HW.SESSION for '{_node}': the dead-letter feed plan kept changing under {MaxPlanAttempts} lock attempts");
+                    continue;
+                }
+
+                using var batch = store.NewBatch();
+                foreach (var (kind, name) in join)
+                {
+                    var targetString = BoxCommandSupport.FeedTargetName(kind, name);
+                    RegistrySupport.SetAdd(store, batch, HighwayNames.FeedMembers(targetString), _node);
+                    RegistrySupport.SetAdd(store, batch, HighwayNames.NodeFeeds(_node), targetString);
+
+                    var members = RegistrySupport.ReadSet(store, snap, HighwayNames.FeedMembers(targetString)).ToHashSet(StringComparer.Ordinal);
+                    var count = members.Contains(_node) ? members.Count : members.Count + 1;
+
+                    if (Catalog.Find(store, batch, ctx.Boxes, kind, name) is { } tBox)
+                    {
+                        using var wbTarget = BoxCommandSupport.Open(ctx, tBox, kind, batch);
+                        wbTarget.SetFeedOn(count);
+                    }
+                    if (Catalog.Find(store, batch, ctx.Boxes, BoxKeys.Kind.DeadFeed, targetString) is { } fBox)
+                    {
+                        using var wbFeed = BoxCommandSupport.Open(ctx, fBox, BoxKeys.Kind.DeadFeed, batch);
+                        if (wbFeed.DrainingSince != 0) wbFeed.SetDrainingSince(0);
+                    }
+                }
+                foreach (var (kind, name) in leave)
+                {
+                    var targetString = BoxCommandSupport.FeedTargetName(kind, name);
+                    RegistrySupport.SetRemove(store, batch, HighwayNames.FeedMembers(targetString), _node);
+                    RegistrySupport.SetRemove(store, batch, HighwayNames.NodeFeeds(_node), targetString);
+
+                    var members = RegistrySupport.ReadSet(store, snap, HighwayNames.FeedMembers(targetString)).ToHashSet(StringComparer.Ordinal);
+                    var remainingCount = members.Count(m => m != _node);
+
+                    if (Catalog.Find(store, batch, ctx.Boxes, kind, name) is { } tBox)
+                    {
+                        using var wbTarget = BoxCommandSupport.Open(ctx, tBox, kind, batch);
+                        wbTarget.SetFeedOn(remainingCount);
+                    }
+                    if (remainingCount == 0)
+                    {
+                        if (Catalog.Find(store, batch, ctx.Boxes, BoxKeys.Kind.DeadFeed, targetString) is { } fBox)
+                        {
+                            using var wbFeed = BoxCommandSupport.Open(ctx, fBox, BoxKeys.Kind.DeadFeed, batch);
+                            if (wbFeed.DrainingSince == 0) wbFeed.SetDrainingSince(ctx.NowTicks);
+                        }
+                    }
+                }
+                batch.Commit();
+            }
+            return;
+        }
+    }
+
+    private bool HoldsFeed(CommandContext ctx, IStoreSnapshot snap, BoxKeys.Kind kind, string name)
+    {
+        var store = ctx.Store;
+        var targetString = BoxCommandSupport.FeedTargetName(kind, name);
+        if (store.Get(snap, HighwayKeyspace.SetMember(HighwayNames.FeedMembers(targetString), Encoding.UTF8.GetBytes(_node))) is null
+            || store.Get(snap, HighwayKeyspace.SetMember(HighwayNames.NodeFeeds(_node), Encoding.UTF8.GetBytes(targetString))) is null)
+            return false;
+
+        if (BoxCommandSupport.Find(ctx, BoxKeys.Kind.DeadFeed, targetString) is { } fBox)
+        {
+            using var wbFeed = BoxCommandSupport.Open(ctx, fBox, BoxKeys.Kind.DeadFeed);
+            if (wbFeed.DrainingSince != 0) return false;
+        }
+
+        if (BoxCommandSupport.Find(ctx, kind, name) is { } tBox)
+        {
+            using var wbTarget = BoxCommandSupport.Open(ctx, tBox, kind);
+            if (wbTarget.FeedOn <= 0) return false;
+        }
+
+        return true;
     }
 
     private static (string Channel, string Group)? Split(string derived)

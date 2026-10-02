@@ -28,9 +28,30 @@ internal sealed class BoxRuntime
 
     public void Remember(BoxKeys.Kind kind, string name, uint box) => _ids[(kind, name)] = box;
 
+    // The id cache's generation (072 review, finding 2). A lookup reads the store WITHOUT the box lock and
+    // caches what it read; a retirement that commits and forgets in between would otherwise be undone — the
+    // retired id cached again, trusted by every path that does not re-validate. A lookup notes the
+    // generation before it reads and caches only if no Forget/Reset has happened since.
+    private readonly object _idGate = new();
+    private long _generation;
+
+    /// <summary>The cache generation, read before a store lookup whose result will be cached.</summary>
+    public long Generation => Interlocked.Read(ref _generation);
+
+    /// <summary>Caches (kind, name) → box unless the cache was invalidated after <paramref name="generation"/>.</summary>
+    public void RememberIf(BoxKeys.Kind kind, string name, uint box, long generation)
+    {
+        lock (_idGate)
+            if (_generation == generation) _ids[(kind, name)] = box;
+    }
+
     public void Forget(BoxKeys.Kind kind, string name, uint box)
     {
-        _ids.TryRemove((kind, name), out _);
+        lock (_idGate)
+        {
+            _generation++;
+            _ids.TryRemove((kind, name), out _);
+        }
         _meta.TryRemove(box, out _);
         foreach (var key in _floors.Keys)
             if (key.Box == box) _floors.TryRemove(key, out _);
@@ -56,7 +77,11 @@ internal sealed class BoxRuntime
     /// <summary>Epoch change or store replacement: every cached id and floor is suspect.</summary>
     public void Reset()
     {
-        _ids.Clear();
+        lock (_idGate)
+        {
+            _generation++;
+            _ids.Clear();
+        }
         _floors.Clear();
         _meta.Clear();
     }

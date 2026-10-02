@@ -2,8 +2,8 @@
 
 > **Status:** current
 > **Protocol:** the *Registry Commands* section of [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md)
-> is authoritative for `HW.HEARTBEAT` / `HW.DISCOVER` / `HW.STATS`. Related guarantees are C2.3 and
-> C7.3 in [`constraints.md`](../product/constraints.md). This doc explains how the registry works.
+> is authoritative for `HW.HEARTBEAT` / `HW.DISCOVER` / `HW.STATS`. Related guarantees are C2.3,
+> C7.3 and C7.7 in [`constraints.md`](../product/constraints.md). This doc explains how the registry works.
 
 *The registry is how the broker knows which nodes are alive and what each one hosts: it powers
 service discovery and load balancing, bounds how long an absent subscriber's backlog is held, and
@@ -17,6 +17,14 @@ RPC routing, decides when an absent subscriber group has truly gone, and shows o
 on the dashboard.
 
 ## How it works
+
+**A node name is one process.** The broker tracks liveness, claims and memberships by node name, so
+two processes sharing one would share a heartbeat (a dead copy goes unnoticed) and a set of claims (a
+copy that stops returns its siblings' work). The client's default name is
+`{app}-{machine}`, plus `-{hosting}` when the process runs as a Windows service or in an IIS
+application pool — so several services built from the same binaries on one machine are told apart
+with no configuration — while the default subscription group stays `{app}-{machine}`, so those copies
+still share one group (feature 072).
 
 **A session, then beats.** A node declares its session once with `HW.SESSION` — its catalog, the
 subscriber groups it belongs to, and its job schedules (3.0) — then proves liveness with a recurring
@@ -59,9 +67,18 @@ destroyed. This is the evidence-based bound that generic idle timers (`x-expires
 alive."
 
 **An address is an observation, never a declaration.** The broker reports where it currently sees a
-node connected from — taken from the live socket (`CLIENT SETNAME` on connect, read back on demand)
-— labelled **"seen from"** everywhere, and simply *absent* (not stale) for a registered node that is
-not connected. Highway never asks a node its address and never stores one: a node behind NAT, in a
+node connected from — taken from the live socket (`CLIENT SETNAME` on connect, held in memory while the
+connection lives) — labelled **"seen from"** everywhere, and simply *absent* (not stale) for a
+registered node that is not connected.
+
+**Processes are observed the same way.** Every connection is named `<node>@<instance>`, the instance
+id random per process, so the broker counts the processes behind each name from its live connections
+— several connections of one process count once. `HW.SESSION` adds what the process says about itself
+(host, pid, hosting name, start time, client version), kept in memory beside it for display. When more
+than one live process uses a name the broker logs a Warning listing them, records `NodeNameShared`,
+and the dashboard flags the node; it says so once more when the name is back to one process.
+Nothing here is stored or replicated — after a failover clients reconnect and re-declare, and the new
+primary rebuilds the view. Highway never asks a node its address and never stores one: a node behind NAT, in a
 container, or scaled horizontally under one name would report a number nobody can reach, and a
 stored address would outlive the socket it described.
 
@@ -79,3 +96,6 @@ stored address would outlive the socket it described.
   the two loses data, so they are separate statements.
 - **"Seen from" is an observation** — present only while connected, never stored, never a routing
   fact (C7.3).
+- **A shared node name is reported, not refused** (C7.7): a rolling restart overlaps legitimately, and
+  may produce one warning and one recovery line. The default name separates Windows services and IIS
+  application pools; anything else that shares a name is detected, not renamed.

@@ -49,7 +49,7 @@ public class RespSessionTests
     [Fact]
     public void ClientSetName_RecordsTheObservedAddress()
     {
-        var observed = new Highway.Server.Resp.ObservedAddressRegistry();
+        var observed = new Highway.Server.Resp.InstanceRegistry();
         var session = new RespSession(Dispatcher(out _), new FakeAuth(preAuthorized: true), new FakeSink(),
             new IPEndPoint(IPAddress.Parse("10.0.0.9"), 6500), connectionId: "c1", observed: observed);
 
@@ -62,7 +62,7 @@ public class RespSessionTests
     [Fact]
     public void OnConnectionClosed_ClearsTheObservedAddress()
     {
-        var observed = new Highway.Server.Resp.ObservedAddressRegistry();
+        var observed = new Highway.Server.Resp.InstanceRegistry();
         var session = new RespSession(Dispatcher(out _), new FakeAuth(preAuthorized: true), new FakeSink(),
             new IPEndPoint(IPAddress.Loopback, 5000), connectionId: "c1", observed: observed);
         session.Handle(F("CLIENT", "SETNAME", "nodeA"));

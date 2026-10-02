@@ -23,7 +23,7 @@ internal sealed class RespSession
     private readonly ISubscriptionSink _subscriptions;
     private readonly EndPoint? _remote;
     private readonly string _connectionId;
-    private readonly ObservedAddressRegistry? _observed;
+    private readonly InstanceRegistry? _observed;
 
     public RespSession(
         CommandDispatcher dispatcher,
@@ -31,7 +31,7 @@ internal sealed class RespSession
         ISubscriptionSink subscriptions,
         EndPoint? remote,
         string connectionId = "",
-        ObservedAddressRegistry? observed = null)
+        InstanceRegistry? observed = null)
     {
         _dispatcher = dispatcher;
         _auth = auth;
@@ -177,8 +177,8 @@ internal sealed class RespSession
             : SessionResult.One(Simple("PONG"));
 
     /// <summary>
-    /// <c>CLIENT</c> subcommands are accepted; <c>CLIENT SETNAME &lt;node&gt;</c> additionally records
-    /// where the broker sees this connection coming from, for the dashboard "Seen from" join (048).
+    /// <c>CLIENT</c> subcommands are accepted; <c>CLIENT SETNAME &lt;node&gt;[@&lt;instance&gt;]</c> additionally
+    /// records where the broker sees this connection coming from (048) and which process it belongs to (072).
     /// </summary>
     private SessionResult HandleClient(IReadOnlyList<byte[]> frame)
     {

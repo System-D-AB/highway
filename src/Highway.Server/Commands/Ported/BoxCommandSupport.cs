@@ -117,9 +117,33 @@ internal static class BoxCommandSupport
 
     /// <summary>The name a storage-format error reports for a work box.</summary>
     public static string StorageName(BoxKeys.Kind kind, string name)
-        => kind == BoxKeys.Kind.Service ? HighwayNames.ServiceQueue(name) : HighwayNames.Queue(name);
+        => kind == BoxKeys.Kind.Service ? HighwayNames.ServiceQueue(name) : (kind == BoxKeys.Kind.DeadFeed ? $"feed:{name}" : HighwayNames.Queue(name));
 
     public static string GroupQueue(string channel, string group) => $"{channel}@{group}";
+
+    /// <summary>Formats the logical feed target string: <c>SVC:&lt;service&gt;</c> or <c>Q:&lt;queue&gt;</c>.</summary>
+    public static string FeedTargetName(BoxKeys.Kind kind, string name)
+        => (kind == BoxKeys.Kind.Service ? "SVC:" : "Q:") + name;
+
+    /// <summary>Parses a logical feed target string into (kind, name).</summary>
+    public static bool TryParseFeedTarget(string target, out BoxKeys.Kind kind, out string name)
+    {
+        if (target.StartsWith("SVC:", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = BoxKeys.Kind.Service;
+            name = target[4..];
+            return name.Length > 0;
+        }
+        if (target.StartsWith("Q:", StringComparison.OrdinalIgnoreCase))
+        {
+            kind = BoxKeys.Kind.Queue;
+            name = target[2..];
+            return name.Length > 0;
+        }
+        kind = default;
+        name = "";
+        return false;
+    }
 
     // =====================================================================================
     // Group retirement (unsubscribe, retire-on-publish, BYE PURGE)
