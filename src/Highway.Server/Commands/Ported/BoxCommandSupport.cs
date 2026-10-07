@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Highway.Server.Commands.Runtime;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Boxes;
@@ -223,14 +224,45 @@ internal static class BoxCommandSupport
         return new LeaveOutcome(false, false, RetireGroup(ctx, batch, channel, group, retiredBoxes));
     }
 
-    /// <summary>The group queue boxes of every group in <paramref name="groups"/> that exist — for locking before a retire or a fan-out.</summary>
-    public static List<string> GroupLockNames(CommandContext ctx, string channel, IEnumerable<string> groups)
+    /// <summary>
+    /// The group queue boxes of every group in <paramref name="groups"/> that exist — for locking before a retire or a
+    /// fan-out. <paramref name="live"/> reads the name index itself, not the id cache: the check a caller makes under
+    /// its locks (070 third review F3), so a box created after the lock set was planned — by a claim, say — is seen
+    /// and its lock taken before the group is retired. A cached id the index no longer names is forgotten, so the
+    /// next plan resolves the box that is really there.
+    /// </summary>
+    public static List<string> GroupLockNames(CommandContext ctx, string channel, IEnumerable<string> groups, bool live = false)
     {
         var names = new List<string>();
         foreach (var group in groups)
-            if (Find(ctx, BoxKeys.Kind.Queue, GroupQueue(channel, group)) is { } box)
-                names.Add(WorkBox.LockName(box));
+        {
+            var name = GroupQueue(channel, group);
+            uint? box;
+            if (live)
+            {
+                box = LiveBox(ctx, BoxKeys.Kind.Queue, name);
+                if (ctx.Boxes.TryGetId(BoxKeys.Kind.Queue, name, out var cached) && cached != box)
+                    ctx.Boxes.Forget(BoxKeys.Kind.Queue, name, cached);
+            }
+            else
+            {
+                box = Find(ctx, BoxKeys.Kind.Queue, name);
+            }
+            if (box is { } id)
+                names.Add(WorkBox.LockName(id));
+        }
         return names;
+    }
+
+    /// <summary>
+    /// The locks for one attempt of a plan-lock-replan loop (session diff, BYE PURGE): the planned set, or on the last
+    /// attempt every stripe (070 R2-4) — logged, since it briefly stalls every other command on the broker.
+    /// </summary>
+    public static IDisposable LockPlan(CommandContext ctx, bool everything, IEnumerable<string> held, string what)
+    {
+        if (!everything) return ctx.Locks.LockMany(held);
+        ctx.Recorder.Logger?.LogWarning("{What}: the plan kept changing under its locks; completing under every lock stripe", what);
+        return ctx.Locks.LockAll();
     }
 
     /// <summary>After the retiring batch committed: drop the retired boxes from the runtime caches.</summary>

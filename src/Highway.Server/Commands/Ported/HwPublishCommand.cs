@@ -112,22 +112,37 @@ internal sealed class HwPublishCommand : HighwayCommand
         {
             using (var snap = store.Snapshot())
                 groups = ReadGroupNames(store, snap, _channel);
-            boxes = groups.ToDictionary(g => g, g => BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, BoxCommandSupport.GroupQueue(_channel, g)));
+            var created = new List<string>();
+            boxes = groups.ToDictionary(g => g, g =>
+            {
+                var name = BoxCommandSupport.GroupQueue(_channel, g);
+                if (BoxCommandSupport.Find(ctx, BoxKeys.Kind.Queue, name) is { } found) return found;
+                created.Add(g);   // no box when resolved: this publish (or one racing it) creates it
+                return BoxCommandSupport.Ensure(ctx, BoxKeys.Kind.Queue, name);
+            });
             lease = ctx.Locks.LockMany([_channel, .. boxes.Values.Select(WorkBox.LockName)]);
 
             var stale = false;
+            HashSet<string> listed;
             using (var check = store.Snapshot())
-                foreach (var g in ReadGroupNames(store, check, _channel))
+                listed = ReadGroupNames(store, check, _channel).ToHashSet(StringComparer.Ordinal);
+            foreach (var g in listed)
+            {
+                var name = BoxCommandSupport.GroupQueue(_channel, g);
+                if (boxes.TryGetValue(g, out var locked) && BoxCommandSupport.LiveBox(ctx, BoxKeys.Kind.Queue, name) != locked)
                 {
-                    var name = BoxCommandSupport.GroupQueue(_channel, g);
-                    if (boxes.TryGetValue(g, out var locked) && BoxCommandSupport.LiveBox(ctx, BoxKeys.Kind.Queue, name) != locked)
-                    {
-                        ctx.Boxes.Forget(BoxKeys.Kind.Queue, name, locked);
-                        stale = true;
-                    }
+                    ctx.Boxes.Forget(BoxKeys.Kind.Queue, name, locked);
+                    stale = true;
                 }
-            if (!stale) break;
+            }
+            if (!stale)
+            {
+                RetireOrphans(ctx, boxes, created.Where(g => !listed.Contains(g)));
+                break;
+            }
             lease.Dispose();
+            // Unlike a session or PURGE (070 R2-4), nothing is committed yet: the error is the whole reply and the
+            // publisher's retry is safe, so no every-stripe fallback here.
             if (attempt >= 16)
                 throw new InvalidOperationException($"HW.PUBLISH {_channel}: its groups kept being retired and re-created");
         }
@@ -331,6 +346,33 @@ internal sealed class HwPublishCommand : HighwayCommand
         var msgIdBytes = Encoding.UTF8.GetBytes(_messageId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         foreach (var group in _groups)
             ctx.Doorbell.Ring(HighwayKeys.QueueDoorbell($"{_channel}@{group}"), msgIdBytes);
+    }
+
+    /// <summary>
+    /// 070 third review F4: a group retired between this publish's snapshot and its box creation got a fresh box
+    /// that no group owns — active, member-less, never retired. Under the channel lock (no join can list the
+    /// group again meanwhile) and the box's lock, retire each such box, if the name still names it and nothing was
+    /// ever written to it.
+    /// </summary>
+    private void RetireOrphans(CommandContext ctx, Dictionary<string, uint> boxes, IEnumerable<string> unlisted)
+    {
+        var retired = new List<(BoxKeys.Kind, string, uint)>();
+        using var batch = ctx.Store.NewBatch();
+        foreach (var g in unlisted)
+        {
+            var name = BoxCommandSupport.GroupQueue(_channel, g);
+            var box = boxes[g];
+            boxes.Remove(g);
+            if (BoxCommandSupport.LiveBox(ctx, BoxKeys.Kind.Queue, name) != box) continue;   // not the box this publish locked
+            // Only a box nothing was ever written to: a schedule, a dead letter or any entry another command put in
+            // it meanwhile (a job set on the group queue, say) is accepted state, and stays.
+            var prefix = BoxKeys.Box(box);
+            if (ctx.Store.Scan(batch, prefix, prefix, 1).Count > 0) continue;
+            if (Catalog.Retire(ctx.Store, batch, ctx.Boxes, BoxKeys.Kind.Queue, name, ctx.NowTicks) is { } gone)
+                retired.Add((BoxKeys.Kind.Queue, name, gone));
+        }
+        batch.Commit();
+        BoxCommandSupport.Forget(ctx, retired);
     }
 
     /// <summary>Reads the channel's group names from the membership set (no mirror — T3.3).</summary>

@@ -126,15 +126,14 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
                 targets = PurgeTargets(ctx, snap);
 
             var held = LocksFor(ctx, targets);
-            using (ctx.Locks.LockMany(held))
+            var everything = attempt >= MaxPurgeAttempts;   // 070 R2-4: then under every stripe, so it completes
+            using (BoxCommandSupport.LockPlan(ctx, everything, held, $"BYE PURGE for '{_nodeId}'"))
             {
                 using var snap = ctx.Store.Snapshot();
                 targets = PurgeTargets(ctx, snap);
-                if (!LocksFor(ctx, targets).IsSubsetOf(held))
+                var needed = LocksFor(ctx, targets, live: true);   // also on the LockAll attempt: it forgets a stale cached id (F3)
+                if (!everything && !needed.IsSubsetOf(held))
                 {
-                    if (attempt >= MaxPurgeAttempts)
-                        throw new InvalidOperationException(
-                            $"BYE PURGE for '{_nodeId}': its subscriptions kept changing under {MaxPurgeAttempts} lock attempts");
                     continue;   // a session joined a group on another channel meanwhile: lock that too
                 }
 
@@ -158,16 +157,17 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
         writer.ThreeIntegers(_retired.Groups, _retired.Messages, _retired.Bytes);
     }
 
-    private const int MaxPurgeAttempts = 16;
+    /// <summary>Attempts before the every-stripe fallback (070 R2-4); a test sets 1 to run that path first.</summary>
+    internal int MaxPurgeAttempts { get; init; } = 16;
 
     /// <summary>The node lock plus each target's channel and existing group box lock.</summary>
-    private HashSet<string> LocksFor(CommandContext ctx, IEnumerable<(string Channel, string Group)> targets)
+    private HashSet<string> LocksFor(CommandContext ctx, IEnumerable<(string Channel, string Group)> targets, bool live = false)
     {
         var names = new HashSet<string>(StringComparer.Ordinal) { _nodeId };
         foreach (var byChannel in targets.GroupBy(t => t.Channel, StringComparer.Ordinal))
         {
             names.Add(byChannel.Key);
-            names.UnionWith(BoxCommandSupport.GroupLockNames(ctx, byChannel.Key, byChannel.Select(t => t.Group)));
+            names.UnionWith(BoxCommandSupport.GroupLockNames(ctx, byChannel.Key, byChannel.Select(t => t.Group), live));
         }
         return names;
     }
@@ -196,15 +196,13 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
             if (targets.Count == 0) return;
 
             var held = FeedLocksFor(ctx, targets);
-            using (ctx.Locks.LockMany(held))
+            var everything = attempt >= MaxPurgeAttempts;   // 070 R2-4: then under every stripe, so it completes
+            using (BoxCommandSupport.LockPlan(ctx, everything, held, $"BYE PURGE feeds for '{_nodeId}'"))
             {
                 using var snap = ctx.Store.Snapshot();
                 targets = FeedPurgeTargets(ctx, snap);
-                if (!FeedLocksFor(ctx, targets).IsSubsetOf(held))
+                if (!everything && !FeedLocksFor(ctx, targets).IsSubsetOf(held))
                 {
-                    if (attempt >= MaxPurgeAttempts)
-                        throw new InvalidOperationException(
-                            $"BYE PURGE for '{_nodeId}': its feeds kept changing under {MaxPurgeAttempts} lock attempts");
                     continue;
                 }
 

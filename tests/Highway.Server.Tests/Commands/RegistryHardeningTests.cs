@@ -202,11 +202,17 @@ public class RegistryHardeningTests
         var b = Enumerable.Range(0, 10_000).Select(i => $"cb{i}")
             .First(c => h.Locks.StripeOf(c) != h.Locks.StripeOf(a) && h.Locks.StripeOf(c) != nodeStripe);
 
+        // 070 R2-5: wait until S2 is really parked on a's stripe — under a starved pool a fixed delay could let S2
+        // start only after S1 committed, and the test would pass without the race it exists for.
+        using var s2Parked = new ManualResetEventSlim();
+        var aStripe = h.Locks.StripeOf(a);
         Task s2;
         using (h.Locks.Lock(a))
         {
+            h.Locks.StripeWaiting = stripe => { if (stripe == aStripe) s2Parked.Set(); };
             s2 = Task.Run(() => Session(h, T0, node, (a, "g2")));        // plans {a@g2}, parks on a's stripe
-            s2.Wait(TimeSpan.FromMilliseconds(300)).Should().BeFalse("S2 is waiting for the channel lock");
+            s2Parked.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue("S2 has planned and is waiting for the channel lock");
+            h.Locks.StripeWaiting = null;
             Session(h, T0, node, (b, "g1"));                               // S1 commits {b@g1} meanwhile
         }
         s2.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
@@ -222,24 +228,25 @@ public class RegistryHardeningTests
         // Review F3: a retired group box id must leave the runtime cache while PURGE still holds the channel
         // lock. Afterwards a publish that re-resolves the group would otherwise get the deleted box and
         // enqueue into it — lost. Whoever takes the channel lock next must never see the stale id.
-        for (var i = 0; i < 1000; i++)
-        {
-            using var h = new CommandHarness();
-            Session(h, T0, "node-1", ("news", "billing"));
-            Publish(h, T0, "news", "m1");                                  // creates and caches news@billing
-            h.Boxes.TryGetId(BoxKeys.Kind.Queue, "news@billing", out _).Should().BeTrue();
+        // 070 R2-5: look at the exact moment PURGE releases the channel's stripe (a release hook), instead of racing
+        // for the lock afterwards and catching the old order only a few times in a thousand.
+        using var h = new CommandHarness();
+        Session(h, T0, "node-1", ("news", "billing"));
+        Publish(h, T0, "news", "m1");                                      // creates and caches news@billing
+        h.Boxes.TryGetId(BoxKeys.Kind.Queue, "news@billing", out _).Should().BeTrue();
 
-            var sawStale = false;
-            Task purge;
-            using (h.Locks.Lock("news"))
-                purge = Task.Run(() => h.Run(new HwHeartbeatCommand(), T0, "node-1", "BYE", "PURGE"));
-            // PURGE is now running or waiting; the moment it releases the channel lock, look.
-            SpinWait.SpinUntil(() => purge.IsCompleted || Group(h, "news", "billing") is null, TimeSpan.FromSeconds(10));
-            using (h.Locks.Lock("news"))
-                sawStale = Group(h, "news", "billing") is null && h.Boxes.TryGetId(BoxKeys.Kind.Queue, "news@billing", out _);
-            purge.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
-            sawStale.Should().BeFalse($"iteration {i}: the retired box id was still cached after PURGE released its locks");
-        }
+        var newsStripe = h.Locks.StripeOf("news");
+        bool? cachedAtRelease = null;
+        h.Locks.StripeReleasing = stripe =>
+        {
+            if (stripe == newsStripe && cachedAtRelease is null && Group(h, "news", "billing") is null)
+                cachedAtRelease = h.Boxes.TryGetId(BoxKeys.Kind.Queue, "news@billing", out _);
+        };
+        h.Run(new HwHeartbeatCommand(), T0, "node-1", "BYE", "PURGE");
+        h.Locks.StripeReleasing = null;
+
+        cachedAtRelease.Should().NotBeNull("PURGE retired the group and released the channel lock");
+        cachedAtRelease.Should().BeFalse("the retired box id must leave the cache before the channel lock is released");
     }
 
     [Fact]
@@ -327,5 +334,127 @@ public class RegistryHardeningTests
         reply.Should().Be("*3\r\n:1\r\n:1\r\n:" + reply.Split("\r\n")[3][1..] + "\r\n");
         Group(h, "news", "billing").Should().BeNull("PURGE keeps its explicit retire-now semantics");
         Members(h, HighwayNames.NodeSubs("node-1")).Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// 070 third review F3: PURGE and the session diff planned their group box locks from the id cache and checked
+    /// them under the locks from the same cache. A stale cached id (the group retired and re-created since) passed
+    /// both, so the live box was left un-locked and un-retired — its name index deleted, its data orphaned — while the
+    /// dead box was "retired" again. Now the check under the locks reads the name index itself.
+    /// </summary>
+    private static (uint Stale, uint Live) StaleCachedLiveGroup(CommandHarness h)
+    {
+        var stale = StaleGroupBox(h);
+        h.Boxes.Forget(BoxKeys.Kind.Queue, "news@billing", stale);
+        Publish(h, T0, "news", "m1").Should().Be(":1\r\n");                // the live box
+        h.Boxes.TryGetId(BoxKeys.Kind.Queue, "news@billing", out var live).Should().BeTrue();
+        h.Boxes.Remember(BoxKeys.Kind.Queue, "news@billing", stale);         // a stale id in the cache
+        return (stale, live);
+    }
+
+    private static string? State(CommandHarness h, uint box)
+    {
+        using var batch = h.Store.NewBatch();
+        return Catalog.ReadMeta(h.Store, batch, box)?.State;
+    }
+
+    [Fact]
+    public void ByePurge_WithAStaleCachedGroupBox_RetiresTheLiveOne()
+    {
+        using var h = new CommandHarness();
+        var (_, live) = StaleCachedLiveGroup(h);
+
+        var reply = CommandHarness.AsText(h.Run(new HwHeartbeatCommand(), T0, "node-1", "BYE", "PURGE"));
+
+        reply.Split("\r\n")[2].Should().Be(":1", "the live group's one message is counted as discarded");
+        State(h, live).Should().Be("retired", "the live box is retired, not orphaned");
+        Group(h, "news", "billing").Should().BeNull();
+    }
+
+    [Fact]
+    public void LeavingAGroup_WithAStaleCachedGroupBox_DrainsTheLiveOne()
+    {
+        using var h = new CommandHarness();
+        StaleCachedLiveGroup(h);
+
+        Session(h, T0, "node-1");   // the last member stops declaring it: drain
+
+        Group(h, "news", "billing")!.Value.DrainingSince.Should().NotBe(0, "the live box is marked draining, not the dead one");
+    }
+
+    [Fact]
+    public void APublishRacingTheRetireOfAGroupWithNoBox_LeavesNoOrphanBox()
+    {
+        // 070 third review F4: the group is listed when the publish reads it, retired before the publish creates its box.
+        using var h = new CommandHarness();
+        Session(h, T0, "node-1", ("news", "billing"));                      // joined, never published: no box
+        var catalogStripe = h.Locks.StripeOf(Catalog.LockName);
+        catalogStripe.Should().NotBe(h.Locks.StripeOf("news"));
+        h.Locks.StripeWaiting = stripe =>
+        {
+            if (stripe != catalogStripe) return;
+            h.Locks.StripeWaiting = null;
+            CommandHarness.AsText(h.Run(new HwUnsubscribeCommand(), T0, "news", "billing")).Should().Be("+OK\r\n");
+        };
+
+        Publish(h, T0, "news", "m1").Should().Be(":0\r\n");
+        h.Locks.StripeWaiting = null;
+
+        Group(h, "news", "billing").Should().BeNull("no group owns the box the publish created: it is retired, not left active");
+    }
+
+    [Fact]
+    public void ByePurge_OnTheEveryStripeAttempt_StillRetiresTheLiveBox()
+    {
+        // Review of R2-4: the LockAll attempt skipped the live re-check, so a stale cached id survived into the retire.
+        using var h = new CommandHarness();
+        var (_, live) = StaleCachedLiveGroup(h);
+
+        h.Run(new HwHeartbeatCommand { MaxPurgeAttempts = 1 }, T0, "node-1", "BYE", "PURGE");
+
+        State(h, live).Should().Be("retired");
+    }
+
+    [Fact]
+    public void LeavingAGroup_OnTheEveryStripeAttempt_StillDrainsTheLiveBox()
+    {
+        using var h = new CommandHarness();
+        StaleCachedLiveGroup(h);
+
+        CommandHarness.AsText(h.Run(new HwSessionCommand { MaxPlanAttempts = 1 }, T0, "node-1", Subs())).Should().Be("+OK\r\n");
+
+        Group(h, "news", "billing")!.Value.DrainingSince.Should().NotBe(0);
+    }
+
+    [Fact]
+    public void APublishRacingTheRetire_KeepsABoxSomethingWasWrittenTo()
+    {
+        // Review of F4: "empty" counted only queued entries. Anything written into the box in the window is accepted
+        // state the publish must not delete with the box. (HW.JOB refuses '@' names, so a schedule cannot get there
+        // today; the raw key stands in for any write a later path makes.)
+        using var h = new CommandHarness();
+        Session(h, T0, "node-1", ("news", "billing"));
+        var catalogStripe = h.Locks.StripeOf(Catalog.LockName);
+        Action<int> atLock = _ =>
+        {
+            h.Locks.StripeWaiting = null;   // the publish is about to take its locks: its box exists
+            h.Boxes.TryGetId(BoxKeys.Kind.Queue, "news@billing", out var created).Should().BeTrue();
+            using var batch = h.Store.NewBatch();
+            h.Store.Set(batch, [.. BoxKeys.Box(created), 0x7F], [1]);
+            batch.Commit();
+        };
+        h.Locks.StripeWaiting = stripe =>
+        {
+            if (stripe != catalogStripe) return;
+            h.Locks.StripeWaiting = null;
+            CommandHarness.AsText(h.Run(new HwUnsubscribeCommand(), T0, "news", "billing")).Should().Be("+OK\r\n");
+            h.Locks.StripeWaiting = atLock;
+        };
+
+        Publish(h, T0, "news", "m1").Should().Be(":0\r\n");
+        h.Locks.StripeWaiting = null;
+
+        h.Boxes.TryGetId(BoxKeys.Kind.Queue, "news@billing", out var box).Should().BeTrue("a box with data in it is kept");
+        State(h, box).Should().Be("active");
     }
 }

@@ -62,13 +62,19 @@ public class ClientReconnectTests : IDisposable
         _output.WriteLine($"Reconnected within 15s: {reconnected}; IsConnected={redis.IsConnected}");
         reconnected.Should().BeTrue("SE.Redis must auto-reconnect to the restarted server");
 
-        // Doorbell 2 — after restart, same subscription
+        // Doorbell 2 — after restart, same subscription. The first ConnectionRestored may be the interactive
+        // connection's, with the subscription connection still re-sending its SUBSCRIBE; a doorbell published in that
+        // gap is gone (pub/sub keeps nothing). So ring until it is heard: what is under test is that the subscription
+        // comes back by itself, not when.
+        var rang = false;
         using (var writer = ConnectionMultiplexer.Connect(cs))
-            writer.GetDatabase().Execute("HW.REPLY", "spike-r2", "p2");
-
-        var rang = await gate.WaitAsync(TimeSpan.FromSeconds(10));
+            for (var i = 0; i < 50 && !rang; i++)
+            {
+                writer.GetDatabase().Execute("HW.REPLY", $"spike-r2-{i}", "p2");
+                rang = await gate.WaitAsync(TimeSpan.FromMilliseconds(200));
+            }
         _output.WriteLine($"Post-restart doorbell received: {rang}; total rings={Volatile.Read(ref rings)}");
         rang.Should().BeTrue("the subscription must be re-established automatically after reconnect");
-        Volatile.Read(ref rings).Should().Be(2);
+        Volatile.Read(ref rings).Should().BeGreaterThanOrEqualTo(2);
     }
 }

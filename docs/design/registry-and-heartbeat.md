@@ -94,6 +94,10 @@ stored address would outlive the socket it described.
   silent drop (C2.3).
 - **`BYE` ≠ `BYE PURGE`:** stopping preserves a backlog; never-coming-back destroys it. Confusing
   the two loses data, so they are separate statements.
+- **A session or `BYE PURGE` always completes.** It applies its membership changes under the locks
+  of every channel and group it touches, and plans again if another session moved them in between;
+  if they keep moving, it finishes under every lock (a warning in the log), never failing after the
+  node's registration was already written.
 - **"Seen from" is an observation** — present only while connected, never stored, never a routing
   fact (C7.3).
 - **A shared node name is reported, not refused** (C7.7): a rolling restart overlaps legitimately, and

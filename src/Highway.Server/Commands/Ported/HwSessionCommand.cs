@@ -45,7 +45,8 @@ internal sealed class HwSessionCommand : HighwayCommand
     private const int MaxSubscriptions = 1024;
     private const int MaxDeadLetters = 1024;
     private const int MaxPolicies = 4096;   // one per hosted service, queue and group (the client declares them all)
-    private const int MaxPlanAttempts = 16;   // 070 review F1: re-plan when the locked plan needs more locks
+    /// <summary>070 review F1: re-plan when the locked plan needs more locks; on the last attempt take all of them (R2-4). A test sets 1.</summary>
+    internal int MaxPlanAttempts { get; init; } = 16;
 
     private sealed record JobDecl(string Queue, string Job, string Expression, JobExpression Parsed, byte[] Template);
     private sealed record PolicyDecl(BoxKeys.Kind Kind, string Name, Highway.Abstractions.RetryPolicy Policy, string BackoffStr);
@@ -361,13 +362,13 @@ internal sealed class HwSessionCommand : HighwayCommand
             return (join, leave);
         }
 
-        HashSet<string> LocksFor(IEnumerable<(string Channel, string Group)> changes)
+        HashSet<string> LocksFor(IEnumerable<(string Channel, string Group)> changes, bool live = false)
         {
             var names = new HashSet<string>(StringComparer.Ordinal) { _node };
             foreach (var byChannel in changes.GroupBy(s => s.Channel, StringComparer.Ordinal))
             {
                 names.Add(byChannel.Key);
-                names.UnionWith(BoxCommandSupport.GroupLockNames(ctx, byChannel.Key, byChannel.Select(s => s.Group)));
+                names.UnionWith(BoxCommandSupport.GroupLockNames(ctx, byChannel.Key, byChannel.Select(s => s.Group), live));
             }
             return names;
         }
@@ -380,16 +381,18 @@ internal sealed class HwSessionCommand : HighwayCommand
             if (join.Count == 0 && leave.Count == 0) return;
 
             var held = LocksFor(join.Concat(leave));
-            using (ctx.Locks.LockMany(held))
+            // 070 R2-4: a plan that keeps moving under its own lock set is, on the last attempt, run under every
+            // stripe — nothing can move it then, so the session completes instead of failing after its
+            // registration has already committed.
+            var everything = attempt >= MaxPlanAttempts;
+            using (BoxCommandSupport.LockPlan(ctx, everything, held, $"HW.SESSION subscriptions for '{_node}'"))
             {
                 using var snap = store.Snapshot();
                 (join, leave) = Plan(snap);   // re-read under the locks
                 if (join.Count == 0 && leave.Count == 0) return;
-                if (!LocksFor(join.Concat(leave)).IsSubsetOf(held))
+                var needed = LocksFor(join.Concat(leave), live: true);   // also on the LockAll attempt: it forgets a stale cached id (F3)
+                if (!everything && !needed.IsSubsetOf(held))
                 {
-                    if (attempt >= MaxPlanAttempts)
-                        throw new InvalidOperationException(
-                            $"HW.SESSION for '{_node}': the subscription plan kept changing under {MaxPlanAttempts} lock attempts");
                     continue;   // the plan moved: release and plan again with the locks it now needs
                 }
 
@@ -489,16 +492,17 @@ internal sealed class HwSessionCommand : HighwayCommand
             }
 
             var held = LocksFor(join.Concat(leave));
-            using (ctx.Locks.LockMany(held))
+            // 070 R2-4: a plan that keeps moving under its own lock set is, on the last attempt, run under every
+            // stripe — nothing can move it then, so the session completes instead of failing after its
+            // registration has already committed.
+            var everything = attempt >= MaxPlanAttempts;
+            using (BoxCommandSupport.LockPlan(ctx, everything, held, $"HW.SESSION dead-letter feeds for '{_node}'"))
             {
                 using var snap = store.Snapshot();
                 (join, leave) = Plan(snap);
                 if (join.Count == 0 && leave.Count == 0) return;
-                if (!LocksFor(join.Concat(leave)).IsSubsetOf(held))
+                if (!everything && !LocksFor(join.Concat(leave)).IsSubsetOf(held))
                 {
-                    if (attempt >= MaxPlanAttempts)
-                        throw new InvalidOperationException(
-                            $"HW.SESSION for '{_node}': the dead-letter feed plan kept changing under {MaxPlanAttempts} lock attempts");
                     continue;
                 }
 

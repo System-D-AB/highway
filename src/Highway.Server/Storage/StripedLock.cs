@@ -38,6 +38,16 @@ public sealed class StripedLock : IDisposable
     public int StripeCount => _stripes.Length;
 
     /// <summary>
+    /// Test hooks (070 R2-5): called with the stripe index just before a thread waits for it, and just before a held
+    /// stripe is released. They let a concurrency test act at an exact interleaving instead of hoping for it. Null in
+    /// production — one null check per acquire and release.
+    /// </summary>
+    internal Action<int>? StripeWaiting { get; set; }
+
+    /// <inheritdoc cref="StripeWaiting"/>
+    internal Action<int>? StripeReleasing { get; set; }
+
+    /// <summary>
     /// Acquires the lock for <paramref name="name"/> synchronously. Returns a disposable
     /// that releases it. Operations on the same name serialize; operations on names in
     /// different stripes proceed in parallel.
@@ -45,8 +55,9 @@ public sealed class StripedLock : IDisposable
     public IDisposable Lock(string name)
     {
         var stripe = StripeOf(name);
+        StripeWaiting?.Invoke(stripe);
         _stripes[stripe].Wait();
-        return new Lease(_stripes[stripe]);
+        return new Lease(this, stripe);
     }
 
     /// <summary>
@@ -55,34 +66,50 @@ public sealed class StripedLock : IDisposable
     /// names sharing a stripe never self-deadlock (the stripes are not re-entrant).
     /// </summary>
     public IDisposable LockMany(IEnumerable<string> names)
+        => Take(names.Select(StripeOf).Distinct().Order().ToArray());
+
+    /// <summary>
+    /// Every stripe, in ascending order — the same order <see cref="LockMany"/> uses, so it cannot deadlock with it.
+    /// The fallback for a plan that keeps moving under a narrower lock set (070 R2-4): with everything held, nothing
+    /// can move it, so it completes instead of giving up.
+    /// </summary>
+    public IDisposable LockAll() => Take(Enumerable.Range(0, _stripes.Length).ToArray());
+
+    private MultiLease Take(int[] stripes)
     {
-        var stripes = names.Select(StripeOf).Distinct().Order().ToArray();
-        var taken = new List<SemaphoreSlim>(stripes.Length);
+        var taken = new List<int>(stripes.Length);
         try
         {
             foreach (var stripe in stripes)
             {
+                StripeWaiting?.Invoke(stripe);
                 _stripes[stripe].Wait();
-                taken.Add(_stripes[stripe]);
+                taken.Add(stripe);
             }
         }
         catch
         {
-            foreach (var s in taken) s.Release();
+            foreach (var s in taken) _stripes[s].Release();
             throw;
         }
-        return new MultiLease(taken);
+        return new MultiLease(this, taken);
     }
 
-    private sealed class MultiLease(List<SemaphoreSlim> semaphores) : IDisposable
+    private void Release(int stripe)
     {
-        private List<SemaphoreSlim>? _semaphores = semaphores;
+        StripeReleasing?.Invoke(stripe);
+        _stripes[stripe].Release();
+    }
+
+    private sealed class MultiLease(StripedLock owner, List<int> stripes) : IDisposable
+    {
+        private List<int>? _stripes = stripes;
 
         public void Dispose()
         {
-            var held = Interlocked.Exchange(ref _semaphores, null);
+            var held = Interlocked.Exchange(ref _stripes, null);
             if (held is null) return;
-            for (var i = held.Count - 1; i >= 0; i--) held[i].Release();
+            for (var i = held.Count - 1; i >= 0; i--) owner.Release(held[i]);
         }
     }
 
@@ -90,8 +117,9 @@ public sealed class StripedLock : IDisposable
     public async ValueTask<IDisposable> LockAsync(string name, CancellationToken ct = default)
     {
         var stripe = StripeOf(name);
+        StripeWaiting?.Invoke(stripe);
         await _stripes[stripe].WaitAsync(ct).ConfigureAwait(false);
-        return new Lease(_stripes[stripe]);
+        return new Lease(this, stripe);
     }
 
     /// <summary>The stripe index a name maps to. Stable for the life of the process.</summary>
@@ -111,10 +139,13 @@ public sealed class StripedLock : IDisposable
             s.Dispose();
     }
 
-    private sealed class Lease(SemaphoreSlim semaphore) : IDisposable
+    private sealed class Lease(StripedLock owner, int stripe) : IDisposable
     {
-        private SemaphoreSlim? _semaphore = semaphore;
+        private int _released;
 
-        public void Dispose() => Interlocked.Exchange(ref _semaphore, null)?.Release();
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0) owner.Release(stripe);
+        }
     }
 }
