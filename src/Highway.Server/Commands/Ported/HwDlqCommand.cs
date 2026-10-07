@@ -374,7 +374,7 @@ internal sealed class HwDlqCommand : HighwayCommand
                 return;
             }
 
-            Envelope.DecodeRpcEntry(inFlight.Entry, out var notifId, out _, out _);
+            Envelope.DecodeRpcEntryRaw(inFlight.Entry, out var notifId, out _, out _);   // a feed entry: no trailers
             deadIdString = Encoding.UTF8.GetString(notifId);
             if (!DeadLetter.TryParseDeadId(deadIdString, out targetBox, out targetSeq))
             {
@@ -482,7 +482,7 @@ internal sealed class HwDlqCommand : HighwayCommand
                     if (wbTarget.TracksBytes && ctx.Options.MaxQueueBytes > 0)
                     {
                         var bare = Envelope.StripFailureBlock(withoutLineage);
-                        if (wbTarget.Bytes + bare.Length + 3 > ctx.Options.MaxQueueBytes)
+                        if (wbTarget.Bytes + bare.Length + Envelope.LineageTrailerLength > ctx.Options.MaxQueueBytes)
                         {
                             wbFeed.Ack(_feedSeq);
                             wbFeed.Commit();

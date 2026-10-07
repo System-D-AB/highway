@@ -19,6 +19,10 @@ public class RetryPolicyTests
     [InlineData("exp:1s..5m", BackoffKind.Exponential, 1_000, 300_000, false)]
     [InlineData("exp:100ms..10s jitter", BackoffKind.Exponential, 100, 10_000, true)]
     [InlineData("exp:500ms..2m", BackoffKind.Exponential, 500, 120_000, false)]
+    // The documented form (user guide, design docs): jitter as a ":jitter" suffix (073 fix).
+    [InlineData("exp:500ms..30s:jitter", BackoffKind.Exponential, 500, 30_000, true)]
+    [InlineData("fixed:10s:jitter", BackoffKind.Fixed, 10_000, 10_000, true)]
+    [InlineData("EXP:1s..5m:JITTER", BackoffKind.Exponential, 1_000, 300_000, true)]
     public void ParseBackoff_ValidStrings_ParsesCorrectly(
         string? input, BackoffKind expectedKind, double expectedMinMs, double expectedMaxMs, bool expectedJitter)
     {
@@ -36,6 +40,9 @@ public class RetryPolicyTests
     [InlineData("fixed:")]
     [InlineData("fixed:0s")]
     [InlineData("fixed:-5s")]
+    [InlineData("fixed:1e30d")]          // overflow: a FormatException, not an OverflowException (073 fix)
+    [InlineData("exp:1s..Infinitys")]
+    [InlineData("fixed:9000000d")]       // parses as a TimeSpan, but now + it would overflow: bounded at 365 days
     [InlineData("exp")]
     [InlineData("exp:1s")]
     [InlineData("exp:5m..1s")] // max < min
@@ -136,5 +143,18 @@ public class RetryPolicyTests
         var act = () => RetryPolicy.Validate(attr, typeof(RetryPolicyTests));
         act.Should().Throw<InvalidRetryPolicyException>()
             .WithMessage("*RetryPolicyTests*");
+    }
+
+    [Theory]
+    [InlineData(-1, 3)]
+    [InlineData(3, -1)]
+    public void Validate_NegativeAttemptsOrRequeues_WithAValidBackoff_IsRefused(int maxAttempts, int maxRequeues)
+    {
+        // The test above also has a malformed backoff, so it throws whether or not the counts are checked.
+        var attr = new RetryAttribute { MaxAttempts = maxAttempts, Backoff = "fixed:1s", MaxRequeues = maxRequeues };
+
+        var act = () => RetryPolicy.Validate(attr, typeof(RetryPolicyTests));
+
+        act.Should().Throw<InvalidRetryPolicyException>().WithMessage("*negative*");
     }
 }

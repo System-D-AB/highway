@@ -13,8 +13,8 @@ internal static class DeadLetterWire
 {
     private const byte FormatVersion = 0xFF;
     private const int HeaderSize = 8 + 2 + 2;
-    private const byte LineageMarker = 0xFE;
-    private const int LineageTrailerLen = 3;
+    private const uint LineageMagic = 0xFE11EA9E;   // [u16 requeues][u32 magic] — see the protocol file
+    private const int LineageTrailerLen = 6;
     private const uint FailureMagic = 0xFE15FA11;
     private const int FailureTrailer = 8;
     private const int FailureBlockHeader = 8;
@@ -45,9 +45,10 @@ internal static class DeadLetterWire
 
         ushort requeues = 0;
         var withoutLineage = originalEntry;
-        if (originalEntry.Length >= LineageTrailerLen && originalEntry[originalEntry.Length - LineageTrailerLen] == LineageMarker)
+        if (originalEntry.Length >= LineageTrailerLen
+            && BinaryPrimitives.ReadUInt32BigEndian(originalEntry.Slice(originalEntry.Length - 4)) == LineageMagic)
         {
-            requeues = BinaryPrimitives.ReadUInt16BigEndian(originalEntry.Slice(originalEntry.Length - 2));
+            requeues = BinaryPrimitives.ReadUInt16BigEndian(originalEntry.Slice(originalEntry.Length - LineageTrailerLen));
             withoutLineage = originalEntry[..^LineageTrailerLen];
         }
 

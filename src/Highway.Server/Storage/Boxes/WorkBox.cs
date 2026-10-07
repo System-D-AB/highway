@@ -45,14 +45,23 @@ internal sealed class WorkBox : IDisposable
     /// <summary>Queues and group queues count bytes against <c>MaxQueueBytes</c>; services do not.</summary>
     public bool TracksBytes { get; }
 
+    /// <summary>
+    /// Entries whose payload runs to the very end, with no trailers (073: dead-letter feeds). Their payload is a
+    /// dead-letter record that ends with the original entry's failure block and lineage, so reading trailers
+    /// here would strip — or, on a re-encode, duplicate — the dead letter's own history.
+    /// </summary>
+    public bool RawEntries { get; }
+
     public IStoreBatch Batch { get; }
 
-    public WorkBox(IHighwayStore store, BoxRuntime rt, uint id, bool tracksBytes, IStoreBatch? sharedBatch = null)
+    public WorkBox(IHighwayStore store, BoxRuntime rt, uint id, bool tracksBytes, IStoreBatch? sharedBatch = null,
+        bool rawEntries = false)
     {
         _store = store;
         _rt = rt;
         Id = id;
         TracksBytes = tracksBytes;
+        RawEntries = rawEntries;
         _ownsBatch = sharedBatch is null;
         Batch = sharedBatch ?? store.NewBatch();
     }
@@ -112,16 +121,17 @@ internal sealed class WorkBox : IDisposable
         else _store.Set(Batch, key, BoxKeys.I64(count));
     }
 
-    /// <summary>Maximum number of requeues permitted for this target by policy (073), or default 3.</summary>
-    public int MaxRequeues => Get(CMaxRequeues) is var v && v > 0 ? (int)v : 3;
+    /// <summary>
+    /// Maximum number of requeues permitted for this target by policy (073); 3 when no policy sets it. A policy
+    /// may set 0 ("never requeue") — absent and 0 are different answers.
+    /// </summary>
+    public int MaxRequeues => StoredMaxRequeues();
+
+    private int StoredMaxRequeues()
+        => _store.Read(Batch, BoxKeys.Counter(Id, CMaxRequeues)) is { } raw ? (int)BoxKeys.ReadI64(raw) : 3;
 
     /// <summary>Sets the max requeues policy for this target (073).</summary>
-    public void SetMaxRequeues(int max)
-    {
-        var key = BoxKeys.Counter(Id, CMaxRequeues);
-        if (max <= 0) _store.Delete(Batch, key);
-        else _store.Set(Batch, key, BoxKeys.I64(max));
-    }
+    public void SetMaxRequeues(int max) => SetCounter(CMaxRequeues, Math.Max(0, max));   // 0 is stored: "never"
 
     /// <summary>Returns the configured retry policy for this target, or server defaults (073).</summary>
     public Highway.Abstractions.RetryPolicy GetRetryPolicy()
@@ -131,11 +141,14 @@ internal sealed class WorkBox : IDisposable
         var min = TimeSpan.FromTicks(Get(CBackoffMin));
         var max = TimeSpan.FromTicks(Get(CBackoffMax));
         var jitter = Get(CJitter) != 0;
-        var maxRequeues = Get(CMaxRequeues) is var mr && mr > 0 ? (int)mr : 3;
-        return new Highway.Abstractions.RetryPolicy(maxAttempts, kind, min, max, jitter, maxRequeues);
+        return new Highway.Abstractions.RetryPolicy(maxAttempts, kind, min, max, jitter, StoredMaxRequeues());
     }
 
-    /// <summary>Sets the retry policy for this target (073).</summary>
+    /// <summary>
+    /// Sets the retry policy for this target (073). Writing the default policy (<see cref="Highway.Abstractions.RetryPolicy.None"/>,
+    /// what a contract without <c>[Retry]</c> declares) leaves the target reading as the broker's defaults — so removing
+    /// <c>[Retry]</c> from a contract takes effect on its next session.
+    /// </summary>
     public void SetRetryPolicy(Highway.Abstractions.RetryPolicy policy)
     {
         SetCounter(CMaxAttempts, policy.MaxAttempts);
@@ -246,7 +259,7 @@ internal sealed class WorkBox : IDisposable
             _rt.Lower(Id, BoxKeys.Lease, nowTicks);
             Add(CInFlight, 1);
 
-            Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
+            Decode(entry, out var id, out var payload, out var attempts);
             claimed.Add(new Claimed(seq, id.ToArray(), payload.ToArray(), attempts));
         }
 
@@ -280,6 +293,7 @@ internal sealed class WorkBox : IDisposable
     /// <summary>Rewrites the held entry's failure block (<see cref="Envelope.WithFailureBlock"/>). False when not held.</summary>
     public bool Fail(ulong token, Func<byte[], byte[]> buildBlock)
     {
+        if (RawEntries) return false;   // a feed entry carries no failure of its own (073)
         if (ReadInFlight(token) is not { } rec) return false;
         var updated = Envelope.WithFailureBlock(rec.Entry, buildBlock(rec.Entry));
         _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, token), InFlightRecord.Encode(rec.ClaimTicks, rec.Node, updated));
@@ -353,8 +367,8 @@ internal sealed class WorkBox : IDisposable
                 var seq = BoxKeys.TrailingSeq(key);
                 if (ReadInFlight(seq) is not { } rec) { _store.Delete(Batch, key); continue; }
                 RemoveInFlight(seq, rec);
-                Envelope.DecodeRpcEntry(rec.Entry, out var id, out var payload, out var attempts);
-                Enqueue(Envelope.CarryFailureBlock(rec.Entry,
+                Decode(rec.Entry, out var id, out var payload, out var attempts);
+                Enqueue(Carry(rec.Entry,
                     Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), Envelope.NextAttempt(attempts))));
                 count++;
             }
@@ -366,9 +380,9 @@ internal sealed class WorkBox : IDisposable
 
     private void Redeliver(byte[] entry, long nowTicks, int maxAttempts, int maxDeadEntries, List<DeadLettered> outcomes, Highway.Abstractions.RetryPolicy policy)
     {
-        Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
+        Decode(entry, out var id, out var payload, out var attempts);
         var next = Envelope.NextAttempt(attempts);
-        var rebuilt = Envelope.CarryFailureBlock(entry, Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), next));
+        var rebuilt = Carry(entry, Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), next));
         var effectiveMax = policy.MaxAttempts > 0 ? policy.MaxAttempts : maxAttempts;
         if (effectiveMax > 0 && next > effectiveMax)
         {
@@ -392,9 +406,17 @@ internal sealed class WorkBox : IDisposable
         Enqueue(rebuilt);
     }
 
-    private static byte[] Reencode(byte[] entry, bool keepAttempts)
+    private void Decode(ReadOnlySpan<byte> entry, out ReadOnlySpan<byte> id, out ReadOnlySpan<byte> payload, out ushort attempts)
     {
-        Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
+        if (RawEntries) Envelope.DecodeRpcEntryRaw(entry, out id, out payload, out attempts);
+        else Envelope.DecodeRpcEntry(entry, out id, out payload, out attempts);
+    }
+
+    private byte[] Carry(byte[] source, byte[] rebuilt) => RawEntries ? rebuilt : Envelope.CarryFailureBlock(source, rebuilt);
+
+    private byte[] Reencode(byte[] entry, bool keepAttempts)
+    {
+        Decode(entry, out var id, out var payload, out var attempts);
         return Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), keepAttempts ? attempts : (ushort)0);
     }
 
@@ -482,7 +504,7 @@ internal sealed class WorkBox : IDisposable
         {
             DeadLetter.Decode(record, out _, out _, out _, out var original);
             Envelope.TryGetLineage(original, out var requeues, out var withoutLineage);
-            var nextRequeues = (ushort)(requeues + 1);
+            var nextRequeues = requeues == ushort.MaxValue ? requeues : (ushort)(requeues + 1);   // saturates: 0 would strip it
             var bare = Envelope.StripFailureBlock(withoutLineage);
             var clean = Reencode(bare.ToArray(), keepAttempts: false);
             Enqueue(Envelope.WithLineage(clean, nextRequeues));
@@ -520,7 +542,7 @@ internal sealed class WorkBox : IDisposable
 
         DeadLetter.Decode(record, out _, out _, out _, out var original);
         Envelope.TryGetLineage(original, out var requeues, out var withoutLineage);
-        var nextRequeues = (ushort)(requeues + 1);
+        var nextRequeues = requeues == ushort.MaxValue ? requeues : (ushort)(requeues + 1);   // saturates: 0 would strip it
         var bare = Envelope.StripFailureBlock(withoutLineage);
         var clean = Reencode(bare.ToArray(), keepAttempts: false);
         var rebuilt = Envelope.WithLineage(clean, nextRequeues);

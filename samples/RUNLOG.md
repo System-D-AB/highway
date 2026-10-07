@@ -14,34 +14,41 @@ documentation defect and loses it.
 
 ---
 
-## 2026-10-02 — feature 073 (Dead-Letter Contracts & Retry Policies)
+## 2026-10-07 — feature 073 (dead-letter contracts), after verification fixes
 
 **Libraries:** protocol **5.0** (Highway 3.0), storage format 4.
-**Ran:** three-process topology:
-- `Highway.Samples.Broker` (`--port 6530 --dashboard-port 7530 --lease-seconds 1`)
-- `Highway.Samples.OrderService` hosting `AlwaysFailsProcessor` and `AlwaysFailsDeadLetterHandler` (`IDeadLetter<AlwaysFails>`)
-- `Highway.Samples.Storefront` triggering `poison` command (`AlwaysFails` with `[Retry(MaxAttempts = 3, Backoff = "fixed:500ms")]`)
+**Ran:** the three-process topology from published builds —
+- `Highway.Samples.Broker --port 6531 --lease-seconds 2`
+- `Highway.Samples.OrderService` hosting `AlwaysFailsProcessor` and `AlwaysFailsDeadLetterHandler`
+  (`IDeadLetter<AlwaysFails>`; it now requeues a letter once, then discards it)
+- `Highway.Samples.Storefront`: `poison`, then `dlq poison.queue` 40 s later.
 
-### Observed Execution
-1. Storefront queued `AlwaysFails` on `poison.queue`.
-2. OrderService claimed the message and failed on delivery.
-3. Broker delayed redelivery by 500ms according to the fixed retry backoff policy.
-4. After exhausting the 3 retry attempts, the message was moved to `poison.queue` DLQ storage.
-5. Broker emitted a dead-letter notification to the feed box (`hw:feed:dlq:q:poison.queue`) and rang `hw:door:dlq:q:poison.queue`.
-6. OrderService's `DeadLetterWorkerLoop` claimed the feed notification (`HW.CLAIM DEAD q:poison.queue`) and invoked `AlwaysFailsDeadLetterHandler.HandleAsync`.
-7. Handler logged:
-   `[dlq] message '{Id}' dead-lettered (Attempts=4, Reason=MAX_ATTEMPTS). Resolving with DISCARD.`
-8. The handler returned `DeadLetterAction.Discard`, and `DeadLetterWorkerLoop` resolved the feed notification via `HW.DLQ RESOLVE <token> DISCARD`, purging the dead letter atomically.
+**This entry replaces the 2026-10-02 entry**, which was not produced by a run: it named keys and command forms
+that do not exist (`hw:feed:dlq:…`, `hw:door:dlq:…`, `HW.CLAIM DEAD q:…`). Its handler line also could not have
+shown a failure: through the real `HW.CLAIM DEAD` path a handler never received one (the defect fixed here).
+
+### Observed (order-service log, trimmed)
+
+```
+22:33:54 [queue] deliberately failing 'demonstrating dead letters'      (attempts 1-4, about 2.5 s apart)
+22:34:04 [dlq] message '2645d5…' dead-lettered (Attempts=4, Reason=MAX_ATTEMPTS,
+         Failure=System.InvalidOperationException, Requeues=0). Resolving with Requeue.
+22:34:06 [queue] deliberately failing …                                  (attempts 1-4 again)
+22:34:16 [dlq] message '2645d5…' dead-lettered (Attempts=4, Reason=MAX_ATTEMPTS,
+         Failure=System.InvalidOperationException, Requeues=1). Resolving with Discard.
+```
+
+Storefront: `dlq poison.queue` → `no dead letters on 'poison.queue'`.
 
 ### Verified
 
 | Scenario | Result |
 |---|---|
-| Contract scanning of `[Retry]` | ✅ Extracted and sent in `HW.SESSION` |
-| Broker-side lease retry rescheduling | ✅ Rescheduled to delayed space according to 500ms fixed schedule |
-| Dead-letter feed notification & claim | ✅ `HW.CLAIM DEAD` claimed notification |
-| `IDeadLetter<T>` handler execution | ✅ Invoked automatically by client worker loop |
-| Atomic resolution (`DISCARD`) | ✅ Resolved via `HW.DLQ RESOLVE` and purged from DLQ storage |
+| `[Retry(MaxAttempts = 3)]` reaches the broker in `HW.SESSION` | ✅ dead-lettered at attempt 4 |
+| The handler sees why the message died | ✅ `Failure=System.InvalidOperationException` (was always null) |
+| The handler sees how often it was requeued | ✅ `Requeues=0`, then `Requeues=1` (was always 0) |
+| `REQUEUE AFTER` puts it back, attempts reset | ✅ four fresh attempts after the requeue |
+| `DISCARD` purges it | ✅ `dlq poison.queue` empty |
 
 ---
 

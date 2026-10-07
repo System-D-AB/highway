@@ -44,7 +44,7 @@ internal sealed class HwSessionCommand : HighwayCommand
     private const int MaxJobs = 256;
     private const int MaxSubscriptions = 1024;
     private const int MaxDeadLetters = 1024;
-    private const int MaxPolicies = 1024;
+    private const int MaxPolicies = 4096;   // one per hosted service, queue and group (the client declares them all)
     private const int MaxPlanAttempts = 16;   // 070 review F1: re-plan when the locked plan needs more locks
 
     private sealed record JobDecl(string Queue, string Job, string Expression, JobExpression Parsed, byte[] Template);
@@ -295,13 +295,27 @@ internal sealed class HwSessionCommand : HighwayCommand
                 _jobChanges.Add((job.Queue, job.Job, $"{previous} => {job.Expression}"));
         }
 
-        // 5. Retry policies, each in its target's box under that box's lock (073).
+        // 5. Retry policies, each in its target's box under that box's lock (073). The default policy is declared
+        //    for every target without [Retry]; it never creates a box (absent = default already), and a target
+        //    whose policy is unchanged writes nothing.
         foreach (var policyDecl in _policies)
         {
-            var box = BoxCommandSupport.Ensure(ctx, policyDecl.Kind, policyDecl.Name);
+            var isDefault = policyDecl.Policy == Highway.Abstractions.RetryPolicy.None;
+            uint? found = isDefault
+                ? BoxCommandSupport.Find(ctx, policyDecl.Kind, policyDecl.Name)
+                : BoxCommandSupport.Ensure(ctx, policyDecl.Kind, policyDecl.Name);
+            if (found is not { } box) continue;
             using var _ = BoxCommandSupport.Lock(ctx, box);
+            // Under the lock (070 review R2-1): a group box retired since it was resolved must not be written.
+            if (BoxCommandSupport.CanRetire(policyDecl.Kind, policyDecl.Name)
+                && BoxCommandSupport.LiveBox(ctx, policyDecl.Kind, policyDecl.Name) != box)
+            {
+                ctx.Boxes.Forget(policyDecl.Kind, policyDecl.Name, box);
+                continue;
+            }
             using var wb = BoxCommandSupport.Open(ctx, box, policyDecl.Kind);
             var previous = wb.GetRetryPolicy();
+            if (previous == policyDecl.Policy) continue;
             wb.SetRetryPolicy(policyDecl.Policy);
             wb.Commit();
             if (previous != Highway.Abstractions.RetryPolicy.None && previous != policyDecl.Policy)

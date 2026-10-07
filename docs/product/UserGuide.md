@@ -454,6 +454,8 @@ public sealed class GenerateInvoice : ISend
   - `exp:<min>..<max>[:jitter]` (e.g. `exp:100ms..10s`, `exp:500ms..30s:jitter`).
 - **Deterministic jitter:** Jitter uses deterministic integer FNV-1a hashing on `(messageId, attempt)`, ensuring identical rescheduling across WAL replays and replica failovers.
 - **Delayed space:** During lease recovery, failed entries are rescheduled to the target's delayed space (`now + backoff`) without blocking other work.
+- **`MaxAttempts`** defaults to the broker's `MaxDeliveryAttempts`; **`MaxRequeues`** (how often a dead-letter handler may requeue a message) defaults to 3, and `0` means never.
+- **Removing `[Retry]`** from a contract returns its target to the broker's defaults the next time the application starts — the policy is declared by whoever hosts the target, last start wins.
 
 ### Dead-Letter Feeds (`IDeadLetter<T>`)
 
@@ -486,6 +488,7 @@ public sealed class InvoiceDeadLetterHandler : IDeadLetter<GenerateInvoice>
   - `DeadLetterAction.Discard`: Acknowledges the feed notification and purges the dead letter permanently from storage.
   - `DeadLetterAction.Requeue(TimeSpan? after = null)`: Requeues the message to the live target queue (with an optional delay). If the message has reached `MaxRequeues`, the requeue is refused.
 - **Never re-fed automatically:** Highway never automatically re-feeds dead letters without explicit instructions from a handler or operator.
+- **Subscriber groups:** a handler for a published contract (`IDeadLetter<OrderPlaced>`) handles **your** group's dead letters, so the application must also subscribe (`ISubscribe<OrderPlaced>`); startup fails otherwise, naming the channel.
 - **Poison messages:** Payloads that fail JSON deserialization still dispatch to `IDeadLetter<T>` with `deadLetter.Message == null` and raw bytes preserved in `deadLetter.RawPayload`.
 - **RPC Dead Letters:** RPC services also support `IDeadLetter<T>`. Handlers can `Keep` or `Discard`, but cannot `Requeue` because the calling RPC client has already timed out.
 

@@ -60,7 +60,8 @@ internal static class BoxCommandSupport
     }
 
     public static WorkBox Open(CommandContext ctx, uint box, BoxKeys.Kind kind, IStoreBatch? sharedBatch = null)
-        => new(ctx.Store, ctx.Boxes, box, tracksBytes: kind == BoxKeys.Kind.Queue, sharedBatch);
+        => new(ctx.Store, ctx.Boxes, box, tracksBytes: kind == BoxKeys.Kind.Queue, sharedBatch,
+            rawEntries: kind == BoxKeys.Kind.DeadFeed);
 
     public static IDisposable Lock(CommandContext ctx, uint box) => ctx.Locks.Lock(WorkBox.LockName(box));
 

@@ -128,16 +128,19 @@ public sealed class AlwaysFailsProcessor(ILogger<AlwaysFailsProcessor> logger)
 }
 
 /// <summary>
-/// Dead-letter remediation handler (feature 073).
-/// Receives dead-lettered messages when MaxAttempts is exhausted, logs diagnosis, and resolves.
+/// Dead-letter remediation handler (feature 073). Receives a message once its attempts are exhausted, with the failure
+/// that killed it and how often it was requeued: the first time it gives the message one more chance, the second
+/// time it discards it.
 /// </summary>
 public sealed class AlwaysFailsDeadLetterHandler(ILogger<AlwaysFailsDeadLetterHandler> logger)
     : IDeadLetter<AlwaysFails>
 {
     public Task<DeadLetterAction> HandleAsync(DeadLetter<AlwaysFails> letter, CancellationToken ct = default)
     {
-        logger.LogWarning("  [dlq] message '{Id}' dead-lettered (Attempts={Attempts}, Reason={Reason}, Failure={Failure}). Resolving with DISCARD.",
-            letter.Id, letter.Attempts, letter.Reason, letter.LastFailure?.Type);
-        return Task.FromResult(DeadLetterAction.Discard);
+        var action = letter.Requeues == 0 ? DeadLetterAction.Requeue(TimeSpan.FromSeconds(2)) : DeadLetterAction.Discard;
+        logger.LogWarning(
+            "  [dlq] message '{Id}' dead-lettered (Attempts={Attempts}, Reason={Reason}, Failure={Failure}, Requeues={Requeues}). Resolving with {Action}.",
+            letter.Id, letter.Attempts, letter.Reason, letter.LastFailure?.Type, letter.Requeues, action.Type);
+        return Task.FromResult(action);
     }
 }

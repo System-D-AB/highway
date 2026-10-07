@@ -15,15 +15,16 @@ namespace Highway.Server.Tests.Commands;
 internal sealed class CommandHarness : IDisposable
 {
     private readonly IHighwayStore _store;
-    private readonly StripedLock _locks = new();
+    private readonly StripedLock _locks;
     private readonly RecordingDoorbell _doorbell = new();
     private readonly FlightRecorder _recorder;
     private readonly HighwayServerOptions _options;
     private readonly Highway.Server.Storage.Boxes.BoxRuntime _boxes = new();   // one per server, as the dispatcher holds
 
-    public CommandHarness(IHighwayStore? store = null, HighwayServerOptions? options = null)
+    public CommandHarness(IHighwayStore? store = null, HighwayServerOptions? options = null, StripedLock? locks = null)
     {
         _store = store ?? new InMemoryStore();
+        _locks = locks ?? new StripedLock();
         _options = options ?? new HighwayServerOptions();
         _recorder = new FlightRecorder(_options.Observability);
     }

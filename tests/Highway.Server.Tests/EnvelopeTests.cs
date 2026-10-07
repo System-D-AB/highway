@@ -112,4 +112,53 @@ public class EnvelopeTests
         encoded[0].Should().Be(Envelope.FormatVersion);
     }
 
+    // =========================================================================
+    // Lineage trailer (073; widened to a 4-byte magic at verification)
+    // =========================================================================
+
+    [Fact]
+    public void ABinaryPayloadEndingInTheOldOneByteMarker_DecodesUntouched()
+    {
+        // Payloads are opaque: one ending [0xFE][u16] was read as a lineage trailer and lost three bytes.
+        byte[] payload = [0x01, 0x02, 0xFE, 0x00, 0x02];
+        var entry = Envelope.EncodeRpcEntry("m-1"u8, payload);
+
+        Envelope.TryGetLineage(entry, out _, out _).Should().BeFalse();
+        Envelope.DecodeRpcEntry(entry, out _, out var decoded, out _);
+        decoded.ToArray().Should().Equal(payload);
+    }
+
+    [Fact]
+    public void Lineage_RoundTrips_AfterAFailureBlock_AndIsTheLastThingOnTheEntry()
+    {
+        var entry = Envelope.EncodeRpcEntry("m-1"u8, SamplePayload);
+        var failed = Envelope.WithFailureBlock(entry, Envelope.EncodeFailureBlock("T"u8, default, "d"u8));
+        var withLineage = Envelope.WithLineage(failed, 7);
+
+        System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(withLineage.AsSpan(withLineage.Length - 4))
+            .Should().Be(Envelope.LineageMagic);
+        Envelope.TryGetLineage(withLineage, out var requeues, out var rest).Should().BeTrue();
+        requeues.Should().Be(7);
+        rest.ToArray().Should().Equal(failed);
+        Envelope.DecodeRpcEntry(withLineage, out _, out var payload, out _);
+        payload.ToArray().Should().Equal(SamplePayload);
+    }
+
+    [Fact]
+    public void ARequeueCountAtItsMaximum_Saturates_InsteadOfWrappingToZero()
+    {
+        // (ushort)(65535 + 1) is 0, and a lineage of 0 strips the trailer — resetting a handler's requeue cap.
+        using var h = new Highway.Server.Tests.Commands.CommandHarness();
+        var box = Highway.Server.Storage.Boxes.Catalog.Ensure(h.Store, h.Boxes, h.Locks, Highway.Server.Storage.Boxes.BoxKeys.Kind.Queue, "q", 1);
+        using var wb = new Highway.Server.Storage.Boxes.WorkBox(h.Store, h.Boxes, box, tracksBytes: true);
+        var entry = Envelope.WithLineage(Envelope.EncodeRpcEntry("m"u8, SamplePayload, 1), ushort.MaxValue);
+        wb.PushDead(DeadLetter.Encode(1, 1, DeadLetter.MaxAttempts, entry), 100);
+
+        wb.RequeueDead(1).Should().Be(1);
+        var claimed = wb.Claim("n", 2, 1, "q");
+
+        claimed.Should().ContainSingle();
+        Envelope.TryGetLineage(wb.ReadInFlight(claimed[0].Token)!.Entry, out var requeues, out _).Should().BeTrue();
+        requeues.Should().Be(ushort.MaxValue);
+    }
 }

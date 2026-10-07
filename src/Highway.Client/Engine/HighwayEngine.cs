@@ -18,6 +18,24 @@ namespace Highway.Client.Engine;
 internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, IAsyncDisposable
 {
     private readonly ICatalog _catalog;
+
+    /// <summary>
+    /// The retry policy of every target this node hosts (073). A contract without <c>[Retry]</c> declares the
+    /// default, so removing <c>[Retry]</c> clears what the broker stored for its target on the next session.
+    /// </summary>
+    internal static List<SessionKeeper.PolicyDeclaration> SessionPolicies(ICatalog catalog, string group)
+    {
+        static SessionKeeper.PolicyDeclaration Policy(string kind, string name, RetryAttribute? retry)
+            => retry is null
+                ? new SessionKeeper.PolicyDeclaration(kind, name, 0, "none", 3)
+                : new SessionKeeper.PolicyDeclaration(kind, name, retry.MaxAttempts, retry.Backoff, retry.MaxRequeues);
+
+        var policies = new List<SessionKeeper.PolicyDeclaration>();
+        foreach (var q in catalog.AllQueues) policies.Add(Policy("Q", q.Name, q.Retry));
+        foreach (var c in catalog.AllChannels) policies.Add(Policy("Q", $"{c.Name}@{group}", c.Retry));
+        foreach (var s in catalog.AllServices) policies.Add(Policy("SVC", s.Name, s.Retry));
+        return policies;
+    }
     private readonly HighwayOptions _options;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILoggerFactory _loggerFactory;
@@ -301,22 +319,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                     Wire.HighwayJson.EncodeEnvelope(_options.NodeName, job.Template)));
             }
 
-            var policies = new List<SessionKeeper.PolicyDeclaration>();
-            foreach (var q in _catalog.AllQueues)
-            {
-                if (q.Retry is not null)
-                    policies.Add(new SessionKeeper.PolicyDeclaration("Q", q.Name, q.Retry.MaxAttempts, q.Retry.Backoff, q.Retry.MaxRequeues));
-            }
-            foreach (var c in _catalog.AllChannels)
-            {
-                if (c.Retry is not null)
-                    policies.Add(new SessionKeeper.PolicyDeclaration("Q", $"{c.Name}@{group}", c.Retry.MaxAttempts, c.Retry.Backoff, c.Retry.MaxRequeues));
-            }
-            foreach (var s in _catalog.AllServices)
-            {
-                if (s.Retry is not null)
-                    policies.Add(new SessionKeeper.PolicyDeclaration("SVC", s.Name, s.Retry.MaxAttempts, s.Retry.Backoff, s.Retry.MaxRequeues));
-            }
+            var policies = SessionPolicies(_catalog, group);
 
             _session = new SessionKeeper(
                 _connection,

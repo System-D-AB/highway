@@ -126,8 +126,31 @@ internal static class Envelope
 
         // An entry may carry a failure block (015). It is a trailer, so it must come off
         // before "payload is the rest" is true again.
-        data = StripFailureBlock(data);
+        DecodeRpcFraming(StripFailureBlock(data), out requestId, out payload, out attempts);
+    }
 
+    /// <summary>
+    /// Decodes an RPC entry whose payload is opaque to the very end — no trailers read or removed. A dead-letter
+    /// feed entry (073) carries a dead-letter record as its payload, and that record ends with the ORIGINAL
+    /// entry's failure block and lineage: stripping them as the feed entry's own trailers hands the handler a
+    /// record without the failure that killed the message or its requeue count.
+    /// </summary>
+    public static void DecodeRpcEntryRaw(
+        ReadOnlySpan<byte> data,
+        out ReadOnlySpan<byte> requestId,
+        out ReadOnlySpan<byte> payload,
+        out ushort attempts)
+    {
+        RequireCurrentFormat(data, "RPC entry");
+        DecodeRpcFraming(data, out requestId, out payload, out attempts);
+    }
+
+    private static void DecodeRpcFraming(
+        ReadOnlySpan<byte> data,
+        out ReadOnlySpan<byte> requestId,
+        out ReadOnlySpan<byte> payload,
+        out ushort attempts)
+    {
         if (data.Length < RpcHeader)
             throw new InvalidDataException(
                 $"RPC entry too short ({data.Length} bytes); minimum is {RpcHeader}.");
@@ -220,16 +243,23 @@ internal static class Envelope
     /// <summary>Marks the last four bytes of an entry that carries a failure block.</summary>
     public const uint FailureMagic = 0xFE15FA11;
 
-    /// <summary>Marks the byte preceding the 2-byte requeue count in a lineage trailer (feature 073).</summary>
-    public const byte LineageMarker = 0xFE;
+    /// <summary>
+    /// Marks the last four bytes of an entry that carries a lineage trailer (feature 073). Four bytes, as for the
+    /// failure block: a payload is opaque, and a one-byte marker would misread any binary payload ending in it —
+    /// silently cutting three bytes off. The last byte is deliberately not <c>}</c>, a JSON envelope's last byte.
+    /// </summary>
+    public const uint LineageMagic = 0xFE11EA9E;
 
     private const int FailureTrailer = 4 + 4;   // [u32 blockLen][u32 magic]
     private const int FailureBlockHeader = 2 + 2 + 4;
-    private const int LineageTrailerLen = 1 + 2; // [u8 0xFE][u16 requeues]
+    private const int LineageTrailerLen = LineageTrailerLength;
+
+    /// <summary>Bytes a lineage trailer adds to an entry: [u16 requeues][u32 magic].</summary>
+    public const int LineageTrailerLength = 2 + 4;
 
     /// <summary>
     /// Reads the requeue lineage count if this entry carries a lineage trailer (feature 073).
-    /// Framing: <c>[...entry...][failure block?][u8 0xFE][u16 requeues]</c>
+    /// Framing: <c>[...entry...][failure block?][u16 requeues][u32 magic 0xFE11EA9E]</c>
     /// </summary>
     public static bool TryGetLineage(
         ReadOnlySpan<byte> entry,
@@ -242,10 +272,10 @@ internal static class Envelope
         if (entry.Length < LineageTrailerLen)
             return false;
 
-        if (entry[entry.Length - LineageTrailerLen] != LineageMarker)
+        if (BinaryPrimitives.ReadUInt32BigEndian(entry.Slice(entry.Length - 4)) != LineageMagic)
             return false;
 
-        requeues = BinaryPrimitives.ReadUInt16BigEndian(entry.Slice(entry.Length - 2));
+        requeues = BinaryPrimitives.ReadUInt16BigEndian(entry.Slice(entry.Length - LineageTrailerLen));
         withoutLineage = entry.Slice(0, entry.Length - LineageTrailerLen);
         return true;
     }
@@ -265,8 +295,8 @@ internal static class Envelope
 
         var buf = new byte[bare.Length + LineageTrailerLen];
         bare.CopyTo(buf);
-        buf[bare.Length] = LineageMarker;
-        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(bare.Length + 1), requeues);
+        BinaryPrimitives.WriteUInt16BigEndian(buf.AsSpan(bare.Length), requeues);
+        BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(bare.Length + 2), LineageMagic);
         return buf;
     }
 

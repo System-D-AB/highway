@@ -99,3 +99,33 @@ public class RetryScanningTests
             .WithMessage("*InvalidRetryQueueMessage*");
     }
 }
+
+
+/// <summary>073 fix: every hosted target declares its retry policy, the default when its contract has none.</summary>
+public class SessionPolicyDeclarationTests
+{
+    [Fact]
+    public void ATargetWithoutRetry_DeclaresTheDefault_SoAStoredPolicyIsCleared()
+    {
+        var catalog = new ImmutableCatalog([], [], queues:
+        [
+            new QueueDescriptor
+            {
+                Name = "with.retry", MessageType = typeof(ValidRetryQueueMessage), ProcessorType = typeof(ValidRetryQueueProcessor),
+                Lifetime = HighwayServiceLifetime.Scoped, InvokeDelegate = (_, _, _) => Task.CompletedTask,
+                Retry = new RetryAttribute { MaxAttempts = 4, Backoff = "exp:1s..30s:jitter", MaxRequeues = 0 },
+            },
+            new QueueDescriptor
+            {
+                Name = "without.retry", MessageType = typeof(ValidRetryQueueMessage), ProcessorType = typeof(ValidRetryQueueProcessor),
+                Lifetime = HighwayServiceLifetime.Scoped, InvokeDelegate = (_, _, _) => Task.CompletedTask,
+            },
+        ]);
+
+        var policies = Highway.Client.Engine.HighwayEngine.SessionPolicies(catalog, "grp");
+
+        policies.Should().ContainEquivalentOf(new { Kind = "Q", Name = "with.retry", MaxAttempts = 4, Backoff = "exp:1s..30s:jitter", MaxRequeues = 0 });
+        policies.Should().ContainEquivalentOf(new { Kind = "Q", Name = "without.retry", MaxAttempts = 0, Backoff = "none", MaxRequeues = 3 },
+            "a contract without [Retry] declares the default, which clears a policy an earlier deploy stored");
+    }
+}

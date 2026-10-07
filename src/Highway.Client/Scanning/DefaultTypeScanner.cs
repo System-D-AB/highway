@@ -440,6 +440,9 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                 }
                 else if (messageContracts.TryGetValue(messageType, out var cName))
                 {
+                    // 073 fix: a group's dead letters exist only for a group this application is in.
+                    if (!channels.Any(c => c.MessageType == messageType))
+                        throw new DeadLetterWithoutSubscriberException(messageType, type, cName);
                     targetKind = DeadLetterTargetKind.Group;
                     targetName = cName;
                 }

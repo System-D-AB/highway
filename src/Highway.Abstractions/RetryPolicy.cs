@@ -83,6 +83,27 @@ public readonly record struct RetryPolicy(
     /// </summary>
     public static TimeSpan ParseDuration(string raw)
     {
+        // A number too large for a TimeSpan ("1e30d", "Infinity s") is a malformed policy, reported as one —
+        // never an OverflowException escaping a session command (073 fix).
+        TimeSpan value;
+        try
+        {
+            value = ParseDurationUnchecked(raw);
+        }
+        catch (OverflowException)
+        {
+            throw new FormatException($"Duration '{raw}' is too large.");
+        }
+        // A retry delay beyond a year is a typo, and bounding it keeps now + delay far from DateTime's limit.
+        if (value > MaxDuration) throw new FormatException($"Duration '{raw}' exceeds the maximum of 365 days.");
+        return value;
+    }
+
+    /// <summary>The longest backoff a policy may name (365 days).</summary>
+    public static readonly TimeSpan MaxDuration = TimeSpan.FromDays(365);
+
+    private static TimeSpan ParseDurationUnchecked(string raw)
+    {
         var s = raw.Trim().ToLowerInvariant();
         if (string.IsNullOrEmpty(s))
             throw new FormatException("Duration cannot be empty.");
@@ -121,7 +142,8 @@ public readonly record struct RetryPolicy(
     }
 
     /// <summary>
-    /// Parses a backoff string like "none", "fixed:30s", "exp:1s..5m", with optional "jitter".
+    /// Parses a backoff string like "none", "fixed:30s", "exp:1s..5m", with optional jitter written either as a
+    /// <c>:jitter</c> suffix (<c>exp:500ms..30s:jitter</c>) or a separate word (<c>exp:500ms..30s jitter</c>).
     /// </summary>
     public static (BackoffKind Kind, TimeSpan Min, TimeSpan Max, bool Jitter) ParseBackoff(string? raw)
     {
@@ -134,6 +156,11 @@ public readonly record struct RetryPolicy(
         // Check for jitter token anywhere in the string
         var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var main = parts[0];
+        if (main.EndsWith(":jitter", StringComparison.OrdinalIgnoreCase))
+        {
+            jitter = true;
+            main = main[..^":jitter".Length];
+        }
         for (var i = 1; i < parts.Length; i++)
         {
             if (parts[i].Equals("jitter", StringComparison.OrdinalIgnoreCase))
@@ -168,7 +195,7 @@ public readonly record struct RetryPolicy(
         }
 
         throw new FormatException(
-            $"Unrecognized backoff specification '{raw}'. Expected 'none', 'fixed:<duration>', or 'exp:<min>..<max>' with optional 'jitter'.");
+            $"Unrecognized backoff specification '{raw}'. Expected 'none', 'fixed:<duration>', or 'exp:<min>..<max>', optionally followed by ':jitter'.");
     }
 
     /// <summary>

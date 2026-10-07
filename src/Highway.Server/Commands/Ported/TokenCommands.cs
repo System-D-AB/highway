@@ -53,7 +53,9 @@ internal abstract class TokenCommand : HighwayCommand
         if (wb.ReadInFlight(Seq) is { } held)
         {
             Node = held.Node;
-            Envelope.DecodeRpcEntry(held.Entry, out var id, out _, out _);
+            ReadOnlySpan<byte> id;
+            if (Kind == BoxKeys.Kind.DeadFeed) Envelope.DecodeRpcEntryRaw(held.Entry, out id, out _, out _);   // no trailers of its own
+            else Envelope.DecodeRpcEntry(held.Entry, out id, out _, out _);
             Id = Encoding.UTF8.GetString(id);
         }
         var done = Settle(ctx, wb);

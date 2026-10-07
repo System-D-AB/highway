@@ -92,9 +92,11 @@ internal sealed class HwClaimCommand : HighwayCommand
             {
                 if (ctx.Options.Lease > TimeSpan.Zero)
                 {
+                    // maxAttempts 0: a notification whose handler keeps dying is returned to the feed, never pushed
+                    // into the feed's own dead space where nothing reads it. The feed's size is bounded on write.
                     wbFeed.SweepLeases(
                         ctx.NowTicks - ctx.Options.Lease.Ticks, ctx.NowTicks,
-                        ctx.Options.MaxDeliveryAttempts, ctx.Options.MaxDeadLetterEntries);
+                        maxAttempts: 0, ctx.Options.MaxDeadLetterEntries);
                 }
 
                 var claimed = wbFeed.Claim(_node, ctx.NowTicks, _count, targetString);

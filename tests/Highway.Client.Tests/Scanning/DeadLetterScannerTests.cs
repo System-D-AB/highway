@@ -57,6 +57,11 @@ public class DeadLetterScannerTests
             => Task.FromResult(DeadLetterAction.Discard);
     }
 
+    public sealed class ShipmentSubscriber : ISubscribe<ShipmentDispatchedEvent>
+    {
+        public Task SubscribeAsync(ShipmentDispatchedEvent message, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
     public sealed class ShipmentDeadLetterHandler : IDeadLetter<ShipmentDispatchedEvent>
     {
         public Task<DeadLetterAction> HandleAsync(DeadLetter<ShipmentDispatchedEvent> letter, CancellationToken ct = default)
@@ -102,7 +107,7 @@ public class DeadLetterScannerTests
     [Fact]
     public void Scan_DiscoversGroupDeadLetterHandler()
     {
-        var types = new List<Type> { typeof(ShipmentDispatchedEvent), typeof(ShipmentDeadLetterHandler) };
+        var types = new List<Type> { typeof(ShipmentDispatchedEvent), typeof(ShipmentSubscriber), typeof(ShipmentDeadLetterHandler) };
         var result = _scanner.ScanTypes(types);
 
         result.DeadLetters.Should().ContainSingle();
@@ -127,6 +132,17 @@ public class DeadLetterScannerTests
 
         act.Should().Throw<DuplicateDeadLetterHandlerException>()
             .WithMessage($"*'{typeof(OrderDeadLetterHandler).FullName}'*'{typeof(OrderDeadLetterHandlerDuplicate).FullName}'*'{typeof(OrderPlacedMessage).FullName}'*");
+    }
+
+    [Fact]
+    public void Scan_GroupHandlerWithoutASubscriber_IsRefused_NamingTheChannel()
+    {
+        // 073 fix: this application's group is not a member of the channel, so the handler could never run.
+        var types = new List<Type> { typeof(ShipmentDispatchedEvent), typeof(ShipmentDeadLetterHandler) };
+
+        var act = () => _scanner.ScanTypes(types);
+
+        act.Should().Throw<DeadLetterWithoutSubscriberException>().WithMessage("*shipments.dispatched*ISubscribe*");
     }
 
     [Fact]

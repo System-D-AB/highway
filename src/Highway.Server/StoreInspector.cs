@@ -55,7 +55,8 @@ internal sealed class StoreInspector(IHighwayStore store)
         var rt = new BoxRuntime();
         using var batch = store.NewBatch();
         if (Catalog.Find(store, batch, rt, kind, name) is not { } box) return whenAbsent;
-        using var wb = new WorkBox(store, rt, box, tracksBytes: kind == BoxKeys.Kind.Queue, batch);
+        using var wb = new WorkBox(store, rt, box, tracksBytes: kind == BoxKeys.Kind.Queue, batch,
+            rawEntries: kind == BoxKeys.Kind.DeadFeed);
         return read(wb);
     }
 

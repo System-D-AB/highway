@@ -33,7 +33,7 @@ public class DeadLetterStorageTests
         var bare = SampleEntry("msg-2", 0);
         var withLineage = Envelope.WithLineage(bare, 3);
 
-        withLineage.Length.Should().Be(bare.Length + 3);
+        withLineage.Length.Should().Be(bare.Length + 6, "[u16 requeues][u32 magic]");
         Envelope.TryGetLineage(withLineage, out var requeues, out var withoutLineage).Should().BeTrue();
         requeues.Should().Be(3);
         withoutLineage.SequenceEqual(bare).Should().BeTrue();

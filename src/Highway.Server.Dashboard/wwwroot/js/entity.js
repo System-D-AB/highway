@@ -96,6 +96,18 @@ function stateBlock(entry) {
     return `<dl class="detail">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
 }
 
+
+// Dead-letter bulk actions (073): the table pages, the broker acts on at most BULK_MAX per command.
+const DEAD_PAGE = 50;
+const BULK_MAX = 500;
+const bulkCount = (btn) => Math.min(Number(btn.getAttribute('data-total')) || 0, BULK_MAX);
+const bulkPrompt = (verb, count, btn, name) => {
+    const total = Number(btn.getAttribute('data-total')) || 0;
+    return total > count
+        ? `${verb} the oldest ${count} of ${total} dead letters for ${name}? Run it again for the rest.`
+        : `${verb} ${count} dead letter${count === 1 ? '' : 's'} for ${name}?`;
+};
+
 export async function render(container, options, params) {
     const name = params.get('name') || '';
     const kind = params.get('kind') || 'Unknown';
@@ -104,7 +116,7 @@ export async function render(container, options, params) {
         const [catalogue, data, deadData] = await Promise.all([
             getJson('catalogue', 'api/catalogue'),
             getJson('messages', `api/messages/${encodeURIComponent(name)}`),
-            getJson('deadletters', `api/deadletters?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}&count=50`),
+            getJson('deadletters', `api/deadletters?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}&count=${DEAD_PAGE}`),
         ]);
 
         const entries = catalogue?.entries || [];
@@ -132,14 +144,20 @@ export async function render(container, options, params) {
         }
 
         const deadItems = deadData?.items || [];
+        // The table shows the oldest DEAD_PAGE; the bulk actions act on the real total, one broker batch
+        // (BULK_MAX) at a time — and say so, so a button never promises more or less than it does (073 fix).
+        const deadTotal = Math.max(entry?.deadLettered ?? 0, deadItems.length);
         if (deadItems.length === 0) {
             html += '<p class="muted">No dead letters currently stored.</p>';
         } else {
             if (!deadData?.readOnly) {
                 html += `<div style="margin-bottom: 0.75rem; display: flex; gap: 0.5rem;">
-                    <button type="button" class="btn btn-sm btn-requeue-all" data-kind="${esc(kind)}" data-name="${esc(name)}">Requeue All (${deadItems.length})</button>
-                    <button type="button" class="btn btn-sm btn-purge-all" data-kind="${esc(kind)}" data-name="${esc(name)}">Purge All (${deadItems.length})</button>
+                    <button type="button" class="btn btn-sm btn-requeue-all" data-kind="${esc(kind)}" data-name="${esc(name)}" data-total="${deadTotal}">Requeue All (${deadTotal})</button>
+                    <button type="button" class="btn btn-sm btn-purge-all" data-kind="${esc(kind)}" data-name="${esc(name)}" data-total="${deadTotal}">Purge All (${deadTotal})</button>
                 </div>`;
+            }
+            if (deadTotal > deadItems.length) {
+                html += `<p class="muted">Showing the oldest ${deadItems.length} of ${deadTotal}.</p>`;
             }
 
             html += `<table class="grid dead-letters-table">
@@ -258,9 +276,10 @@ export async function render(container, options, params) {
             btn.onclick = async () => {
                 const k = btn.getAttribute('data-kind');
                 const n = btn.getAttribute('data-name');
-                if (!confirm(`Requeue all dead letters for ${n}?`)) return;
+                const count = bulkCount(btn);
+                if (!confirm(bulkPrompt('Requeue', count, btn, n))) return;
                 btn.disabled = true;
-                await postJson('deadletters', 'api/deadletters/requeue', { kind: k, name: n, count: 500 });
+                await postJson('deadletters', 'api/deadletters/requeue', { kind: k, name: n, count });
                 await refresh();
             };
         });
@@ -269,9 +288,10 @@ export async function render(container, options, params) {
             btn.onclick = async () => {
                 const k = btn.getAttribute('data-kind');
                 const n = btn.getAttribute('data-name');
-                if (!confirm(`Purge all dead letters for ${n}?`)) return;
+                const count = bulkCount(btn);
+                if (!confirm(bulkPrompt('Purge', count, btn, n))) return;
                 btn.disabled = true;
-                await postJson('deadletters', 'api/deadletters/purge', { kind: k, name: n, count: 500 });
+                await postJson('deadletters', 'api/deadletters/purge', { kind: k, name: n, count });
                 await refresh();
             };
         });
