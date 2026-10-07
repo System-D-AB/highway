@@ -33,6 +33,8 @@ internal sealed class HwPublishCommand : HighwayCommand
 
     private string[] _groups = [];
     private long _messageId;
+    private string? _publishId;   // 074 Part B: the client's retry key for this publish
+    private bool _duplicate;
     private int _delivered;
     private string? _refusedReason;
 
@@ -53,20 +55,38 @@ internal sealed class HwPublishCommand : HighwayCommand
         if (!TryReadPayload(input, ref idx, ctx.Options.MaxPayloadBytes, out _payloadBytes))
             return false;
 
-        var keyword = input.Next(ref idx);
-        if (keyword.Length > 0)
+        // [AT <ticks>] and [ID <publishId>], in either order, each at most once (074 Part B).
+        var seenAt = false;
+        var seenId = false;
+        while (true)
         {
+            var keyword = input.Next(ref idx);
+            if (keyword.Length == 0) break;
+
             var word = Encoding.ASCII.GetString(keyword).ToUpperInvariant();
-            if (word != "AT")
-                return Fail(HighwayErrors.InvalidArg, $"unknown argument '{word}'; expected AT");
-
-            var value = input.Next(ref idx);
-            if (value.Length == 0
-                || !long.TryParse(Encoding.ASCII.GetString(value), out var ticks)
-                || ticks < 0)
-                return Fail(HighwayErrors.InvalidArg, "AT requires a non-negative .NET UTC tick count");
-
-            _deliverAtTicks = ticks;
+            if (word == "AT")
+            {
+                if (seenAt) return Fail(HighwayErrors.InvalidArg, "duplicate AT argument");
+                seenAt = true;
+                var value = input.Next(ref idx);
+                if (value.Length == 0
+                    || !long.TryParse(Encoding.ASCII.GetString(value), out var ticks)
+                    || ticks < 0)
+                    return Fail(HighwayErrors.InvalidArg, "AT requires a non-negative .NET UTC tick count");
+                _deliverAtTicks = ticks;
+            }
+            else if (word == "ID")
+            {
+                if (seenId) return Fail(HighwayErrors.InvalidArg, "duplicate ID argument");
+                seenId = true;
+                if (!TryReadIdentifier(input, ref idx, "publishId", ctx.Options.MaxIdentifierBytes, out var publishId))
+                    return false;
+                _publishId = publishId;
+            }
+            else
+            {
+                return Fail(HighwayErrors.InvalidArg, $"unknown argument '{word}'; expected AT or ID");
+            }
         }
 
         return true;
@@ -113,6 +133,17 @@ internal sealed class HwPublishCommand : HighwayCommand
         }
         using var _lock = lease;
 
+        // 074 Part B: a publish id this broker accepted on this channel within PublishDuplicateWindow is a
+        // retry of a publish whose reply was lost: answer the original count, write nothing.
+        if (_publishId is not null && ctx.Publishes is { } publishes && publishes.TryGet(_channel, _publishId, ctx.NowTicks, out var storedCount))
+        {
+            _duplicate = true;
+            publishes.RecordDuplicate();
+            ctx.Metrics?.RecordMessageDuplicate("publish");
+            writer.Integer(storedCount);
+            return;
+        }
+
         using var snapshot = store.Snapshot();
         _groups = ReadGroupNames(store, snapshot, _channel).Where(boxes.ContainsKey).ToArray();   // a group added since has no lock held: next publish
         using var batch = store.NewBatch();
@@ -129,6 +160,7 @@ internal sealed class HwPublishCommand : HighwayCommand
             batch.Commit();
             BoxCommandSupport.Forget(ctx, retired);
             _delivered = 0;
+            if (_publishId is not null) ctx.Publishes?.Admit(_channel, _publishId, ctx.NowTicks, 0);
             writer.Integer(0);
             return;
         }
@@ -164,6 +196,7 @@ internal sealed class HwPublishCommand : HighwayCommand
 
             // A deferred publish has reached no group yet; it counts on promotion.
             _delivered = deferred ? 0 : _groups.Length;
+            if (_publishId is not null) ctx.Publishes?.Admit(_channel, _publishId, ctx.NowTicks, _delivered);
             writer.Integer(_delivered);
         }
         finally
@@ -248,6 +281,8 @@ internal sealed class HwPublishCommand : HighwayCommand
 
     protected override void AfterCommit(CommandContext ctx)
     {
+        if (_duplicate) return;   // a suppressed retry wrote nothing: no Published record, no doorbell
+
         if (_refusedReason is not null)
         {
             ctx.Recorder.Record(HighwayEventType.SendRefused, _channel, errorCode: _refusedReason);

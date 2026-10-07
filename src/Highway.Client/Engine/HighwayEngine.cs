@@ -169,7 +169,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                     service, _connection, executor, _options.NodeName,
                     _options.WorkerConcurrency, wake,
                     _loggerFactory.CreateLogger($"Highway.Worker.{service.Name}"),
-                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime, _options.AbandonGrace, _options.MaxAbandonedHandlers);
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
                     CancellationToken.None));
@@ -191,7 +191,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                     channel, _connection, executor, group,
                     1, wake,
                     _loggerFactory.CreateLogger($"Highway.Subscriber.{channel.Name}"),
-                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime, _options.AbandonGrace, _options.MaxAbandonedHandlers);
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
                     CancellationToken.None));
@@ -226,7 +226,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                     queue, _connection, executor, _options.NodeName,
                     _options.WorkerConcurrency, wake,
                     _loggerFactory.CreateLogger($"Highway.Queue.{queue.Name}"),
-                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime, _options.AbandonGrace, _options.MaxAbandonedHandlers);
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),
                     CancellationToken.None));
@@ -257,7 +257,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 var loop = new DeadLetterWorkerLoop(
                     deadLetter, _connection, executor, _options.NodeName, group, wake,
                     _loggerFactory.CreateLogger($"Highway.DeadLetter.{deadLetter.TargetName}"),
-                    _options.LeaseRenewalInterval, _options.MaxProcessingTime);
+                    _options.LeaseRenewalInterval, _options.MaxProcessingTime, _options.AbandonGrace, _options.MaxAbandonedHandlers);
 
                 loopTasks.Add(Task.Run(
                     () => RunTrackedAsync(() => loop.RunAsync(SelfHealTimeout, stopToken, workToken)),

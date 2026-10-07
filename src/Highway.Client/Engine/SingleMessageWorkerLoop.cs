@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Highway.Abstractions;
 using Highway.Client.Execution;
 using Highway.Client.Wire;
@@ -56,7 +57,24 @@ internal abstract class SingleMessageWorkerLoop
     protected TimeSpan? IdempotencyWindow { get; }
 
     private readonly TimeSpan _renewalInterval;
-    private readonly TimeSpan _maxProcessingTime;
+
+    /// <summary>The handler cap (019; enforced on the handler since 074 Part B). Zero disables cap and renewal.</summary>
+    protected readonly TimeSpan MaxProcessingTime;
+
+    private readonly TimeSpan _abandonGrace;
+    private readonly int _maxAbandonedHandlers;
+
+    // Abandoned invocations, keyed by the invocation's own cancellation token — never by message id: a
+    // message redelivered while its abandoned copy still hangs is a NEW invocation and must settle normally.
+    private readonly ConcurrentDictionary<CancellationToken, (string Id, DateTime Since)> _abandoned = new();
+    private DateTime _lastAbandonedLimitLog = DateTime.MinValue;
+
+    /// <summary>
+    /// Largest span a timer can hold (CancelAfter / Task.Delay take at most uint.MaxValue - 1 ms). A cap
+    /// above it is treated as this — about 24 days, i.e. practically "no cap" — instead of throwing before
+    /// the slot is protected.
+    /// </summary>
+    private static readonly TimeSpan MaxTimerSpan = TimeSpan.FromDays(24);
 
     protected SingleMessageWorkerLoop(
         Type contractType,
@@ -67,16 +85,21 @@ internal abstract class SingleMessageWorkerLoop
         LoopWake wake,
         ILogger logger,
         TimeSpan renewalInterval = default,
-        TimeSpan maxProcessingTime = default)
+        TimeSpan maxProcessingTime = default,
+        TimeSpan abandonGrace = default,
+        int maxAbandonedHandlers = 0)
     {
         _renewalInterval = renewalInterval <= TimeSpan.Zero ? TimeSpan.FromMinutes(1) : renewalInterval;
-        _maxProcessingTime = maxProcessingTime;
+        MaxProcessingTime = maxProcessingTime > MaxTimerSpan ? MaxTimerSpan : maxProcessingTime;
+        _abandonGrace = abandonGrace <= TimeSpan.Zero ? TimeSpan.FromSeconds(30)
+            : abandonGrace > MaxTimerSpan ? MaxTimerSpan : abandonGrace;
         Connection = connection;
         Executor = executor;
         NodeName = nodeName;
         Logger = logger;
         Reporter = new FailureReporter(connection, logger);
         _concurrency = Math.Max(1, concurrency);
+        _maxAbandonedHandlers = maxAbandonedHandlers > 0 ? maxAbandonedHandlers : _concurrency;
         _wake = wake;
         _gate = new SemaphoreSlim(_concurrency, _concurrency);
 
@@ -110,9 +133,18 @@ internal abstract class SingleMessageWorkerLoop
     /// </summary>
     protected abstract Task<ClaimedWork?> ClaimAsync(CancellationToken stopToken);
 
-    /// <summary>Handles one claimed message. Exceptions are caught and logged by the base.</summary>
-    /// <summary>Handles one claimed message; settles it with <see cref="ClaimedWork.Token"/>.</summary>
-    protected abstract Task ProcessAsync(ClaimedWork work, CancellationToken workToken);
+    /// <summary>
+    /// Handles one claimed message; settles it with <see cref="ClaimedWork.Token"/>. Exceptions are caught and
+    /// logged by the base. <paramref name="ct"/> is this invocation's own token: cancelled at
+    /// <c>MaxProcessingTime</c> or at shutdown, and the key <see cref="IsAbandoned"/> checks before settling.
+    /// </summary>
+    protected abstract Task ProcessAsync(ClaimedWork work, CancellationToken ct);
+
+    /// <summary>
+    /// The handler stopped because <c>MaxProcessingTime</c> cancelled it (074 Part B): queues and subscribers
+    /// report a <c>ProcessingTimeExceeded</c> failure (not acknowledged), RPC answers 504.
+    /// </summary>
+    protected abstract Task OnProcessingTimeExceededAsync(ClaimedWork work, CancellationToken workToken);
 
     /// <summary>
     /// Two-token contract: <paramref name="stopToken"/> stops claiming new work;
@@ -127,11 +159,12 @@ internal abstract class SingleMessageWorkerLoop
         // Initial drain on startup before waiting for wake signal
         try
         {
-            await DrainAsync(stopToken, workToken).ConfigureAwait(false);
+            await DrainAsync(selfHealTimeout, stopToken, workToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            return;
+            // Stopped during the first pass. Fall through to the in-flight wait below — returning here
+            // reported the loop stopped while handlers claimed in this pass were still running (074 Part B).
         }
         catch (Exception ex)
         {
@@ -145,7 +178,7 @@ internal abstract class SingleMessageWorkerLoop
 
             try
             {
-                await DrainAsync(stopToken, workToken).ConfigureAwait(false);
+                await DrainAsync(selfHealTimeout, stopToken, workToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -174,13 +207,32 @@ internal abstract class SingleMessageWorkerLoop
         Logger.LogInformation("Worker loop stopped for {Kind} '{Target}'", TargetKind, TargetName);
     }
 
-    private async Task DrainAsync(CancellationToken stopToken, CancellationToken workToken)
+    private async Task DrainAsync(TimeSpan selfHealTimeout, CancellationToken stopToken, CancellationToken workToken)
     {
         while (!stopToken.IsCancellationRequested)
         {
+            // 074 Part B: while MaxAbandonedHandlers abandoned handlers still run, claim nothing more.
+            if (_abandoned.Count >= _maxAbandonedHandlers)
+            {
+                LogAbandonedLimitReachedOncePerMinute();
+                await _wake.WaitAsync(selfHealTimeout, stopToken).ConfigureAwait(false);
+                if (stopToken.IsCancellationRequested) return;
+                continue;
+            }
+
             // Slot first, then claim. See the class remarks: claiming starts the lease, so a
             // claim taken while the gate is full is a lease running on work that cannot start.
             await _gate.WaitAsync(stopToken).ConfigureAwait(false);
+
+            // The slot may have been freed by an abandonment: re-check the bound before claiming.
+            if (_abandoned.Count >= _maxAbandonedHandlers)
+            {
+                _gate.Release();
+                LogAbandonedLimitReachedOncePerMinute();
+                await _wake.WaitAsync(selfHealTimeout, stopToken).ConfigureAwait(false);
+                if (stopToken.IsCancellationRequested) return;
+                continue;
+            }
 
             ClaimedWork? item;
             try
@@ -233,13 +285,15 @@ internal abstract class SingleMessageWorkerLoop
     }
 
     /// <summary>
-    /// Renews this message's lease while its handler runs, and stops at
-    /// <c>MaxProcessingTime</c> (019).
+    /// Renews this message's lease while its handler runs (019), until <paramref name="stop"/> fires: when the
+    /// handler has stopped, or when it is abandoned (074 Part B).
     ///
-    /// <para><b>Why it is bounded.</b> Unbounded renewal deletes lease recovery: a handler
-    /// stuck in a deadlock would hold its message forever — never redelivered, never
-    /// dead-lettered, never visible. Past the cap the message returns to exactly the behaviour
-    /// it had before this feature.</para>
+    /// <para><b>Why it is still bounded.</b> Unbounded renewal deletes lease recovery: a handler stuck in a
+    /// deadlock would hold its message forever — never redelivered, never dead-lettered, never visible. The
+    /// bound is the handler's: it is cancelled at <c>MaxProcessingTime</c> and abandoned <c>AbandonGrace</c>
+    /// later if it ignores that, which stops this renewal and lets lease recovery redeliver the message.
+    /// Renewing past the cap until then is what keeps a second worker from starting the message while the
+    /// first copy is still being waited for.</para>
     ///
     /// <para><b>A failed renewal is swallowed</b> (C7.1). A mechanism that exists to protect
     /// delivery must never be able to break it; the ordinary sweep still recovers the message.
@@ -248,37 +302,17 @@ internal abstract class SingleMessageWorkerLoop
     /// </summary>
     private async Task RenewWhileRunningAsync(ClaimedWork work, CancellationToken stop)
     {
-        var id = work.Id;
-        var started = DateTime.UtcNow;
-
         try
         {
             while (!stop.IsCancellationRequested)
             {
                 await Task.Delay(_renewalInterval, stop).ConfigureAwait(false);
-
-                if (DateTime.UtcNow - started >= _maxProcessingTime)
-                {
-                    // Loud, and once: a handler that routinely exhausts its cap is either
-                    // mis-sized or hung, and both are worth knowing BEFORE the dead letter.
-                    Observability.HighwayActivity.MarkProcessingCapExceeded(
-                        System.Diagnostics.Activity.Current, id, DateTime.UtcNow - started);
-
-                    Logger.LogWarning(
-                        "Message '{MessageId}' on {Kind} '{Target}' has run for {Elapsed} and reached " +
-                        "MaxProcessingTime ({Cap}); its lease is no longer being renewed. It will be " +
-                        "redelivered when the lease expires and eventually dead-lettered. Either the " +
-                        "handler is hung, or this work should be chunked rather than run in one message.",
-                        id, TargetKind, TargetName, DateTime.UtcNow - started, _maxProcessingTime);
-                    return;
-                }
-
                 await Connection.TouchAsync(work.Token, stop).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            // The handler finished, or the engine is stopping. Neither is a problem.
+            // The handler finished, was abandoned, or the engine is stopping. None is a problem.
         }
         catch (Exception ex)
         {
@@ -286,23 +320,107 @@ internal abstract class SingleMessageWorkerLoop
                 "Could not renew the lease for '{MessageId}' on {Kind} '{Target}'; the message is " +
                 "unaffected and the ordinary sweep still recovers it, but a slow handler may now " +
                 "be duplicated",
-                id, TargetKind, TargetName);
+                work.Id, TargetKind, TargetName);
         }
     }
 
     private async Task ProcessAndReleaseAsync(ClaimedWork work, CancellationToken workToken)
     {
-        // Renewal is on by default (019 R2.2): a handler outliving the lease is a correctness
-        // failure with silent duplicate execution, and a developer should not have to opt in to
-        // not having it. Zero disables it, restoring pre-019 behaviour exactly.
+        if (MaxProcessingTime <= TimeSpan.Zero)
+        {
+            // Zero disables renewal and the cap, restoring pre-019 behaviour exactly.
+            try
+            {
+                await ProcessAsync(work, workToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Engine stopping mid-message; server lease recovery handles redelivery.
+            }
+            catch (Exception ex)
+            {
+                await Reporter.ReportAsync(Target, work, ex, FailureDisposition, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+            return;
+        }
+
+        // Renewal is on by default (019 R2.2): a handler outliving the lease is a correctness failure with
+        // silent duplicate execution. It continues past MaxProcessingTime until the handler stops or is
+        // abandoned (074 Part B), so no second worker is handed a message whose first copy is still running.
         using var renewalStop = CancellationTokenSource.CreateLinkedTokenSource(workToken);
-        var renewal = _maxProcessingTime > TimeSpan.Zero
-            ? RenewWhileRunningAsync(work, renewalStop.Token)
-            : Task.CompletedTask;
+        var renewal = RenewWhileRunningAsync(work, renewalStop.Token);
+
+        // The handler's token: cancelled at MaxProcessingTime or at shutdown. Owned by this method unless
+        // the invocation is abandoned, when the abandoned handler's continuation disposes it.
+        var cap = CancellationTokenSource.CreateLinkedTokenSource(workToken);
+
+        // The abandonment timer is deliberately NOT linked to the shutdown token: stopping the engine cancels
+        // the handler (through `cap`), it does not declare it abandoned. It is cancelled in `finally`, so no
+        // timer outlives the message it guards.
+        using var abandonTimer = new CancellationTokenSource();
+        var abandoned = false;
+
+        // Loud, and once, at the moment the cap is reached — whether the handler then stops or not.
+        var started = DateTime.UtcNow;
+        var activity = System.Diagnostics.Activity.Current;
+        using var capReached = cap.Token.Register(() =>
+        {
+            if (workToken.IsCancellationRequested) return;   // shutdown, not the cap
+            try
+            {
+                Observability.HighwayActivity.MarkProcessingCapExceeded(activity, work.Id, DateTime.UtcNow - started);
+                Logger.LogWarning(
+                    "Message '{MessageId}' on {Kind} '{Target}' reached MaxProcessingTime ({Cap}); its handler has " +
+                    "been cancelled. Its lease is renewed until the handler stops, or until it is abandoned after " +
+                    "AbandonGrace ({Grace}) if it ignores the cancellation. Either the handler is hung, or this work " +
+                    "should be chunked rather than run in one message.",
+                    work.Id, TargetKind, TargetName, MaxProcessingTime, _abandonGrace);
+            }
+            catch (Exception)
+            {
+                // Diagnostics must never break the loop (C7.1).
+            }
+        });
 
         try
         {
-            await ProcessAsync(work, workToken).ConfigureAwait(false);
+            cap.CancelAfter(MaxProcessingTime);
+
+            // On the thread pool, so a handler that blocks synchronously before its first await
+            // (Thread.Sleep, .Result, a lock) cannot stop this method reaching the abandonment check.
+            var handler = Task.Run(() => ProcessAsync(work, cap.Token), CancellationToken.None);
+            var deadline = Task.Delay(MaxProcessingTime + _abandonGrace, abandonTimer.Token);
+            var finished = await Task.WhenAny(handler, deadline).ConfigureAwait(false);
+
+            if (finished != handler)
+            {
+                abandoned = true;
+                Abandon(work.Id, handler, cap);
+                return;
+            }
+
+            await handler.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cap.IsCancellationRequested && !workToken.IsCancellationRequested)
+        {
+            Observability.HighwayClientMetrics.RecordHandlerCancelled(TargetKind);
+            try
+            {
+                await OnProcessingTimeExceededAsync(work, workToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Reporting the cap must never fault this method: the slot and renewal below still have to
+                // be released, and lease recovery still redelivers the message.
+                Logger.LogWarning(ex,
+                    "Could not report MaxProcessingTime for '{MessageId}' on {Kind} '{Target}'; lease recovery will redeliver it",
+                    work.Id, TargetKind, TargetName);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -317,12 +435,68 @@ internal abstract class SingleMessageWorkerLoop
         }
         finally
         {
-            // Stops the moment the handler completes, throws or is cancelled (R2.3). A
-            // completed message is never renewed.
+            await abandonTimer.CancelAsync().ConfigureAwait(false);
+
+            // Stops the moment the handler completes, throws or is abandoned. A completed or abandoned
+            // message is never renewed.
             await renewalStop.CancelAsync().ConfigureAwait(false);
             try { await renewal.ConfigureAwait(false); } catch { /* already logged */ }
 
+            if (!abandoned) cap.Dispose();
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// True when the invocation that owns <paramref name="invocationToken"/> (the token passed to
+    /// <see cref="ProcessAsync"/>) was abandoned after MaxProcessingTime + AbandonGrace. An abandoned invocation
+    /// must not acknowledge, reply, resolve or complete idempotency when it finally returns: its message was
+    /// already given up. A redelivery of the same message is a different invocation.
+    /// </summary>
+    protected bool IsAbandoned(CancellationToken invocationToken) => _abandoned.ContainsKey(invocationToken);
+
+    /// <summary>Abandoned invocations still running (diagnostics and tests).</summary>
+    internal int AbandonedCount => _abandoned.Count;
+
+    private void Abandon(string id, Task handler, CancellationTokenSource cap)
+    {
+        _abandoned[cap.Token] = (id, DateTime.UtcNow);
+        Observability.HighwayClientMetrics.RecordHandlerAbandoned(TargetKind);
+
+        try
+        {
+            Logger.LogError(
+                "Handler abandoned for message '{MessageId}' on {Kind} '{Target}' after {Elapsed}: it did not stop " +
+                "when cancelled at MaxProcessingTime. Its slot is released and its lease no longer renewed; the " +
+                "message will be redelivered when the lease expires. The handler is still running.",
+                id, TargetKind, TargetName, MaxProcessingTime + _abandonGrace);
+        }
+        catch (Exception)
+        {
+            // A broken log sink must not leave this invocation counted against the bound forever (C7.1).
+        }
+
+        _ = handler.ContinueWith(t =>
+        {
+            _ = t.Exception;   // observed: an abandoned handler's late fault is not unobserved
+            _abandoned.TryRemove(cap.Token, out _);
+            cap.Dispose();
+            _wake.Signal();
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private void LogAbandonedLimitReachedOncePerMinute()
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastAbandonedLimitLog < TimeSpan.FromMinutes(1))
+            return;
+        _lastAbandonedLimitLog = now;
+
+        var oldest = _abandoned.Values.OrderBy(v => v.Since).FirstOrDefault();
+        Logger.LogError(
+            "Worker loop for {Kind} '{Target}' has reached MaxAbandonedHandlers ({Count}/{Limit}); not claiming new " +
+            "work until one ends. Oldest abandoned message '{MessageId}' has been running for {Elapsed}",
+            TargetKind, TargetName, _abandoned.Count, _maxAbandonedHandlers, oldest.Id ?? "unknown",
+            oldest.Id is null ? TimeSpan.Zero : now - oldest.Since);
     }
 }

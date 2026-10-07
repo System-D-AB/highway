@@ -93,6 +93,9 @@ internal static class HighwayServerApplicator
         o.SubscriberRetirementThreshold = s.SubscriberRetirementThreshold;
         o.MaxDeliveryAttempts = s.MaxDeliveryAttempts;
         o.MaxDeadLetterEntries = s.MaxDeadLetterEntries;
+        o.RpcDuplicateWindow = s.RpcDuplicateWindow;
+        o.SendDuplicateWindow = s.SendDuplicateWindow;
+        o.PublishDuplicateWindow = s.PublishDuplicateWindow;
         o.PubSubBackoffEnabled = s.PubSubBackoffEnabled;
         o.RpcBackoffEnabled = s.RpcBackoffEnabled;
         o.MaxBackoff = s.MaxBackoff;

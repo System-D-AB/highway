@@ -40,4 +40,18 @@ internal static class HighwayClientMetrics
 
     /// <summary>The connection adopted a new master — a failover the caller followed.</summary>
     public static void RecordFailover() => Failovers.Add(1);
+
+    private static readonly Counter<long> HandlersCancelled =
+        Meter.CreateCounter<long>("highway.handlers.cancelled", "{handler}", "Handlers cancelled because processing exceeded MaxProcessingTime, tagged by kind.");
+
+    private static readonly Counter<long> HandlersAbandoned =
+        Meter.CreateCounter<long>("highway.handlers.abandoned", "{handler}", "Hung handlers abandoned after MaxProcessingTime + AbandonGrace, tagged by kind.");
+
+    /// <summary>A handler was cancelled because processing exceeded MaxProcessingTime (074 Part B).</summary>
+    public static void RecordHandlerCancelled(string kind)
+        => HandlersCancelled.Add(1, new KeyValuePair<string, object?>("kind", kind));
+
+    /// <summary>A hung handler was abandoned after MaxProcessingTime + AbandonGrace (074 Part B).</summary>
+    public static void RecordHandlerAbandoned(string kind)
+        => HandlersAbandoned.Add(1, new KeyValuePair<string, object?>("kind", kind));
 }

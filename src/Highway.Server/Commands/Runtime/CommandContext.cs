@@ -68,6 +68,19 @@ internal sealed class CommandContext
     /// </summary>
     public Resp.InstanceRegistry? Instances { get; }
 
+    /// <summary>
+    /// Ids recently accepted by <c>HW.CALL</c>, <c>HW.SEND</c> and <c>HW.PUBLISH … ID</c> (074): a repeat is
+    /// acknowledged without being stored again. Null means no duplicate filtering — the in-process command
+    /// tests' behaviour. The production dispatcher always supplies them.
+    /// </summary>
+    public RecentIds<byte>? Calls { get; }
+
+    /// <inheritdoc cref="Calls"/>
+    public RecentIds<byte>? Sends { get; }
+
+    /// <inheritdoc cref="Calls"/>
+    public RecentIds<long>? Publishes { get; }
+
     public CommandContext(
         IHighwayStore store,
         StripedLock locks,
@@ -79,7 +92,10 @@ internal sealed class CommandContext
         HighwayMetrics? metrics = null,
         SweepThrottle? sweeps = null,
         Storage.Boxes.BoxRuntime? boxes = null,
-        Resp.InstanceRegistry? instances = null)
+        Resp.InstanceRegistry? instances = null,
+        RecentIds<byte>? calls = null,
+        RecentIds<byte>? sends = null,
+        RecentIds<long>? publishes = null)
     {
         Store = store;
         Locks = locks;
@@ -92,5 +108,8 @@ internal sealed class CommandContext
         Sweeps = sweeps;
         Boxes = boxes ?? new Storage.Boxes.BoxRuntime();
         Instances = instances;
+        Calls = calls;
+        Sends = sends;
+        Publishes = publishes;
     }
 }

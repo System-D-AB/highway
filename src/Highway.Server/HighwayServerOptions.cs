@@ -206,6 +206,28 @@ public sealed class HighwayServerOptions
     public int MaxDeadLetterEntries { get; set; } = 10_000;
 
     /// <summary>
+    /// How long the broker remembers an RPC request id it has enqueued, so a repeated <c>HW.CALL</c> for it is
+    /// acknowledged without being queued again (074; from 2.5.6). Default 10 minutes; zero disables. In memory
+    /// only: a broker that takes over after a failover starts empty, so a re-send of a call it never received
+    /// is queued. An id is forgotten when its request is dead-lettered, so a caller still waiting can re-send.
+    /// </summary>
+    public TimeSpan RpcDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// How long the broker remembers a message id it stored on a queue, so a retried <c>HW.SEND</c> whose reply
+    /// was lost is acknowledged without storing it again (074 Part B). Default 10 minutes; zero disables. An id
+    /// is remembered only after the message is committed.
+    /// </summary>
+    public TimeSpan SendDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// How long the broker remembers a publish id (<c>HW.PUBLISH … ID</c>) it accepted on a channel, so a
+    /// retried publish is answered with the original group count and delivered once (074 Part B). Default 10
+    /// minutes; zero disables. An id is remembered only after the publish is committed.
+    /// </summary>
+    public TimeSpan PublishDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
     /// Age after which an unconsumed dead letter on a target with no declared feed
     /// triggers a broker warning log (feature 073). Default: 24 hours.
     /// </summary>

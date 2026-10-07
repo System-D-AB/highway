@@ -22,6 +22,7 @@ internal sealed class HwSendCommand : HighwayCommand
     private byte[] _payloadBytes = [];
     private long _deliverAtTicks;
     private string? _refusedReason;
+    private bool _duplicate;
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
     {
@@ -56,6 +57,19 @@ internal sealed class HwSendCommand : HighwayCommand
     {
         var entry = Envelope.EncodeRpcEntry(_messageIdBytes, _payloadBytes);
         using var _lock = BoxCommandSupport.LockLive(ctx, BoxKeys.Kind.Queue, _queue, create: true, out var box);
+
+        // 074 Part B: a message id stored on this queue within SendDuplicateWindow is a retry of a send whose
+        // reply was lost. Looked up under the box lock; remembered only after the commit below, so a refused or
+        // failed send never leaves an id that would swallow the caller's retry.
+        if (ctx.Sends is { } sends && sends.TryGet(_queue, _messageId, ctx.NowTicks, out _))
+        {
+            _duplicate = true;
+            sends.RecordDuplicate();
+            ctx.Metrics?.RecordMessageDuplicate("send");
+            writer.SimpleString("OK");
+            return;
+        }
+
         using var wb = BoxCommandSupport.Open(ctx, box!.Value, BoxKeys.Kind.Queue);
 
         if (ctx.Options.MaxQueueBytes > 0)
@@ -75,11 +89,14 @@ internal sealed class HwSendCommand : HighwayCommand
         if (_deliverAtTicks > ctx.NowTicks) wb.EnqueueDelayed(entry, _deliverAtTicks);
         else wb.Enqueue(entry);
         wb.Commit();
+        ctx.Sends?.Admit(_queue, _messageId, ctx.NowTicks, default);
         writer.SimpleString("OK");
     }
 
     protected override void AfterCommit(CommandContext ctx)
     {
+        if (_duplicate) return;   // nothing was stored: no event, no doorbell
+
         if (_refusedReason is not null)
         {
             ctx.Recorder.Record(HighwayEventType.SendRefused, _queue, requestId: _messageId, errorCode: _refusedReason);

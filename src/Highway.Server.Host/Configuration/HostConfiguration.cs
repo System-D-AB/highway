@@ -53,6 +53,12 @@ public sealed class HostConfiguration
             throw new ConfigurationException(
                 $"server.maxDeliveryAttempts cannot be negative, but was {Server.MaxDeliveryAttempts}. Use 0 for unlimited retries.");
 
+        if (Server.RpcDuplicateWindow < TimeSpan.Zero)
+            throw new ConfigurationException($"server.rpcDuplicateWindow cannot be negative, but was {Server.RpcDuplicateWindow}. Use 00:00:00 to disable.");
+        if (Server.SendDuplicateWindow < TimeSpan.Zero)
+            throw new ConfigurationException($"server.sendDuplicateWindow cannot be negative, but was {Server.SendDuplicateWindow}. Use 00:00:00 to disable.");
+        if (Server.PublishDuplicateWindow < TimeSpan.Zero)
+            throw new ConfigurationException($"server.publishDuplicateWindow cannot be negative, but was {Server.PublishDuplicateWindow}. Use 00:00:00 to disable.");
         if (Server.MaxDeadLetterEntries < 0)
             throw new ConfigurationException($"server.maxDeadLetterEntries cannot be negative, but was {Server.MaxDeadLetterEntries}.");
 
@@ -126,6 +132,9 @@ public sealed class ServerSection
     public TimeSpan SubscriberRetirementThreshold { get; set; } = TimeSpan.FromHours(24);
     public int MaxDeliveryAttempts { get; set; } = 5;
     public int MaxDeadLetterEntries { get; set; } = 10_000;
+    public TimeSpan RpcDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);     // 074
+    public TimeSpan SendDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);    // 074
+    public TimeSpan PublishDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10); // 074
     public bool PubSubBackoffEnabled { get; set; }
     public bool RpcBackoffEnabled { get; set; }
     public TimeSpan MaxBackoff { get; set; } = TimeSpan.FromMinutes(1);

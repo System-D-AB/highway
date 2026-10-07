@@ -17,6 +17,9 @@
     "subscriberRetirementThreshold": "1.00:00:00",
     "maxDeliveryAttempts": 5,
     "maxDeadLetterEntries": 10000,
+    "rpcDuplicateWindow": "00:10:00",      // a repeated HW.CALL request id within this is not queued again
+    "sendDuplicateWindow": "00:10:00",     // a repeated HW.SEND message id within this is not stored again
+    "publishDuplicateWindow": "00:10:00",  // a repeated HW.PUBLISH publish id within this is answered, not re-delivered
     "pubSubBackoffEnabled": false,
     "rpcBackoffEnabled": false,
     "maxBackoff": "00:01:00",

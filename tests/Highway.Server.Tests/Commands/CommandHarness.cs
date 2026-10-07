@@ -38,6 +38,11 @@ internal sealed class CommandHarness : IDisposable
     /// <summary>The live process view handed to commands (072); null unless a test sets one.</summary>
     public Highway.Server.Resp.InstanceRegistry? Instances { get; set; }
 
+    /// <summary>Duplicate memories handed to commands (074); null unless a test sets them.</summary>
+    public Highway.Server.Commands.Runtime.RecentIds<byte>? Calls { get; set; }
+    public Highway.Server.Commands.Runtime.RecentIds<byte>? Sends { get; set; }
+    public Highway.Server.Commands.Runtime.RecentIds<long>? Publishes { get; set; }
+
     /// <summary>
     /// Runs <paramref name="command"/> with the given string args at wall-clock
     /// <paramref name="nowTicks"/> (default: a fixed test clock) and returns the raw RESP
@@ -48,7 +53,7 @@ internal sealed class CommandHarness : IDisposable
         var replication = _store is Highway.Server.Storage.Rocks.RocksDbStore rocks
             ? rocks.Replication
             : null;
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes, instances: Instances);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes, instances: Instances, calls: Calls, sends: Sends, publishes: Publishes);
         var input = CommandInput.FromStrings(args);
         var writer = new RespWriter();
         command.Execute(ctx, input, writer);

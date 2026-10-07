@@ -6,6 +6,9 @@ using Highway.Server.Commands.Runtime;
 using Highway.Server.Observability;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
+using Highway.Server.Storage.Rocks;
+using Highway.Server.Tests.Commands;
+using Highway.Server.Tests.Storage;
 using Xunit;
 
 namespace Highway.Server.Tests.Resp;
@@ -116,6 +119,80 @@ public class CommandDispatcherTests
         totals.GetValueOrDefault("highway.messages.published").Should().Be(1);
         totals.GetValueOrDefault("highway.messages.delivered").Should().Be(1);
         totals.GetValueOrDefault("highway.rpc.requests").Should().Be(1);
+    }
+
+    [Fact]
+    public void ASuppressedCallReSend_IsCountedAsADuplicate_NotAsASecondRpcRequest()
+    {
+        // 074 review: the dispatcher times and counts every HW.CALL; a re-send the broker suppressed is not a request.
+        var meterName = "Highway.Server.Test." + Guid.NewGuid().ToString("N");
+        var store = new InMemoryStore();
+        var options = new HighwayServerOptions();
+        var recorder = new FlightRecorder(options.Observability);
+        using var metrics = new HighwayMetrics(replication: null, () => [], recorder, meterName);
+        var dispatcher = new CommandDispatcher(
+            store, new StripedLock(), new NullDoorbell(), recorder, options, replication: null, cache: null, metrics: metrics);
+
+        var totals = new Dictionary<string, long>();
+        using var listener = new MeterListener
+        {
+            InstrumentPublished = (inst, l) => { if (inst.Meter.Name == meterName) l.EnableMeasurementEvents(inst); },
+        };
+        listener.SetMeasurementEventCallback<long>((inst, m, _, _) =>
+            totals[inst.Name] = totals.GetValueOrDefault(inst.Name) + m);
+        listener.Start();
+
+        for (var i = 0; i < 3; i++)
+            dispatcher.Dispatch(Frame("HW.CALL", "orders.get", "r1", "body"), new RespWriter());
+
+        totals.GetValueOrDefault("highway.rpc.requests").Should().Be(1, "one call, re-sent twice, is one request");
+        totals.GetValueOrDefault("highway.messages.duplicates").Should().Be(2);
+    }
+
+    [Fact]
+    public void AnEpochChange_ForgetsRememberedIds_SoAReSendAfterReturningToPrimaryIsStored()
+    {
+        // 074 review: a broker demoted and promoted again without restarting must not suppress a re-send on the
+        // strength of an id remembered under the old epoch — that write may not have survived the failover.
+        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        try
+        {
+            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            {
+                StartAsReplica = true,
+                Priority = 100,
+            });
+            var feeder = store.Replication;
+            var options = new HighwayServerOptions();
+            var dispatcher = new CommandDispatcher(
+                store, new StripedLock(), new NullDoorbell(), new FlightRecorder(options.Observability), options, replication: feeder);
+
+            feeder.TryPromote("test", out var error).Should().BeTrue(error);
+            Reply(dispatcher, "HW.CALL", "orders.get", "r1", "body").Should().Be("+OK\r\n");
+            Reply(dispatcher, "HW.CALL", "orders.get", "r1", "body").Should().Be("+OK\r\n");
+            CallDuplicates(dispatcher).Should().Be("1", "within one epoch the re-send is suppressed");
+
+            feeder.ObserveHigherEpoch(feeder.Epoch + 1, "primary promoted elsewhere");
+            feeder.TryPromote("test", out error).Should().BeTrue(error);
+
+            Reply(dispatcher, "HW.CALL", "orders.get", "r1", "body").Should().Be("+OK\r\n");
+            CallDuplicates(dispatcher).Should().Be("1", "the new epoch forgot r1, so its re-send was stored, not suppressed as a second duplicate");
+        }
+        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+    }
+
+    private static string Reply(CommandDispatcher dispatcher, params string[] tokens)
+    {
+        var writer = new RespWriter();
+        dispatcher.Dispatch(Frame(tokens), writer);
+        return Encoding.UTF8.GetString(writer.ToArray());
+    }
+
+    private static string CallDuplicates(CommandDispatcher dispatcher)
+    {
+        var writer = new RespWriter();
+        dispatcher.Dispatch(Frame("HW.STATS"), writer);
+        return DuplicateSafetyTests.StatField(writer.ToArray(), "callDuplicates");
     }
 
     private sealed class NullDoorbell : IDoorbell

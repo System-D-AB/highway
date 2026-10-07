@@ -45,11 +45,13 @@ internal sealed class SubscriptionWorkerLoop : SingleMessageWorkerLoop
         LoopWake wake,
         ILogger logger,
         TimeSpan renewalInterval = default,
-        TimeSpan maxProcessingTime = default)
+        TimeSpan maxProcessingTime = default,
+        TimeSpan abandonGrace = default,
+        int maxAbandonedHandlers = 0)
         // The base's identity is the GROUP, not the physical node (025): every wire call this
         // loop makes — claim, ack, touch, fail — must name the same party, or lease renewal
         // and dead letters would target a processing list that no claim ever wrote to.
-        : base(descriptor.MessageType, connection, executor, group, concurrency, wake, logger, renewalInterval, maxProcessingTime)
+        : base(descriptor.MessageType, connection, executor, group, concurrency, wake, logger, renewalInterval, maxProcessingTime, abandonGrace, maxAbandonedHandlers)
     {
         _descriptor = descriptor;
         _derivedQueueName = $"{descriptor.Name}@{group}";
@@ -138,15 +140,28 @@ internal sealed class SubscriptionWorkerLoop : SingleMessageWorkerLoop
         // the message is redelivered after lease expiry (design Decision 5).
         await Executor.ExecuteSubscribersAsync(_descriptor.Name, message, ct).ConfigureAwait(false);
 
+        // All subscribers succeeded. Settled with CancellationToken.None: the work is done, and a handler that
+        // finished after the cap (its token cancelled) must still be acknowledged rather than redelivered.
         if (IdempotencyWindow is { } completeWindow)
         {
-            // A subscription has no response to cache, so the marker records completion only.
+            // A subscription has no response to cache, so the marker records completion only. Recorded even when the
+            // handler was abandoned (074): it did finish, and its redelivery must find "done" and ack, not wait
+            // out an in-progress marker until it is dead-lettered.
             await Connection
-                .CompleteIdempotencyAsync(_derivedQueueName, messageId, [1], completeWindow, ct)
+                .CompleteIdempotencyAsync(_derivedQueueName, messageId, [1], completeWindow, CancellationToken.None)
                 .ConfigureAwait(false);
         }
 
-        // All subscribers succeeded — acknowledge.
-        await Connection.AckAsync(token, ct).ConfigureAwait(false);
+        // Abandoned (074): the message was given up and will be redelivered — acknowledge nothing.
+        if (IsAbandoned(ct)) return;
+
+        await Connection.AckAsync(token, CancellationToken.None).ConfigureAwait(false);
     }
+
+    protected override Task OnProcessingTimeExceededAsync(ClaimedWork work, CancellationToken workToken)
+        => Reporter.ReportAsync(Target, work,
+            new ProcessingTimeExceededException(
+                $"Processing of message '{work.Id}' on channel '{_descriptor.Name}' (queue '{_derivedQueueName}') " +
+                $"exceeded MaxProcessingTime ({MaxProcessingTime})."),
+            FailureDisposition, CancellationToken.None, "ProcessingTimeExceeded");
 }

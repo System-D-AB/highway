@@ -83,7 +83,8 @@ internal sealed class FailureReporter(IHighwayConnection connection, ILogger log
         ClaimedWork work,
         Exception exception,
         string disposition,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? exceptionType = null)
     {
         var messageId = work.Id;
         logger.LogError(exception,
@@ -94,7 +95,7 @@ internal sealed class FailureReporter(IHighwayConnection connection, ILogger log
         {
             await connection.FailAsync(
                 work.Token,
-                exception.GetType().FullName ?? exception.GetType().Name,
+                exceptionType ?? exception.GetType().FullName ?? exception.GetType().Name,
                 BuildDetail(exception, target.Scope),
                 cancellationToken).ConfigureAwait(false);
         }

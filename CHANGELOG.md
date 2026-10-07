@@ -39,6 +39,20 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
 
 ### Fixed
 
+- **A retried call, send or publish could run twice** (feature 074, carried from 2.5.6 and 2.6.0). A
+  request whose reply was lost was re-sent and stored again. The broker now remembers the ids it has
+  stored — `HW.CALL` by request id, `HW.SEND` by message id, and `HW.PUBLISH` by a new `ID` the client
+  sends once per publish and reuses across its retries — and answers a repeat within a 10-minute window
+  without storing it. Ids are remembered only after their commit, so a refused one is never suppressed;
+  a dead-lettered call's id is forgotten. Windows: `server.rpcDuplicateWindow`,
+  `server.sendDuplicateWindow`, `server.publishDuplicateWindow` (0 disables).
+- **A hung handler was duplicated, and kept its worker slot** (feature 074). At `MaxProcessingTime`
+  renewal stopped while the handler kept running, so another worker started the same message, and a
+  handler that never returned held its slot until the process restarted. The handler is now cancelled
+  at the cap and renewal continues until it stops; a handler that ignores the cancellation is abandoned
+  after `AbandonGrace` (30 s), freeing its slot, and at most `MaxAbandonedHandlers` may be running
+  abandoned before the worker stops claiming. RPC callers get `504 PROCESSING_TIME_EXCEEDED`.
+
 - **A redeploy without a subscriber could block a whole channel** (feature 070). Subscriptions were
   add-only and the client never unsubscribes, so a node that dropped a subscriber but kept running stayed
   a member of that group; the group queue filled to its byte budget and, since a publish refuses when any
@@ -70,6 +84,10 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   added; those writes are now guarded like every other diagnostic (C7.1, 072).
 
 ### Added
+
+- **Duplicate counters** (feature 074): `HW.STATS` reports `callDuplicates`, `sendDuplicates` and
+  `publishDuplicates`; the meter `highway.messages.duplicates{verb}`; client meters for cancelled and
+  abandoned handlers. Options `AbandonGrace` and `MaxAbandonedHandlers`.
 
 - **Dead-letter contracts & declarative retry policies** (feature 073).
   - Strongly-typed `IDeadLetter<T>` contract handlers to consume dead-letter feed notifications (`HW.CLAIM DEAD`) and resolve them atomically with `Keep()`, `Discard()`, or `Requeue(delay)`.

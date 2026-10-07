@@ -62,6 +62,14 @@ internal static class HighwayOptionsValidator
             throw new InvalidOperationException(
                 $"HighwayOptions.HeartbeatInterval must be positive, but was {options.HeartbeatInterval}.");
 
+        if (options.AbandonGrace <= TimeSpan.Zero)
+            throw new InvalidOperationException(
+                $"HighwayOptions.AbandonGrace must be positive, but was {options.AbandonGrace}.");
+
+        if (options.MaxAbandonedHandlers < 0)
+            throw new InvalidOperationException(
+                $"HighwayOptions.MaxAbandonedHandlers cannot be negative, but was {options.MaxAbandonedHandlers}.");
+
         if (options.DiscoveryCacheTtl < TimeSpan.Zero)
             throw new InvalidOperationException(
                 $"HighwayOptions.DiscoveryCacheTtl cannot be negative, but was {options.DiscoveryCacheTtl}.");

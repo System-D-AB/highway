@@ -30,8 +30,10 @@ internal sealed class DeadLetterWorkerLoop : SingleMessageWorkerLoop
         LoopWake wake,
         ILogger logger,
         TimeSpan renewalInterval = default,
-        TimeSpan maxProcessingTime = default)
-        : base(descriptor.MessageType, connection, executor, nodeName, 1, wake, logger, renewalInterval, maxProcessingTime)
+        TimeSpan maxProcessingTime = default,
+        TimeSpan abandonGrace = default,
+        int maxAbandonedHandlers = 0)
+        : base(descriptor.MessageType, connection, executor, nodeName, 1, wake, logger, renewalInterval, maxProcessingTime, abandonGrace, maxAbandonedHandlers)
     {
         _descriptor = descriptor;
         _group = group;
@@ -105,12 +107,27 @@ internal sealed class DeadLetterWorkerLoop : SingleMessageWorkerLoop
             action = DeadLetterAction.Keep;
         }
 
-        var result = await Connection.ResolveDeadLetterAsync(work.Token, action, ct).ConfigureAwait(false);
+        // Abandoned (074 Part B): the notification will be redelivered — resolve nothing.
+        if (IsAbandoned(ct)) return;
+
+        var result = await Connection.ResolveDeadLetterAsync(work.Token, action, CancellationToken.None).ConfigureAwait(false);
         if (result.Status == "refused")
         {
             Logger.LogWarning(
                 "Dead-letter action '{Action}' for '{DeadLetterId}' on {FeedTarget} was refused: {Detail}",
                 action.Type, work.Id, _feedTarget, result.Detail);
         }
+    }
+
+    /// <summary>
+    /// The dead-letter handler stopped at MaxProcessingTime: treated like a handler that threw — the dead
+    /// letter is KEPT for an operator (073 R1 AC5), never discarded or looped.
+    /// </summary>
+    protected override async Task OnProcessingTimeExceededAsync(ClaimedWork work, CancellationToken workToken)
+    {
+        Logger.LogError(
+            "Dead-letter handler for '{MessageType}' exceeded MaxProcessingTime ({Cap}) on dead letter '{DeadLetterId}'; resolving as KEEP",
+            _descriptor.MessageType.FullName, MaxProcessingTime, work.Id);
+        await Connection.ResolveDeadLetterAsync(work.Token, DeadLetterAction.Keep, CancellationToken.None).ConfigureAwait(false);
     }
 }

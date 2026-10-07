@@ -13,9 +13,16 @@ This document is about the case renewal is *not* the right answer for.
 
 ## Why renewal is not the answer for hours
 
-Renewal is bounded on purpose. `MaxProcessingTime` stops it at 15 minutes by default, because
-unbounded renewal would delete lease recovery: a handler stuck in a deadlock would hold its
-message forever — never redelivered, never dead-lettered, never visible as a problem.
+Renewal is bounded on purpose. At `MaxProcessingTime` (15 minutes by default) the handler's
+`CancellationToken` is cancelled, because unbounded renewal would delete lease recovery: a handler
+stuck in a deadlock would hold its message forever — never redelivered, never dead-lettered, never
+visible as a problem.
+
+A handler that honours the token stops, and the message counts as a failed attempt
+(`ProcessingTimeExceeded`; a `504` for RPC). One that ignores it — or is blocked synchronously — is
+**abandoned** `AbandonGrace` (30 s) later: its worker slot is freed, the lease is no longer renewed
+and the message is redelivered while the abandoned code may still be running. **Pass the token to
+everything your handler awaits**, so the cap stops your work rather than duplicating it.
 
 You *can* raise the cap. But a two-hour handler has problems renewal does not solve:
 
@@ -98,8 +105,8 @@ public sealed class ReindexProcessor(AppDb db, IHighwayClient highway) : IProces
    the second arrival free.
 2. **Out-of-order tolerance.** Slices may be processed out of order after a redelivery. The
    guard means it does not matter.
-3. **Stale-work safety.** If a handler ever *does* outlive its cap and gets duplicated, the
-   second run stops at the guard rather than doing the work twice.
+3. **Stale-work safety.** If a handler ever *does* outlive its cap and is abandoned, its
+   redelivery stops at the guard rather than doing the work twice.
 
 **Every handler should open with its guard**, not just chunked ones. It is the cheapest
 correctness you will ever buy.
@@ -134,7 +141,9 @@ public sealed record ProcessUpload : ISend
 
 | Setting | Default | Note |
 |---|---|---|
-| `MaxProcessingTime` | 15 min | The renewal cap. `TimeSpan.Zero` disables renewal entirely |
+| `MaxProcessingTime` | 15 min | The handler's cap: cancelled here. `TimeSpan.Zero` disables renewal entirely |
+| `AbandonGrace` | 30 s | How long a cancelled handler may keep running before it is abandoned and its message redelivered |
+| `MaxAbandonedHandlers` | concurrency | Abandoned handlers still running before the worker stops claiming (0 = the loop's concurrency) |
 | `LeaseRenewalInterval` | 1 min | Keep the server's `Lease` at ≥ 3× this, or renewal is unreliable |
 | `DrainTimeout` | 10 s | If `MaxProcessingTime` exceeds it, the engine warns at startup: a long handler **will** be cancelled mid-flight on shutdown and redelivered |
 

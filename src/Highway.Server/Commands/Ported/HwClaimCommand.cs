@@ -211,6 +211,12 @@ internal sealed class HwClaimCommand : HighwayCommand
         wb.Commit();
         wbFeed?.AfterCommit();
 
+        // 074: a request no longer held here must stop suppressing its re-send — a caller still waiting is owed a
+        // fresh attempt. Forgotten only once the dead-lettering is committed (a failed commit leaves it queued and
+        // still suppressing), and still under the box lock, so no re-send can slip between the two.
+        if (_kind == BoxKeys.Kind.Service && ctx.Calls is { } calls)
+            foreach (var d in _deadLettered) calls.Forget(_name, d.Id);
+
         if (claimed.Count == 0)
         {
             writer.EmptyArray();

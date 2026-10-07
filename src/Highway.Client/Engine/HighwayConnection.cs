@@ -258,6 +258,19 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// TEST SEAM ONLY (074): a connection over a bare <see cref="IDatabase"/>, so a unit test can observe the
+    /// exact arguments and retries of a command. No multiplexer, no subscriber, no source — only the
+    /// request/response commands work through it.
+    /// </summary>
+    internal HighwayConnection(IDatabase db)
+    {
+        _redis = null!;
+        _db = db;
+        _subscriber = null!;
+        _lastSuccessTicks = DateTime.UtcNow.Ticks;
+    }
+
     private HighwayConnection(ConnectionMultiplexer redis, HighwayConnectionSource? source = null)
     {
         _redis = redis;
@@ -623,22 +636,29 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; [AT &lt;ticks&gt;] → group count.
+    /// HW.PUBLISH &lt;channel&gt; &lt;payload&gt; ID &lt;publishId&gt; [AT &lt;ticks&gt;] → group count.
     ///
     /// <para>The delivery time is sent as an <b>absolute</b> .NET UTC tick count rather
     /// than a relative delay: the server stores what it is told, so a slow round trip
     /// cannot silently extend the delay and AOF replay cannot re-delay from replay time.</para>
+    ///
+    /// <para><b>One publish id per call</b> (074 Part B): created here, outside the retry loop, so every
+    /// retry of this call carries the same id and the broker delivers a publish whose reply was lost
+    /// only once.</para>
     /// </summary>
     public Task<long> PublishCommandAsync(
         string channel, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default)
-        => SendAsync(async () =>
+    {
+        var publishId = Guid.NewGuid().ToString("N");
+        return SendAsync(async () =>
         {
             var result = deliverAt is { } at
-                ? await _db.ExecuteAsync("HW.PUBLISH", channel, envelope, "AT",
+                ? await _db.ExecuteAsync("HW.PUBLISH", channel, envelope, "ID", publishId, "AT",
                         at.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false)
-                : await _db.ExecuteAsync("HW.PUBLISH", channel, envelope).ConfigureAwait(false);
+                : await _db.ExecuteAsync("HW.PUBLISH", channel, envelope, "ID", publishId).ConfigureAwait(false);
             return (long)result!;
         }, ct);
+    }
 
     // -------------------------------------------------------------------------
     // Queue (feature 014)

@@ -26,8 +26,10 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
         LoopWake wake,
         ILogger logger,
         TimeSpan renewalInterval = default,
-        TimeSpan maxProcessingTime = default)
-        : base(descriptor.RequestType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime)
+        TimeSpan maxProcessingTime = default,
+        TimeSpan abandonGrace = default,
+        int maxAbandonedHandlers = 0)
+        : base(descriptor.RequestType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime, abandonGrace, maxAbandonedHandlers)
     {
         _descriptor = descriptor;
     }
@@ -114,6 +116,13 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
 
         var raw = await Executor.ExecuteServiceAsync(_descriptor.Name, request, ct).ConfigureAwait(false);
 
+        // The executor turns a handler that stopped on its cancellation token into a 408 CANCELLED result.
+        // When that token was the MaxProcessingTime cap (not shutdown), the handler ended BECAUSE of the cap:
+        // route it to the 504 path. Any other result the handler returned is answered as-is, even if the cap
+        // passed while it finished.
+        if (ct.IsCancellationRequested && raw is Output { StatusCode: StatusCodes.Status408RequestTimeout, Error.Code: "CANCELLED" })
+            throw new OperationCanceledException(ct);
+
         result = raw as Output ?? new GenericOutput
         {
             StatusCode = StatusCodes.Status500InternalServerError,
@@ -155,14 +164,27 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
         {
             // Replace the in-progress marker with the response before replying, so a
             // redelivery that arrives during the reply finds an answer rather than a
-            // marker it must wait out.
+            // marker it must wait out. Recorded even when the handler was abandoned (074): the
+            // redelivery then replies with this answer instead of waiting until it is dead-lettered.
             await Connection
-                .CompleteIdempotencyAsync(_descriptor.Name, requestId, envelopeBytes, completeWindow, ct)
+                .CompleteIdempotencyAsync(_descriptor.Name, requestId, envelopeBytes, completeWindow, CancellationToken.None)
                 .ConfigureAwait(false);
         }
 
-        await ReplyRawThenAckAsync(requestId, token, envelopeBytes, ct).ConfigureAwait(false);
+        // Abandoned (074): the request was given up and will be redelivered — answer nothing here.
+        if (IsAbandoned(ct)) return;
+
+        // Answered with CancellationToken.None: the handler has run; its token may be the expired cap.
+        await ReplyRawThenAckAsync(requestId, token, envelopeBytes, CancellationToken.None).ConfigureAwait(false);
     }
+
+    /// <summary>The handler stopped at MaxProcessingTime: the caller gets a 504, and the request is settled.</summary>
+    protected override Task OnProcessingTimeExceededAsync(ClaimedWork work, CancellationToken workToken)
+        => ReplyThenAckAsync(work.Id, work.Token, new GenericOutput
+        {
+            StatusCode = StatusCodes.Status504GatewayTimeout,
+            Error = new ErrorDetail { Code = "PROCESSING_TIME_EXCEEDED", Message = "processing exceeded MaxProcessingTime" },
+        }, CancellationToken.None);
 
     /// <summary>Sends the reply envelope, THEN acks — a crash between the two still delivers the response.</summary>
     private Task ReplyThenAckAsync(string requestId, string token, Output result, CancellationToken ct)

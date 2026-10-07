@@ -115,7 +115,9 @@ public class LongRunningTaskTests : IDisposable
         {
             db.Send("lr.slow", "msg-hung", Envelope());
 
-            // Past the cap, renewal stops and the ordinary sweep takes over: requeue,
+            // At the cap the handler is cancelled (074): if it stops it is reported failed
+            // (ProcessingTimeExceeded); if it ignores that it is abandoned after AbandonGrace and its
+            // lease lapses. Either way the ordinary attempt counting takes over: requeue,
             // attempts++, and eventually the dead letter.
             var deadline = DateTime.UtcNow.AddSeconds(20);
             while (DateTime.UtcNow < deadline)
@@ -127,8 +129,8 @@ public class LongRunningTaskTests : IDisposable
         }
 
         (_server.Inspect.ListLength("hw:q:lr.slow:dlq")).Should().BeGreaterThan(0,
-            "past MaxProcessingTime the message returns to exactly the behaviour it had before " +
-            "this feature - the cap does not invent a new outcome, it restores the old one");
+            "a handler past MaxProcessingTime is still recovered by the ordinary attempt counting, " +
+            "ending in the dead letter, never held forever");
     }
 
     [Fact]

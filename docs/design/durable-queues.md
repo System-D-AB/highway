@@ -57,9 +57,20 @@ does not grow with how long the broker has been running, nor with how much is in
 
 **Slow work vs. dead work.** A handler that outlives its lease would be redelivered while still
 running — a duplicate caused by nothing but slowness. A worker renews its lease ("still working")
-to hold the message; Highway's client renews automatically. The renewal is **bounded by the
-client**, not the server: it stops after a max processing time, so a genuinely hung handler is
-still recovered rather than holding its message forever.
+to hold the message; Highway's client renews automatically. The bound is enforced by the
+**client, on the handler**: at the max processing time the handler is cancelled, and renewal
+continues only until it has stopped — so no second worker starts the message under a running first
+copy. A handler that ignores the cancellation is *abandoned* a grace period later: its worker slot is
+freed, renewal stops and lease recovery redelivers the message. The number of abandoned handlers
+still running is bounded, after which the worker stops claiming and says so — a hung handler
+degrades a worker visibly, never silently freezes it (C1.6, C1.8).
+
+**A retried send is stored once.** A send whose reply was lost is retried with the same message id;
+the broker remembers ids it has stored on a queue for a duplicate window (10 min) and answers a
+repeat `+OK` without storing it again. An id is remembered only after its message commits, so a
+refused send is never suppressed on retry. The memory is per broker process and is cleared when the
+epoch changes — after a failover a re-send may be stored again, which at-least-once delivery
+already allows (C1.7).
 
 **Failure is explained, then recovered.** A worker can report *why* a delivery failed (the
 exception type plus an opaque detail blob) without acknowledging it — reporting is orthogonal to
@@ -102,7 +113,9 @@ the box layout is described in [storage-engine.md](storage-engine.md).
 - **Durability:** on by default (persisted, survives restart); ephemeral is explicit opt-out and is
   surfaced, not silent.
 - **Bounded costs:** a byte cap that refuses rather than drops; a delivery-attempt cap that
-  dead-letters rather than loops; a client-bounded processing window that recovers hung handlers.
+  dead-letters rather than loops; a client-bounded processing window that cancels hung handlers
+  and a bounded number of abandoned ones (C1.8).
+- **Retried sends are not stored twice** within the duplicate window, per broker process (C1.7).
   These bounds are tracked line by line in [`constraints.md`](../product/constraints.md).
 - **Cost independent of history and of in-flight size:** a poll, claim or ack costs the same after a
   million messages as after the first, and with ten thousand claims in flight as with one

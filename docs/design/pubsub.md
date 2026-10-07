@@ -81,3 +81,7 @@ Subscribers *consume* through the work commands (`HW.CLAIM Q`, `HW.ACK <token>`)
   and a group registering later starts empty. "Hold until someone can handle it" is a queue.
 - **Not a replayable log** (C2.5): joining an active channel does not replay prior traffic; Highway
   keeps no consumer offsets.
+- **A retried publish is delivered once** (C2.7): the client sends a publish id, one per
+  `PublishAsync` call and reused by its retries; a repeat the broker accepted within the duplicate
+  window (10 min) answers the original group count and writes nothing. Per broker process; a publish
+  without an id is never suppressed.

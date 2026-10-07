@@ -71,5 +71,12 @@ and group queues since protocol 5.0.
 - **In-flight requests survive a node leaving:** they requeue rather than vanish (C3.1).
 - **Retry budget may outlive the caller:** a stuck request exhausts attempts after the caller has
   timed out; the dead letter is the record (C3.3).
+- **A re-sent call is queued once:** a repeat of a `requestId` the broker accepted within the
+  duplicate window (10 min) answers `+OK` and is not queued again; the id is forgotten when its
+  request is dead-lettered, so a caller still waiting can re-send. Per broker process (C1.7).
+- **A hung handler is answered, not waited on:** it is cancelled at `MaxProcessingTime` and the
+  caller gets `504 PROCESSING_TIME_EXCEEDED`; one that ignores the cancellation is abandoned (C1.8).
+  A handler stopped by the worker *shutting down* is not answered: its request is left to lease
+  recovery, so another worker can still answer a caller that is waiting.
 - **Not exactly-once:** `[Idempotent]` suppresses a redelivery running twice; it cannot relate two
   independent calls.

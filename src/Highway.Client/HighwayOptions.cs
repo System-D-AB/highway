@@ -144,13 +144,23 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     public TimeSpan LeaseRenewalInterval { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
-    /// How long a single message may have its lease renewed for. Default: 15 minutes.
-    /// <see cref="TimeSpan.Zero"/> disables renewal entirely, restoring pre-019 behaviour.
+    /// How long a single handler may run. Default: 15 minutes. <see cref="TimeSpan.Zero"/>
+    /// disables the cap and lease renewal entirely, restoring pre-019 behaviour. Values above
+    /// about 24 days are treated as 24 days.
     ///
-    /// <para><b>The cap is the feature, not a limitation of it.</b> Unbounded renewal would
+    /// <para><b>At the cap the handler's <see cref="CancellationToken"/> is cancelled</b>
+    /// (074, 3.0). A queue or subscriber handler that stops with that cancellation is reported as
+    /// failed (<c>ProcessingTimeExceeded</c>) and redelivered or dead-lettered by the normal
+    /// attempt counting; an RPC handler's caller gets a 504. The lease keeps being renewed until
+    /// the handler has actually stopped, so no other worker starts the same message meanwhile.
+    /// A handler that ignores the cancellation is abandoned <see cref="AbandonGrace"/> later:
+    /// its slot is freed, its lease is no longer renewed, and the message is redelivered when the
+    /// lease expires.</para>
+    ///
+    /// <para><b>The cap is the feature, not a limitation of it.</b> Unbounded running would
     /// delete lease recovery: a handler stuck in a deadlock or an infinite loop would hold its
-    /// message forever — never redelivered, never dead-lettered, never visible as a problem.
-    /// Past the cap the message returns to exactly the behaviour it has today.</para>
+    /// message and its worker slot forever — never redelivered, never dead-lettered, never
+    /// visible as a problem.</para>
     ///
     /// <para><b>For work measured in hours, chunk instead.</b> Claim, process one slice,
     /// checkpoint to your own database, enqueue the next slice, acknowledge. Each message lives
@@ -158,6 +168,19 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     /// dead-letters one bad slice without killing the job.</para>
     /// </summary>
     public TimeSpan MaxProcessingTime { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// How long a handler that ignores its cancellation at <see cref="MaxProcessingTime"/> is waited for
+    /// before it is abandoned: its worker slot is freed and its lease no longer renewed, so the message is
+    /// redelivered when the lease expires. Default: 30 seconds. Must be positive.
+    /// </summary>
+    public TimeSpan AbandonGrace { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Abandoned handlers that may still be running before a worker loop stops claiming new work (it resumes
+    /// as soon as one ends). 0 (default) means the loop's concurrency.
+    /// </summary>
+    public int MaxAbandonedHandlers { get; set; } = 0;
 
     /// <summary>
     /// Number of messages requested per <c>HW.RECEIVE</c> batch in consumer loops.

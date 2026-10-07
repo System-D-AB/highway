@@ -32,8 +32,10 @@ internal sealed class QueueWorkerLoop : SingleMessageWorkerLoop
         LoopWake wake,
         ILogger logger,
         TimeSpan renewalInterval = default,
-        TimeSpan maxProcessingTime = default)
-        : base(descriptor.MessageType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime)
+        TimeSpan maxProcessingTime = default,
+        TimeSpan abandonGrace = default,
+        int maxAbandonedHandlers = 0)
+        : base(descriptor.MessageType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime, abandonGrace, maxAbandonedHandlers)
     {
         _descriptor = descriptor;
     }
@@ -101,14 +103,27 @@ internal sealed class QueueWorkerLoop : SingleMessageWorkerLoop
 
         await Executor.ExecuteProcessorAsync(_descriptor.Name, message, ct).ConfigureAwait(false);
 
+        // Settled with CancellationToken.None: the work is done, and a handler that finished after the cap
+        // (its token cancelled) must still be acknowledged rather than redelivered.
         if (IdempotencyWindow is { } completeWindow)
         {
-            // A queue has no response to cache, so the marker simply records completion.
+            // A queue has no response to cache, so the marker simply records completion. Recorded even when the
+            // handler was abandoned (074): it did finish, and its redelivery must find "done" and ack, not wait
+            // out an in-progress marker until it is dead-lettered.
             await Connection
-                .CompleteIdempotencyAsync(_descriptor.Name, messageId, [1], completeWindow, ct)
+                .CompleteIdempotencyAsync(_descriptor.Name, messageId, [1], completeWindow, CancellationToken.None)
                 .ConfigureAwait(false);
         }
 
-        await Connection.AckAsync(token, ct).ConfigureAwait(false);
+        // Abandoned (074): the message was given up and will be redelivered — acknowledge nothing.
+        if (IsAbandoned(ct)) return;
+
+        await Connection.AckAsync(token, CancellationToken.None).ConfigureAwait(false);
     }
+
+    protected override Task OnProcessingTimeExceededAsync(ClaimedWork work, CancellationToken workToken)
+        => Reporter.ReportAsync(Target, work,
+            new ProcessingTimeExceededException(
+                $"Processing of message '{work.Id}' on queue '{_descriptor.Name}' exceeded MaxProcessingTime ({MaxProcessingTime})."),
+            FailureDisposition, CancellationToken.None, "ProcessingTimeExceeded");
 }

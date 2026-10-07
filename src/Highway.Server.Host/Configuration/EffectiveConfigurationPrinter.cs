@@ -31,6 +31,9 @@ internal static class EffectiveConfigurationPrinter
         writer.WriteLine($"    subscriberRetirementThreshold    : {c.Server.SubscriberRetirementThreshold}");
         writer.WriteLine($"    maxDeliveryAttempts              : {c.Server.MaxDeliveryAttempts}");
         writer.WriteLine($"    maxDeadLetterEntries             : {c.Server.MaxDeadLetterEntries}");
+        writer.WriteLine($"    rpcDuplicateWindow               : {c.Server.RpcDuplicateWindow}");
+        writer.WriteLine($"    sendDuplicateWindow              : {c.Server.SendDuplicateWindow}");
+        writer.WriteLine($"    publishDuplicateWindow           : {c.Server.PublishDuplicateWindow}");
         writer.WriteLine($"    pubSubBackoffEnabled             : {c.Server.PubSubBackoffEnabled}");
         writer.WriteLine($"    rpcBackoffEnabled                : {c.Server.RpcBackoffEnabled}");
         writer.WriteLine($"    maxBackoff                       : {c.Server.MaxBackoff}");

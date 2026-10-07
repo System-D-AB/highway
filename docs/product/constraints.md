@@ -125,10 +125,53 @@ to exactly the behaviour it had before this feature.
 > minutes longer to recover is a delay. `MaxProcessingTime = TimeSpan.Zero` restores the old
 > behaviour exactly.
 
+> **3.0 addendum (feature 074).** The 019 bound left one duplicate: at the cap renewal stopped
+> while the handler kept running, so the lease lapsed and **another worker started the same message
+> under a still-running first copy**, and the hung handler kept its worker slot until the process
+> restarted. Since 3.0 the bound is enforced on the handler, not on the lease: at `MaxProcessingTime`
+> the handler's `CancellationToken` is cancelled, and renewal continues until the handler has actually
+> stopped — or until it is **abandoned** `AbandonGrace` (30 s) later because it ignored the cancellation
+> (C1.8). Until then no other worker can start the same message. Once a handler is abandoned it may still
+> be running, and lease recovery redelivers its message — so a handler that ignores cancellation can
+> still overlap with its redelivery; one that honours it never does. Lease recovery still bounds a hung
+> message (cap + grace + lease).
+
 **For work measured in hours, renewal is the wrong tool** — see
 [`docs/cookbook/long-running-work.md`](../cookbook/long-running-work.md). Chunk and checkpoint:
 each message lives seconds while the job lives hours, and it survives deploys, parallelises for
 free, and dead-letters one bad slice without killing the job.
+
+
+### C1.7 — A retried send is stored once within the duplicate window
+
+**Status: Met** — feature 074 (3.0).
+
+A send whose reply was lost is retried by the client with the same message id. `HW.SEND` looks the id up
+under the queue's lock: one this broker stored on that queue within `server.sendDuplicateWindow` (default
+10 min) is answered `+OK` and stored nothing — no doorbell, no recorder event. An id is remembered only
+**after** its message is committed, so a send refused with `HW_QUEUE_FULL` or a failed commit is never
+remembered and its retry is stored. The memory is per broker process and is cleared on every epoch change
+(an id remembered under the old epoch may name a write the failover lost): after a failover a re-sent message
+may be stored again (at-least-once, as before; `[Idempotent]` suppresses the second run). The same rule
+protects `HW.CALL` by request id (`server.rpcDuplicateWindow`); a call's id is forgotten when it is
+dead-lettered, so a caller still waiting can re-send.
+
+### C1.8 — A hung handler degrades one message, not its worker
+
+**Status: Met** — feature 074 (3.0).
+
+A handler is cancelled at `MaxProcessingTime`. One that stops is a failure for queues and subscribers
+(`HW.FAIL ProcessingTimeExceeded`, redelivered or dead-lettered by normal attempt counting), a `504` for
+RPC, and a `KEEP` for a dead-letter handler. One that ignores the cancellation — including one blocked
+synchronously — is **abandoned** `AbandonGrace` later: its worker slot is freed, its lease is no longer
+renewed (lease recovery redelivers the message), and an Error is logged. When `MaxAbandonedHandlers`
+(default: the loop's concurrency) abandoned handlers are still running, the loop stops claiming and says
+so once a minute, and resumes as soon as one ends; handlers already running when the bound is reached
+can still be abandoned, so the most that can ever be running abandoned is
+`MaxAbandonedHandlers + concurrency − 1`. A worker can be degraded, never silently frozen, and never
+spawns unbounded threads. Stopping the engine cancels handlers and never abandons them by itself; a
+handler that ignores the shutdown cancellation is abandoned at cap + grace like any other, if the
+process is still running then.
 
 ---
 
@@ -236,6 +279,17 @@ nobody until the client restarted. **Now:** a node declares its whole session �
 jobs — in one `HW.SESSION`. A heartbeat to a broker that does not know the node answers `+SESSION`,
 and the client re-declares, single-flight, both then and after every failover it follows. Queue
 doorbells are tracked and re-subscribed after a failover as well, so idle workers keep waking.
+
+
+### C2.7 — A retried publish is delivered once within the duplicate window
+
+**Status: Met** — feature 074 (3.0).
+
+The client sends `HW.PUBLISH … ID <publishId>`, one id per `PublishAsync` call, reused by every retry of
+that call. A publish whose id this broker accepted on that channel within `server.publishDuplicateWindow`
+(default 10 min) is answered with the original group count and writes nothing. The id is remembered only
+after the publish commits, so a refused publish is never remembered. A publish without an id behaves as
+before. The memory is per broker process and is cleared on every epoch change.
 
 ---
 
@@ -855,13 +909,16 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C1.3 | Sending needs no running consumer | ✅ Met |
 | C1.4 | Unprocessable messages stop being retried, and say why | ✅ Met (013 + 015 + 073) |
 | C1.5 | Sends can be deferred | ✅ Machinery met (013) |
-| C1.6 | A handler may outlive the lease without duplication | ✅ Met (019) |
+| C1.6 | A handler may outlive the lease without duplication | ✅ Met (019, extended 074) |
+| C1.7 | Retried send (and call) stored once within the duplicate window | ✅ Met (074) |
+| C1.8 | A hung handler degrades one message, not its worker | ✅ Met (074) |
 | C2.1 | At-least-once per registered group | ✅ Met |
 | C2.2 | Acknowledged means gone | ✅ Met |
 | C2.3 | A down subscriber receives what it missed, until its group's last member is declared gone | ✅ Met, bounded (017, group-aware since 025) |
 | C2.4 | Not a store for absent subscribers | ✅ Met |
 | C2.5 | Not a replayable log | ✅ Met |
 | C2.6 | Subscriptions and jobs follow the node across failovers | ✅ Met (067/068, 3.0) |
+| C2.7 | Retried publish delivered once within the duplicate window | ✅ Met (074) |
 | C3.1 | In-flight requests survive departure | ✅ Met |
 | C3.2 | An answer or a timeout, never silence | ✅ Met |
 | C3.3 | Retry budget may outlive the caller | ✅ Met |

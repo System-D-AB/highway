@@ -61,7 +61,15 @@ public sealed class PlainService : AsyncService<PlainRequest, CountedResponse>
 [Collection(SubscriberRecorderCollection.Name)]
 public class IdempotencyTests : IDisposable
 {
-    private readonly HighwayTestServer _server = new(o => o.Lease = TimeSpan.FromMilliseconds(50));
+    // These tests drive a "redelivery" by repeating HW.CALL with the same request id — a stand-in for lease
+    // recovery, which re-enters the request without HW.CALL. The broker itself suppresses a repeated HW.CALL
+    // within RpcDuplicateWindow (074), which would hide the WORKER behaviour these tests are about
+    // ([Idempotent] dedupes; a plain contract runs again), so the broker filter is off for this server.
+    private readonly HighwayTestServer _server = new(o =>
+    {
+        o.Lease = TimeSpan.FromMilliseconds(50);
+        o.RpcDuplicateWindow = TimeSpan.Zero;
+    });
 
     public IdempotencyTests()
     {

@@ -48,6 +48,9 @@ internal sealed class CommandDispatcher
     internal Storage.Boxes.BoxRuntime Boxes => _boxes;
 
     private readonly InstanceRegistry? _instances;   // 072: HW.SESSION's instance descriptions
+    private readonly RecentIds<byte> _calls;          // 074: repeated HW.CALL request ids, one per server
+    private readonly RecentIds<byte> _sends;          // 074: repeated HW.SEND message ids
+    private readonly RecentIds<long> _publishes;      // 074: repeated HW.PUBLISH publish ids → group count
 
     public CommandDispatcher(
         IHighwayStore store,
@@ -61,6 +64,9 @@ internal sealed class CommandDispatcher
         InstanceRegistry? instances = null)
     {
         _instances = instances;
+        _calls = new RecentIds<byte>(options.RpcDuplicateWindow);
+        _sends = new RecentIds<byte>(options.SendDuplicateWindow);
+        _publishes = new RecentIds<long>(options.PublishDuplicateWindow);
         _store = store;
         _locks = locks;
         _doorbell = doorbell;
@@ -72,6 +78,9 @@ internal sealed class CommandDispatcher
         _commands = BuildRegistry();
         // A new epoch is a new history: cached box ids and floors may describe the old one.
         if (replication is not null) replication.OnEpochChanged += _boxes.Reset;
+        // 074: likewise the duplicate memory — an id remembered under the old epoch may name a write the failover
+        // lost, or a call the other primary dead-lettered; suppressing its re-send would lose it.
+        if (replication is not null) replication.OnEpochChanged += ForgetRecentIds;
     }
 
     /// <summary>
@@ -206,7 +215,7 @@ internal sealed class CommandDispatcher
         var args = new byte[frame.Count - 1][];
         for (var i = 1; i < frame.Count; i++) args[i - 1] = frame[i];
 
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps, _boxes, _instances);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps, _boxes, _instances, _calls, _sends, _publishes);
         var command = entry.Factory();
 
         // HW.CALL carries the RPC request/latency instruments (051 R1): time the server-side
@@ -216,11 +225,20 @@ internal sealed class CommandDispatcher
         {
             var start = System.Diagnostics.Stopwatch.GetTimestamp();
             var enqueued = command.Execute(ctx, new CommandInput(args), writer);
-            metrics.RecordRpcRequest(enqueued, System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalSeconds);
+            // A suppressed re-send (074) is counted as a duplicate, not as a second request.
+            if (command is not HwCallCommand { IsDuplicate: true })
+                metrics.RecordRpcRequest(enqueued, System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalSeconds);
             return;
         }
 
         command.Execute(ctx, new CommandInput(args), writer);
+    }
+
+    private void ForgetRecentIds()
+    {
+        _calls.Clear();
+        _sends.Clear();
+        _publishes.Clear();
     }
 
     /// <summary>RESP arity: positive = exact token count; negative -N = at least N tokens.</summary>

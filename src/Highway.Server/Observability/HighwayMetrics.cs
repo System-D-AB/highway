@@ -38,6 +38,7 @@ internal sealed class HighwayMetrics : IDisposable
     private readonly Counter<long> _failed;
     private readonly Counter<long> _refused;
     private readonly Counter<long> _deadLettered;
+    private readonly Counter<long> _messageDuplicates;   // 074
     private readonly Counter<long> _deadLettersResolved;
     private readonly Counter<long> _deadLettersRequeued;
     private readonly Counter<long> _promotions;
@@ -71,6 +72,7 @@ internal sealed class HighwayMetrics : IDisposable
         _acknowledged = _meter.CreateCounter<long>("highway.messages.acknowledged", "{message}", "Messages acknowledged (HW.QACK).");
         _failed = _meter.CreateCounter<long>("highway.messages.failed", "{message}", "Deliveries reported failed (HW.FAIL).");
         _refused = _meter.CreateCounter<long>("highway.messages.refused", "{message}", "Sends refused for a full queue (HW.QSEND, QUEUE_FULL).");
+        _messageDuplicates = _meter.CreateCounter<long>("highway.messages.duplicates", "{message}", "Repeated HW.CALL, HW.SEND or HW.PUBLISH acknowledged without storing again (074), tagged by verb.");
         _deadLettered = _meter.CreateCounter<long>("highway.messages.deadlettered", "{message}", "Messages moved to the dead-letter list on exhausting their attempts.");
         _deadLettersResolved = _meter.CreateCounter<long>("highway.deadletters.resolved", "{letter}", "Dead letters resolved, tagged by action (ack, requeue, purge) and by (handler, operator).");
         _deadLettersRequeued = _meter.CreateCounter<long>("highway.deadletters.requeued", "{letter}", "Dead letters requeued back into their target.");
@@ -137,6 +139,7 @@ internal sealed class HighwayMetrics : IDisposable
     public void RecordFailed() => _failed.Add(1);
     public void RecordRefused() => _refused.Add(1);
     public void RecordDeadLettered(long count) { if (count > 0) _deadLettered.Add(count); }
+    public void RecordMessageDuplicate(string verb) => _messageDuplicates.Add(1, new KeyValuePair<string, object?>("verb", verb));
     public void RecordDeadLetterResolved(string action, string by, long count = 1)
     {
         if (count > 0)
