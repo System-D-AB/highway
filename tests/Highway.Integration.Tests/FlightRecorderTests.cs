@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Abstractions.Observability;
 using Highway.Server;
@@ -33,7 +34,7 @@ public class FlightRecorderTests
     [Fact]
     public void RpcRoundTrip_IsRecordedInOrder_WithCorrectIdentifiers()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -62,7 +63,7 @@ public class FlightRecorderTests
     [Fact]
     public void RejectedCommand_IsRecorded_WithItsErrorCode()
     {
-        using var server = new HighwayTestServer(o => o.MaxPayloadBytes = 8);
+        using var server = new HighwayTestServer(o => { o.MaxPayloadBytes = 8; o.RpcFailFast = false; });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -78,7 +79,7 @@ public class FlightRecorderTests
     [Fact]
     public void PublishAndClaim_AreRecorded_WithCounts()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -98,7 +99,7 @@ public class FlightRecorderTests
     [Fact]
     public void LivenessHeartbeats_AreNotRecorded()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -116,7 +117,7 @@ public class FlightRecorderTests
     [Fact]
     public void ReadOnlyCommands_AreNotRecorded()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -132,8 +133,10 @@ public class FlightRecorderTests
     public void CaptureHeadersOnly_KeepsSizeButNotContent()
     {
         using var server = new HighwayTestServer(o =>
-            o.Observability.Overrides["orders.create"] =
-                new NameRecorderOptions { Capture = PayloadCapture.HeadersOnly });
+        {
+            o.Observability.Overrides["orders.create"] = new NameRecorderOptions { Capture = PayloadCapture.HeadersOnly };
+            o.RpcFailFast = false;
+        });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -148,7 +151,10 @@ public class FlightRecorderTests
     public void CaptureOff_RecordsNothing_AndLeavesNeighboursAlone()
     {
         using var server = new HighwayTestServer(o =>
-            o.Observability.Overrides["noisy.svc"] = new NameRecorderOptions { Capture = PayloadCapture.Off });
+        {
+            o.Observability.Overrides["noisy.svc"] = new NameRecorderOptions { Capture = PayloadCapture.Off };
+            o.RpcFailFast = false;
+        });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -162,7 +168,7 @@ public class FlightRecorderTests
     [Fact]
     public void UnknownName_ReturnsEmptyArray_NotAnError()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
 
         Replay(redis.GetDatabase(), "never.seen").Should().BeEmpty();
@@ -171,7 +177,7 @@ public class FlightRecorderTests
     [Fact]
     public void Replay_HonoursLimitAndWindowAndNode()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -195,7 +201,7 @@ public class FlightRecorderTests
     public void Replay_InvalidArguments_UseTheEstablishedErrorContract(
         string keyword, string value, string expectedPrefix)
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
 
         var act = () => redis.GetDatabase().Execute("HW.REPLAY", "orders.create", keyword, value);
@@ -206,7 +212,7 @@ public class FlightRecorderTests
     [Fact]
     public void ReplayDisabled_RefusesQueriesButKeepsRecording()
     {
-        using var server = new HighwayTestServer(o => o.Observability.ReplayEnabled = false);
+        using var server = new HighwayTestServer(o => { o.Observability.ReplayEnabled = false; o.RpcFailFast = false; });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -222,7 +228,7 @@ public class FlightRecorderTests
     [Fact]
     public void StatsRecorder_ReportsHealth()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -240,7 +246,7 @@ public class FlightRecorderTests
     [Fact]
     public void StatsRecorder_AnswersWhenDisabled()
     {
-        using var server = new HighwayTestServer(o => o.Observability.RecorderEnabled = false);
+        using var server = new HighwayTestServer(o => { o.Observability.RecorderEnabled = false; o.RpcFailFast = false; });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -254,7 +260,7 @@ public class FlightRecorderTests
     [Fact]
     public void StatsRecorder_IsReservedAndBeatsAServiceOfThatName()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -271,7 +277,7 @@ public class FlightRecorderTests
     [Fact]
     public void Recording_AddsNoKeysToTheStore()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 

@@ -35,7 +35,6 @@ public sealed record DeadLetterTarget(DeadLetterTargetKind Kind, string Name, st
         => Kind switch
         {
             DeadLetterTargetKind.Queue => $"Q:{Name}",
-            DeadLetterTargetKind.Service => $"SVC:{Name}",
             DeadLetterTargetKind.Group => $"Q:{Name}@{Group}",
             _ => $"{Kind}:{Name}"
         };
@@ -45,7 +44,7 @@ public sealed record DeadLetterTarget(DeadLetterTargetKind Kind, string Name, st
 public enum DeadLetterTargetKind
 {
     Queue = 1,
-    Service = 2,
+    // 2 was Service: RPC has no dead letters (074) — an expired or failed request is removed and recorded.
     Group = 3
 }
 

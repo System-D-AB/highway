@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -20,7 +21,7 @@ public class LeaseRecoveryTests
     private static (HighwayTestServer server, ConnectionMultiplexer redis, IDatabase db) StartServer(
         TimeSpan lease)
     {
-        var server = new HighwayTestServer(o => o.Lease = lease);
+        var server = new HighwayTestServer(o => { o.Lease = lease; o.RpcFailFast = false; });
         var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         return (server, redis, redis.GetDatabase());
     }

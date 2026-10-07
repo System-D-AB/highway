@@ -111,12 +111,17 @@ const bulkPrompt = (verb, count, btn, name) => {
 export async function render(container, options, params) {
     const name = params.get('name') || '';
     const kind = params.get('kind') || 'Unknown';
+    // 074: dead letters exist for queues and subscriber groups only — RPC requests are never dead-lettered.
+    const hasDeadLetters = kind === 'Queue' || kind === 'Group';
 
     const refresh = async () => {
-        const [catalogue, data, deadData] = await Promise.all([
+        const [catalogue, data, deadData, rpc] = await Promise.all([
             getJson('catalogue', 'api/catalogue'),
             getJson('messages', `api/messages/${encodeURIComponent(name)}`),
-            getJson('deadletters', `api/deadletters?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}&count=${DEAD_PAGE}`),
+            hasDeadLetters
+                ? getJson('deadletters', `api/deadletters?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}&count=${DEAD_PAGE}`)
+                : Promise.resolve(null),
+            kind === 'Service' ? getJson('service', `api/service/${encodeURIComponent(name)}/requests`) : Promise.resolve(null),
         ]);
 
         const entries = catalogue?.entries || [];
@@ -137,7 +142,8 @@ export async function render(container, options, params) {
                 </tr>`).join('') + '</tbody></table>';
         }
 
-        // Dead Letters section (feature 073)
+        // Dead Letters section (feature 073) — queues and groups only (074)
+        if (hasDeadLetters) {
         html += '<h3>Dead Letters</h3>';
         if (deadData?.readOnly && deadData.readOnlyReason) {
             html += `<p class="muted" style="margin-bottom: 0.5rem; color: #e6a23c;">${esc(deadData.readOnlyReason)}</p>`;
@@ -208,6 +214,25 @@ export async function render(container, options, params) {
                         ${actions}
                     </tr>`;
                 }).join('') + '</tbody></table>';
+        }
+
+        } else if (kind === 'Service') {
+            // 074: what waits, against its caller's deadline, and how requests ended without an answer.
+            html += '<h3>Requests and deadlines</h3>';
+            if (rpc?.service) {
+                const sec = (msv) => `${(msv / 1000).toFixed(1)} s`;
+                html += `<table class="grid"><tbody>
+                    <tr><td>Queued</td><td>${rpc.queueDepth}</td></tr>
+                    <tr><td>Being handled</td><td>${rpc.inFlight}</td></tr>
+                    <tr><td>Oldest queued</td><td>${rpc.queueDepth > 0 ? `waited ${sec(rpc.oldestAgeMs)}, ${sec(rpc.oldestRemainingMs)} left` : '—'}</td></tr>
+                    <tr><td>Expired unanswered</td><td>${rpc.expired}</td></tr>
+                    <tr><td>Failed after the last attempt</td><td>${rpc.failedFinal}</td></tr>
+                    <tr><td>Withdrawn by the caller</td><td>${rpc.cancelled}</td></tr>
+                </tbody></table>`;
+            }
+            html += '<p class="muted">RPC requests are never dead-lettered: one whose caller stopped waiting is removed ' +
+                'unrun (<code>RpcExpired</code>), and one that failed its last attempt is removed with its failure ' +
+                '(<code>RpcFailedFinal</code>). Counts are since the broker started; each appears in the messages below.</p>';
         }
 
         html += '<h3>Messages</h3>';

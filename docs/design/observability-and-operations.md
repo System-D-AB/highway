@@ -47,7 +47,15 @@ view counts the **processes** behind each node name and flags a name more than o
 uses (feature 072, C7.7); a node's page lists them — instance, seen from, host, pid, hosting name,
 start time and client version.
 
-**Dead-letter management (feature 073).** The Entity details page features a Dead Letters panel displaying unconsumed dead letters with their deadId, attempts, requeue lineage, failure reason, diagnostic stack traces, and decoded/raw payload previews. Operators can inspect entries without side effects, or trigger point/batch Requeue and Purge actions. Mutating actions require the dashboard API key (`X-API-Key` or Bearer token); unauthenticated viewers retain a safe read-only preview.
+**Dead-letter management (feature 073).** The Entity details page features a Dead Letters panel displaying unconsumed dead letters with their deadId, attempts, requeue lineage, failure reason, diagnostic stack traces, and decoded/raw payload previews. Operators can inspect entries without side effects, or trigger point/batch Requeue and Purge actions. Mutating actions require the dashboard API key (`X-API-Key` or Bearer token); unauthenticated viewers retain a safe read-only preview. The panel is shown for queues and subscriber groups only:
+RPC has no dead letters (074).
+
+**Requests and deadlines (feature 074).** A service page shows what its RPC requests are doing against their
+callers' deadlines — queued and in-flight counts, the oldest waiting request's age and time left, and how many
+requests expired unanswered, failed after their last attempt or were withdrawn by their caller since the broker
+started (the service row of `HW.STATS`). The broker log carries one summary line per service per minute when
+requests end unanswered; the events (`RpcExpired`, `RpcFailedFinal`, `RpcReplyLate`, `RpcCancelled`,
+`RpcFailFast`) appear in the message history.
 
 **Logs to disk.** The broker writes rolling daily log files (console + file) so a
 Windows-service or systemd deployment has a durable operational record, not just stdout.

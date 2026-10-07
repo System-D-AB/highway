@@ -1,3 +1,5 @@
+// 074 (D2): RPC has no dead letters — these dead-letter mechanics tests drive a queue (HW.SEND / HW.CLAIM Q),
+// where dead letters exist. They were written against a service before 074.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -19,7 +21,7 @@ namespace Highway.Integration.Tests;
 /// </summary>
 public class DeadLetterTests : IDisposable
 {
-    private const string Service = "dlq.svc";
+    private const string Queue = "dlq.q";
 
     // A lease short enough that the sweep fires between calls, so a test does not
     // have to wait out the 5-minute production default.
@@ -37,7 +39,7 @@ public class DeadLetterTests : IDisposable
     /// <summary>Claims the request and never acknowledges it — a crashed consumer.</summary>
     private static async Task AbandonOnceAsync(IDatabase db, string service, string node)
     {
-        await db.ClaimSvcAsync(service, node);
+        await db.ClaimQAsync(service, node);
         await Task.Delay(70);   // let the lease expire
     }
 
@@ -51,17 +53,17 @@ public class DeadLetterTests : IDisposable
     public async Task PoisonMessage_StopsBeingRedelivered_AndLandsInTheDlq()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.CALL", Service, "poison-1", "payload"u8.ToArray());
+        await db.ExecuteAsync("HW.SEND", Queue, "poison-1", "payload"u8.ToArray());
 
         // MaxDeliveryAttempts = 3, so the fourth requeue attempt dead-letters it.
         for (var i = 0; i < 6; i++)
-            await AbandonOnceAsync(db, Service, "node-a");
+            await AbandonOnceAsync(db, Queue, "node-a");
 
         // One more claim to run the sweep that moves it.
-        await db.ClaimSvcAsync(Service, "node-a");
+        await db.ClaimQAsync(Queue, "node-a");
 
-        var queue = ListLength($"hw:svc:{Service}:q");
-        var dlq   = ListLength($"hw:svc:{Service}:dlq");
+        var queue = ListLength($"hw:q:{Queue}:q");
+        var dlq   = ListLength($"hw:q:{Queue}:dlq");
 
         dlq.Should().Be(1, "the request exhausted its attempts and must leave the live queue");
         queue.Should().Be(0, "a dead-lettered request must not still be queued for retry");
@@ -75,15 +77,15 @@ public class DeadLetterTests : IDisposable
     public async Task DeadLettering_IsAtomic_NeverInBothListsNorNeither()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.CALL", Service, "atomic-1", "payload"u8.ToArray());
+        await db.ExecuteAsync("HW.SEND", Queue, "atomic-1", "payload"u8.ToArray());
 
         for (var i = 0; i < 8; i++)
         {
-            await AbandonOnceAsync(db, Service, "node-a");
+            await AbandonOnceAsync(db, Queue, "node-a");
 
-            var queue = ListLength($"hw:svc:{Service}:q");
-            var proc  = ListLength($"hw:svc:{Service}:proc:node-a");
-            var dlq   = ListLength($"hw:svc:{Service}:dlq");
+            var queue = ListLength($"hw:q:{Queue}:q");
+            var proc  = ListLength($"hw:q:{Queue}:proc:node-a");
+            var dlq   = ListLength($"hw:q:{Queue}:dlq");
 
             (queue + proc + dlq).Should().Be(1,
                 "the request exists exactly once across the queue, the processing list and the DLQ");
@@ -102,12 +104,12 @@ public class DeadLetterTests : IDisposable
         for (var i = 0; i < 10; i++)
         {
             var id = $"ok-{i}";
-            await db.ExecuteAsync("HW.CALL", Service, id, "payload"u8.ToArray());
-            var claimed = await db.ClaimSvcAsync(Service, "node-a");
+            await db.ExecuteAsync("HW.SEND", Queue, id, "payload"u8.ToArray());
+            var claimed = await db.ClaimQAsync(Queue, "node-a");
             (await db.AckAsync(claimed!.Value.Token)).Should().Be(1);
         }
 
-        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(0);
+        (ListLength($"hw:q:{Queue}:dlq")).Should().Be(0);
     }
 
     /// <summary>
@@ -119,17 +121,17 @@ public class DeadLetterTests : IDisposable
     {
         using var unlimited = new HighwayTestServer(o =>
         {
-            o.Lease = TimeSpan.FromMilliseconds(50);
+                        o.Lease = TimeSpan.FromMilliseconds(50);
             o.MaxDeliveryAttempts = 0;
         });
 
         var db = (await ConnectionMultiplexer.ConnectAsync(unlimited.ConnectionString)).GetDatabase();
-        await db.ExecuteAsync("HW.CALL", Service, "forever-1", "payload"u8.ToArray());
+        await db.ExecuteAsync("HW.SEND", Queue, "forever-1", "payload"u8.ToArray());
 
         for (var i = 0; i < 8; i++)
-            await AbandonOnceAsync(db, Service, "node-a");
+            await AbandonOnceAsync(db, Queue, "node-a");
 
-        (ListLength($"hw:svc:{Service}:dlq")).Should().Be(0,
+        (ListLength($"hw:q:{Queue}:dlq")).Should().Be(0,
             "0 means unlimited, which is how Highway behaved before this feature");
     }
 
@@ -142,7 +144,7 @@ public class DeadLetterTests : IDisposable
     {
         using var tiny = new HighwayTestServer(o =>
         {
-            o.Lease = TimeSpan.FromMilliseconds(50);
+                        o.Lease = TimeSpan.FromMilliseconds(50);
             o.MaxDeliveryAttempts = 1;
             o.MaxDeadLetterEntries = 3;
         });
@@ -151,12 +153,12 @@ public class DeadLetterTests : IDisposable
 
         for (var i = 0; i < 8; i++)
         {
-            await db.ExecuteAsync("HW.CALL", Service, $"flood-{i}", "payload"u8.ToArray());
-            await AbandonOnceAsync(db, Service, "node-a");
-            await AbandonOnceAsync(db, Service, "node-a");
+            await db.ExecuteAsync("HW.SEND", Queue, $"flood-{i}", "payload"u8.ToArray());
+            await AbandonOnceAsync(db, Queue, "node-a");
+            await AbandonOnceAsync(db, Queue, "node-a");
         }
 
-        var dlq = ListLength($"hw:svc:{Service}:dlq");
+        var dlq = ListLength($"hw:q:{Queue}:dlq");
         dlq.Should().BeLessThanOrEqualTo(3, "the dead-letter list is capped");
     }
 }

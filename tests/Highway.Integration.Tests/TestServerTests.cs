@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using System.Net;
 using System.Net.Sockets;
 using FluentAssertions;
@@ -26,7 +27,7 @@ public class TestServerTests
     public void ConfigureDelegate_ReachesOptions()
     {
         // Small payload cap set through the delegate → enforced by HW.CALL
-        using var server = new HighwayTestServer(o => o.MaxPayloadBytes = 16);
+        using var server = new HighwayTestServer(o => { o.MaxPayloadBytes = 16; o.RpcFailFast = false; });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -39,7 +40,7 @@ public class TestServerTests
     [Fact]
     public void ConfigureDelegate_ReachesReceiveDefaults()
     {
-        using var server = new HighwayTestServer(o => o.ReceiveDefaultCount = 2);
+        using var server = new HighwayTestServer(o => { o.ReceiveDefaultCount = 2; o.RpcFailFast = false; });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -55,7 +56,7 @@ public class TestServerTests
     [Fact]
     public void ConfigureDelegate_CannotChangePort()
     {
-        using var server = new HighwayTestServer(o => o.Port = 12345);
+        using var server = new HighwayTestServer(o => { o.Port = 12345; o.RpcFailFast = false; });
 
         server.Port.Should().NotBe(12345);
 
@@ -71,7 +72,7 @@ public class TestServerTests
     [Fact]
     public void Restart_MemoryOnly_KeepsConnectionString_StateIsGone()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         var connectionString = server.ConnectionString;
 
         using (var redis = ConnectionMultiplexer.Connect(connectionString))
@@ -97,7 +98,7 @@ public class TestServerTests
         var dataDir = Path.Combine(Path.GetTempPath(), $"highway-0041-{Guid.NewGuid():N}");
         try
         {
-            using var server = new HighwayTestServer(o => o.DataDir = dataDir);
+            using var server = new HighwayTestServer(o => { o.DataDir = dataDir; o.RpcFailFast = false; });
             var connectionString = server.ConnectionString;
 
             using (var redis = ConnectionMultiplexer.Connect(connectionString))
@@ -124,8 +125,8 @@ public class TestServerTests
     [Fact]
     public void TwoConcurrentInstances_Isolated()
     {
-        using var serverA = new HighwayTestServer();
-        using var serverB = new HighwayTestServer();
+        using var serverA = new HighwayTestServer(o => o.RpcFailFast = false);
+        using var serverB = new HighwayTestServer(o => o.RpcFailFast = false);
 
         serverA.Port.Should().NotBe(serverB.Port);
 

@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using System.Text;
 using FluentAssertions;
 using Highway.Server;
@@ -34,6 +35,7 @@ public class DurableByDefaultTests : IDisposable
     public DurableByDefaultTests()
         => _server = new HighwayTestServer(o =>
         {
+            o.RpcFailFast = false;
             o.DataDir = _dataDir;
             o.Ephemeral = false;
         });

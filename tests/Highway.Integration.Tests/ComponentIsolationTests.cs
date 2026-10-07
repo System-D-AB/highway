@@ -104,6 +104,8 @@ public class ComponentIsolationTests
         // Assert the broker still works — RPC round-trip
         using var redis = ConnectionMultiplexer.Connect($"localhost:{port}");
         var db = redis.GetDatabase();
+        // A worker declares the service first, as it would in production (074: a never-served service fails fast).
+        db.Execute("HW.SESSION", "node-1", "{\"catalog\":{\"services\":[{\"name\":\"isolation.svc\"}]}}");
         db.Execute("HW.CALL", "isolation.svc", "req-1", "payload");
 
         var result = db.ClaimSvc("isolation.svc", "node-1");

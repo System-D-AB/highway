@@ -98,7 +98,8 @@ internal sealed class HwTouchCommand : TokenCommand
         return ReadToken(input, ref idx);
     }
 
-    protected override bool Settle(CommandContext ctx, WorkBox wb) => wb.Touch(Seq, ctx.NowTicks);
+    protected override bool Settle(CommandContext ctx, WorkBox wb)
+        => wb.Touch(Seq, ctx.NowTicks, Kind == BoxKeys.Kind.Service ? RpcDeadlines.Policy(ctx) : null);
 
     protected override void AfterCommit(CommandContext ctx)
     {

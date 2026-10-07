@@ -192,6 +192,34 @@ internal static class DashboardEndpoints
             return Results.Json(new CatalogueDto(rows, result.Unavailable));
         });
 
+        // 074: a service's requests against their deadlines — read-only, the broker's own HW.STATS row. RPC has no
+        // dead letters, so this is what a service page shows instead: what waits, and how requests ended unanswered.
+        app.MapGet("/api/service/{name}/requests", (string name, Highway.Server.Resp.CommandDispatcher? dispatcher) =>
+        {
+            if (dispatcher is null)
+                return Results.Problem("Command dispatcher is not available.", statusCode: StatusCodes.Status503ServiceUnavailable);
+
+            var writer = new Highway.Server.Commands.Runtime.RespWriter();
+            dispatcher.Dispatch(["HW.STATS"u8.ToArray(), System.Text.Encoding.UTF8.GetBytes(name)], writer);
+            var fields = RespFields(writer.ToArray());
+            if (!fields.TryGetValue("kind", out var kind) || kind != "service")
+                return Results.Json(new { service = false });
+
+            long Field(string key) => fields.TryGetValue(key, out var v) && long.TryParse(v, out var n) ? n : 0;
+            return Results.Json(new
+            {
+                service = true,
+                queueDepth = Field("queueDepth"),
+                inFlight = Field("inFlight"),
+                hosts = Field("hosts"),
+                oldestAgeMs = Field("oldestAgeMs"),
+                oldestRemainingMs = Field("oldestRemainingMs"),
+                expired = Field("expired"),
+                failedFinal = Field("failedFinal"),
+                cancelled = Field("cancelled"),
+            });
+        });
+
         // Messages, not protocol events (023). The correlation and the outcome are decided on
         // the server: a browser doing it would fetch every event to group them and re-implement
         // what "acknowledged" means.
@@ -650,5 +678,21 @@ internal static class DashboardEndpoints
 
         events.AddRange(replies.Where(r => ids.Contains(MessageProjection.KeyOf(r))));
         return events;
+    }
+
+    /// <summary>Reads an HW.STATS field/value reply (bulk strings or integers) into a dictionary (074).</summary>
+    private static Dictionary<string, string> RespFields(byte[] resp)
+    {
+        var lines = System.Text.Encoding.UTF8.GetString(resp).Split("\r\n");
+        var values = new List<string>();
+        for (var i = 1; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (line.StartsWith('$') && i + 1 < lines.Length) { values.Add(lines[++i]); }
+            else if (line.StartsWith(':')) values.Add(line[1..]);
+        }
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var i = 0; i + 1 < values.Count; i += 2) map[values[i]] = values[i + 1];
+        return map;
     }
 }

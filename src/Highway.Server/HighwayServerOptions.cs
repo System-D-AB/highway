@@ -206,12 +206,50 @@ public sealed class HighwayServerOptions
     public int MaxDeadLetterEntries { get; set; } = 10_000;
 
     /// <summary>
-    /// How long the broker remembers an RPC request id it has enqueued, so a repeated <c>HW.CALL</c> for it is
-    /// acknowledged without being queued again (074; from 2.5.6). Default 10 minutes; zero disables. In memory
-    /// only: a broker that takes over after a failover starts empty, so a re-send of a call it never received
-    /// is queued. An id is forgotten when its request is dead-lettered, so a caller still waiting can re-send.
+    /// Whether the broker remembers an RPC request id it has enqueued — until that request's own deadline — so a
+    /// repeated <c>HW.CALL</c> for it is acknowledged without being queued again (074). Default on. In memory only:
+    /// a broker that takes over after a failover starts empty, so a re-send of a call it never received is queued.
+    /// An id is forgotten when its request leaves the broker without an answer (expired, failed, cancelled).
     /// </summary>
-    public TimeSpan RpcDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);
+    public bool RpcDuplicateFilter { get; set; } = true;
+
+    /// <summary>
+    /// The deadline of a call that names none (074): <c>HW.CALL</c> without <c>TIMEOUT</c>. Default 30 s — how long
+    /// a web request waits, and the client's own <c>CallTimeout</c> default, so caller and broker agree out of the
+    /// box.
+    /// </summary>
+    public TimeSpan DefaultRpcTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>The longest deadline a call may ask for; a longer <c>TIMEOUT</c> is clamped (074). Default 1 hour.</summary>
+    public TimeSpan MaxRpcTimeout { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// A request with less time than this left is dropped by <c>HW.CLAIM</c> rather than started: work with no time
+    /// to finish is waste (074). Default 100 ms.
+    /// </summary>
+    public TimeSpan MinRemainingToStart { get; set; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// Added to a request's remaining time when sizing its claim's lease, so a worker that dies holding a 30-second
+    /// call does not hold it for the full <see cref="Lease"/> (074). Default 5 s.
+    /// </summary>
+    public TimeSpan RpcLeaseGrace { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// <c>HW.CALL</c> answers <c>HW_NO_WORKERS</c> at once for a service no node has ever declared (074): a typo or
+    /// a service not yet deployed fails immediately instead of waiting out its timeout. A service that has been
+    /// served is always queued. Default on.
+    /// </summary>
+    public bool RpcFailFast { get; set; } = true;
+
+    /// <summary>Expired requests one <c>HW.CLAIM</c> drops before it yields and rings the doorbell (074). Default 256.</summary>
+    public int MaxExpiredPerClaim { get; set; } = 256;
+
+    /// <summary>
+    /// How often the broker logs one Warning line per service summarising requests that expired or failed after
+    /// their last attempt (074) — never one line per request. Default 1 minute.
+    /// </summary>
+    public TimeSpan RpcLogInterval { get; set; } = TimeSpan.FromMinutes(1);
 
     /// <summary>
     /// How long the broker remembers a message id it stored on a queue, so a retried <c>HW.SEND</c> whose reply

@@ -20,12 +20,19 @@ namespace Highway.Client.Engine;
 internal sealed class PendingCallRegistry
 {
     private readonly ConcurrentDictionary<string, PendingCall> _pending = new();
+
+    // 074: the send of each call, so a withdrawal (HW.CANCEL) waits for the HW.CALL it withdraws — sent first, a
+    // cancel would find nothing and the request would then be queued for nobody.
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _sends = new();
     private readonly IHighwayConnection _connection;
 
     public PendingCallRegistry(IHighwayConnection connection)
     {
         _connection = connection;
     }
+
+    /// <summary>The monotonic clock deadlines are measured on (074). A seam for tests; never wall-clock time.</summary>
+    internal Func<long> Timestamp { get; set; } = System.Diagnostics.Stopwatch.GetTimestamp;
 
     /// <summary>Number of calls currently awaiting a reply (diagnostics/tests).</summary>
     public int PendingCount => _pending.Count;
@@ -46,6 +53,7 @@ internal sealed class PendingCallRegistry
             ResponseType = responseType,
             RegisteredAtUtc = DateTime.UtcNow,
             Timeout = timeout,
+            DeadlineTimestamp = Timestamp() + (long)(timeout.TotalSeconds * System.Diagnostics.Stopwatch.Frequency),
             ServiceName = serviceName,
             Envelope = envelope,
         };
@@ -55,6 +63,7 @@ internal sealed class PendingCallRegistry
         call.LinkedCts.CancelAfter(timeout);
         call.CancellationRegistration = call.LinkedCts.Token.Register(() => OnLinkedCancellation(call, requestId, callerToken));
 
+        _sends[requestId] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_pending.TryAdd(requestId, call))
         {
             // A duplicate requestId would corrupt correlation; GUIDs make this unreachable.
@@ -167,9 +176,19 @@ internal sealed class PendingCallRegistry
             if (call.ServiceName is null || call.Envelope is null)
                 continue;   // registered without replay data (a legacy path) — its timeout bounds it
 
+            // 074: re-sent with the time its caller has LEFT, never its original timeout; a call with none left is
+            // over — answered here, not sent for a worker to run for nobody.
+            var remaining = System.Diagnostics.Stopwatch.GetElapsedTime(Timestamp(), call.DeadlineTimestamp);
+            if (remaining <= TimeSpan.Zero)
+            {
+                TryFail(requestId, BuildErrorResponse(call.ResponseType, StatusCodes.Status504GatewayTimeout, "CALL_TIMEOUT",
+                    $"The call timed out after {call.Timeout.TotalSeconds:0.#}s with no reply (its time ran out during a failover)."));
+                continue;
+            }
+
             try
             {
-                await _connection.CallAsync(call.ServiceName, requestId, call.Envelope, ct).ConfigureAwait(false);
+                await _connection.CallAsync(call.ServiceName, requestId, call.Envelope, remaining, ct).ConfigureAwait(false);
             }
             catch (HighwayTransportException)
             {
@@ -205,6 +224,9 @@ internal sealed class PendingCallRegistry
         if (callerToken.IsCancellationRequested)
         {
             call.Tcs.TrySetException(new OperationCanceledException(callerToken));
+            // 074 (D5): the caller gave up — withdraw the request if it is still queued, so no worker spends time on
+            // it. Fire-and-forget and best effort: it never fails the caller's cancellation.
+            if (call.ServiceName is { } service) _ = WithdrawAsync(service, requestId);
         }
         else
         {
@@ -213,6 +235,27 @@ internal sealed class PendingCallRegistry
                 StatusCodes.Status504GatewayTimeout,
                 "CALL_TIMEOUT",
                 $"The call timed out after {call.Timeout.TotalSeconds:0.#}s with no reply."));
+        }
+    }
+
+    /// <summary>The call's HW.CALL has been sent (or failed): a withdrawal may now follow it (074).</summary>
+    public void MarkSent(string requestId)
+    {
+        if (_sends.TryRemove(requestId, out var sent)) sent.TrySetResult();
+    }
+
+    private async Task WithdrawAsync(string service, string requestId)
+    {
+        try
+        {
+            if (_sends.TryGetValue(requestId, out var sent))
+                await sent.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+            var withdrawn = await _connection.CancelCallAsync(service, requestId).ConfigureAwait(false);
+            Observability.HighwayClientMetrics.RecordRpcCancel(withdrawn ? "withdrawn" : "not_waiting");
+        }
+        catch
+        {
+            Observability.HighwayClientMetrics.RecordRpcCancel("failed");
         }
     }
 
@@ -234,6 +277,7 @@ internal sealed class PendingCallRegistry
         public required Type ResponseType { get; init; }
         public required DateTime RegisteredAtUtc { get; init; }
         public required TimeSpan Timeout { get; init; }
+        public required long DeadlineTimestamp { get; init; }   // 074: Stopwatch-based, for remaining-time re-sends
         public string? ServiceName { get; init; }
         public byte[]? Envelope { get; init; }
         public CancellationTokenSource LinkedCts { get; set; } = null!;

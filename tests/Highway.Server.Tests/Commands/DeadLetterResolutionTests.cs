@@ -224,42 +224,6 @@ public class DeadLetterResolutionTests
     }
 
     [Fact]
-    public void ResolveRequeue_OnRpcService_RefusedRpc()
-    {
-        var options = CreateOptions(maxAttempts: 1);
-        using var h = new CommandHarness(options: options);
-
-        Session(h, T0, "worker-1", ("SVC", "billing"));
-        var targetBox = Catalog.Ensure(h.Store, h.Boxes, h.Locks, BoxKeys.Kind.Service, "billing", T0);
-
-        var entry = Envelope.EncodeRpcEntry("req-1"u8.ToArray(), "charge"u8.ToArray(), 1);
-        using (var wb = new WorkBox(h.Store, h.Boxes, targetBox, tracksBytes: false))
-        {
-            wb.Enqueue(entry);
-            wb.Commit();
-        }
-
-        h.Run(new HwClaimCommand(), T0, "SVC", "billing", "node-1");
-        var t1 = T0 + TimeSpan.FromSeconds(10).Ticks;
-        h.Run(new HwClaimCommand(), t1, "SVC", "billing", "node-2");
-
-        var (token, _, _) = ClaimDead(h, t1, "SVC", "billing", "worker-1");
-
-        // Resolve REQUEUE on RPC service -> refused rpc
-        var res = CommandHarness.AsText(h.Run(new HwDlqCommand(), t1, "RESOLVE", token, "REQUEUE"));
-        res.Should().Be("*2\r\n$7\r\nrefused\r\n$3\r\nrpc\r\n");
-
-        // Dead letter remains in DLQ
-        using (var wb = new WorkBox(h.Store, h.Boxes, targetBox, tracksBytes: false))
-        {
-            wb.Dead.Should().Be(1);
-        }
-
-        var events = h.Recorder.Read("SVC:billing", DateTimeOffset.MinValue, DateTimeOffset.MaxValue, null, 100);
-        events.Should().Contain(e => e.EventType == HighwayEventType.DeadLetterRequeueRefused && e.ErrorCode == "rpc");
-    }
-
-    [Fact]
     public void ResolveRequeue_WhenCapExceeded_RefusedCap()
     {
         var options = CreateOptions(maxAttempts: 1);

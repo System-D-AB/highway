@@ -89,25 +89,31 @@ public class DuplicateSafetyTests
     }
 
     [Fact]
-    public void ADeadLetteredCall_StopsSuppressingItsReSend()
+    public void ACallThatFailedItsLastAttempt_StopsSuppressingItsReSend()
     {
+        // 074: RPC is never dead-lettered; a request that fails its last attempt with time left is removed — and its
+        // id forgotten, so a caller still waiting that re-sends it gets a fresh attempt.
         using var h = Harness(new HighwayServerOptions { MaxDeliveryAttempts = 1, Lease = TimeSpan.FromSeconds(5) });
-        h.Run(new HwCallCommand(), T0, "prices", "req-1", "payload");
+        h.Run(new HwCallCommand(), T0, "prices", "req-1", "payload", "TIMEOUT", "3600000");
 
-        // Claim and let the lease lapse until lease recovery dead-letters it (attempts exhausted).
         var now = T0;
-        for (var i = 0; i < 5 && Dead(h, "prices") == 0; i++)
+        for (var i = 0; i < 5 && !Ended(h); i++)
         {
             h.ClaimOne("SVC", "prices", "worker-1", now);
             now += TimeSpan.FromSeconds(10).Ticks;
         }
-        Dead(h, "prices").Should().Be(1, "the request was dead-lettered");
+        Ended(h).Should().BeTrue("the request failed its last attempt");
+        Dead(h, "prices").Should().Be(0, "RPC has no dead letters (074)");
         Held(h, BoxKeys.Kind.Service, "prices").Should().Be(0);
 
         Text(h.Run(new HwCallCommand(), now + 1, "prices", "req-1", "payload")).Should().Be("+OK\r\n");
 
         Held(h, BoxKeys.Kind.Service, "prices").Should().Be(1, "its original is gone, so a caller still waiting gets a fresh attempt");
     }
+
+    private static bool Ended(CommandHarness h)
+        => h.Recorder.Read("prices", DateTimeOffset.MinValue, DateTimeOffset.MaxValue, null, 100)
+            .Any(e => e.EventType == HighwayEventType.RpcFailedFinal);
 
     [Fact]
     public void WithoutAFilter_RepeatedCallsAreQueued_AsBefore()

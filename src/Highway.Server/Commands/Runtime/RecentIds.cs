@@ -1,11 +1,12 @@
 namespace Highway.Server.Commands.Runtime;
 
 /// <summary>
-/// Remembers IDs recently admitted by this broker within a sliding window, bounded by capacity.
-/// Keyed by (scope, id), with optional associated value TValue (e.g., group count for publish).
+/// Remembers IDs recently admitted by this broker, each until its own expiry, bounded by capacity. Keyed by
+/// (scope, id), with an associated value (e.g., the group count for a publish).
 ///
-/// <para>Process-local, per server process, never persisted or replicated. Bounded by <see cref="Window"/>
-/// and capacity; past the capacity the oldest IDs are forgotten first (may let a duplicate through, never
+/// <para>Process-local, per server process, never persisted or replicated. An id is remembered for
+/// <see cref="Window"/>, or until the expiry it was admitted with (074: a call is remembered until its own
+/// deadline). Past the capacity the soonest-expiring ids are forgotten first (may let a duplicate through, never
 /// drops a new message).</para>
 /// </summary>
 internal sealed class RecentIds<TValue>
@@ -13,9 +14,10 @@ internal sealed class RecentIds<TValue>
     public const int DefaultCapacity = 200_000;
 
     private readonly object _gate = new();
-    private readonly Dictionary<(string Scope, string Id), (long Ticks, TValue Value)> _seen = [];
-    private readonly Queue<(string Scope, string Id, long Ticks)> _order = new();
+    private readonly Dictionary<(string Scope, string Id), (long Version, long Expires, TValue Value)> _seen = [];
+    private readonly PriorityQueue<(string Scope, string Id, long Version), long> _order = new();
     private readonly int _capacity;
+    private long _version;
     private long _duplicates;
 
     public RecentIds(TimeSpan window, int capacity = DefaultCapacity)
@@ -24,7 +26,7 @@ internal sealed class RecentIds<TValue>
         _capacity = Math.Max(1, capacity);
     }
 
-    /// <summary>How long an id is remembered; zero or negative disables the filter.</summary>
+    /// <summary>How long an id is remembered by default; zero or negative disables the filter.</summary>
     public TimeSpan Window { get; }
 
     /// <summary>Total duplicates suppressed by this instance (process counter for HW.STATS).</summary>
@@ -40,8 +42,7 @@ internal sealed class RecentIds<TValue>
     public void RecordDuplicate() => Interlocked.Increment(ref _duplicates);
 
     /// <summary>
-    /// Checks whether (scope, id) is currently remembered within the window, returning its stored value if so.
-    /// If remembered, returns true; otherwise false.
+    /// Checks whether (scope, id) is currently remembered, returning its stored value if so.
     /// </summary>
     public bool TryGet(string scope, string id, long nowTicks, out TValue value)
     {
@@ -54,7 +55,7 @@ internal sealed class RecentIds<TValue>
         lock (_gate)
         {
             Expire(nowTicks);
-            if (_seen.TryGetValue((scope, id), out var entry) && nowTicks - entry.Ticks < Window.Ticks)
+            if (_seen.TryGetValue((scope, id), out var entry) && nowTicks < entry.Expires)
             {
                 value = entry.Value;
                 return true;
@@ -66,27 +67,32 @@ internal sealed class RecentIds<TValue>
     }
 
     /// <summary>
-    /// Remembers (scope, id) with its value. Called only <b>after</b> the write it stands for has committed, so a
-    /// refused or failed write is never remembered and its retry is stored (074). There is deliberately no
-    /// check-and-admit in one call: that would remember an id before its commit.
+    /// Remembers (scope, id) with its value for <see cref="Window"/>. Called only <b>after</b> the write it stands
+    /// for has committed, so a refused or failed write is never remembered and its retry is stored (074). There is
+    /// deliberately no check-and-admit in one call: that would remember an id before its commit.
     /// </summary>
     public void Admit(string scope, string id, long nowTicks, TValue value)
+        => Admit(scope, id, nowTicks, value, nowTicks + Window.Ticks);
+
+    /// <summary>Remembers (scope, id) until <paramref name="expiresTicks"/> (074: a call, until its deadline).</summary>
+    public void Admit(string scope, string id, long nowTicks, TValue value, long expiresTicks)
     {
-        if (Window <= TimeSpan.Zero) return;
+        if (Window <= TimeSpan.Zero || expiresTicks <= nowTicks) return;
         lock (_gate)
         {
             Expire(nowTicks);
-            _seen[(scope, id)] = (nowTicks, value);
-            _order.Enqueue((scope, id, nowTicks));
-            while ((_seen.Count > _capacity || _order.Count > 2 * _capacity) && _order.TryDequeue(out var oldest))
+            var version = ++_version;
+            _seen[(scope, id)] = (version, expiresTicks, value);
+            _order.Enqueue((scope, id, version), expiresTicks);
+            while ((_seen.Count > _capacity || _order.Count > 2 * _capacity) && _order.TryDequeue(out var oldest, out _))
             {
-                if (_seen.TryGetValue((oldest.Scope, oldest.Id), out var t) && t.Ticks == oldest.Ticks)
+                if (_seen.TryGetValue((oldest.Scope, oldest.Id), out var e) && e.Version == oldest.Version)
                     _seen.Remove((oldest.Scope, oldest.Id));
             }
         }
     }
 
-    /// <summary>Forgets one id — a dead-lettered call, so a caller still waiting can re-send it.</summary>
+    /// <summary>Forgets one id — a call that left the broker (dead-lettered, expired, cancelled).</summary>
     public void Forget(string scope, string id)
     {
         lock (_gate) _seen.Remove((scope, id));
@@ -110,11 +116,10 @@ internal sealed class RecentIds<TValue>
 
     private void Expire(long nowTicks)
     {
-        var cutoff = nowTicks - Window.Ticks;
-        while (_order.TryPeek(out var head) && head.Ticks <= cutoff)
+        while (_order.TryPeek(out var head, out var expires) && expires <= nowTicks)
         {
             _order.Dequeue();
-            if (_seen.TryGetValue((head.Scope, head.Id), out var t) && t.Ticks == head.Ticks)
+            if (_seen.TryGetValue((head.Scope, head.Id), out var e) && e.Version == head.Version)
                 _seen.Remove((head.Scope, head.Id));
         }
     }

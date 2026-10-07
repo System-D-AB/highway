@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -52,7 +53,7 @@ public class DoorbellTests
     [Fact]
     public async Task HwCall_RingsServiceDoorbell_WithRequestId()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var collector = new RingCollector(server.ConnectionString);
         await collector.SubscribeAsync("hw:door:svc:ring.svc");
 
@@ -67,7 +68,7 @@ public class DoorbellTests
     [Fact]
     public async Task HwReply_RingsReplyDoorbell_WithRequestId()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var collector = new RingCollector(server.ConnectionString);
         await collector.SubscribeAsync("hw:door:rep");
 
@@ -82,7 +83,7 @@ public class DoorbellTests
     [Fact]
     public async Task HwPublish_RingsQueueDoorbell_OncePerGroup()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var collectorX = new RingCollector(server.ConnectionString);
         using var collectorY = new RingCollector(server.ConnectionString);
         await collectorX.SubscribeAsync("hw:door:q:ring.ch@grpX");
@@ -107,7 +108,7 @@ public class DoorbellTests
     [Fact]
     public async Task RejectedCommand_RingsNothing()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var collector = new RingCollector(server.ConnectionString);
         await collector.SubscribeAsync("hw:door:svc:guard.svc");
 
@@ -126,7 +127,7 @@ public class DoorbellTests
         var dataDir = Path.Combine(Path.GetTempPath(), $"highway-door-{Guid.NewGuid():N}");
         try
         {
-            using var server = new HighwayTestServer(o => o.DataDir = dataDir);
+            using var server = new HighwayTestServer(o => { o.DataDir = dataDir; o.RpcFailFast = false; });
 
             // SE.Redis auto-reconnects and resubscribes across the restart.
             using var collector = new RingCollector(server.ConnectionString);
@@ -161,7 +162,7 @@ public class DoorbellTests
     [Fact]
     public void HwClaim_ReplyShape_RowsOfTokenIdPayload()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 

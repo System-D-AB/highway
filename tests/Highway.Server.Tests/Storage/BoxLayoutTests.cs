@@ -240,7 +240,7 @@ public class BoxLayoutTests
                 {
                     var node = "n" + rng.Next(3);
                     var mine = m.InFlight.Where(kv => kv.Value.Node == node).OrderBy(kv => kv.Key).ToList();
-                    wb.RequeueNode(node).Should().Be(mine.Count, because);
+                    wb.RequeueNode(node, 0).Should().Be(mine.Count, because);
                     foreach (var (token, f) in mine) { m.InFlight.Remove(token); m.Ready.Add((0, f.Id, (ushort)(f.Attempts + 1), f.Requeues)); }
                     if (rng.Next(4) == 0)
                     {

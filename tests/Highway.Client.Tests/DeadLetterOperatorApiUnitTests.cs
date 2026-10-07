@@ -51,17 +51,15 @@ public class DeadLetterOperatorApiUnitTests
     }
 
     [Fact]
-    public async Task PeekAsync_ResolvesServiceTarget_Correctly()
+    public async Task AServiceContract_HasNoDeadLetters_AndSaysSo()
     {
-        _connection.DlqPeekAsync("SVC", "orders.service", 10, Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult<IReadOnlyList<RawDeadLetterPeekEntry>>(Array.Empty<RawDeadLetterPeekEntry>()));
-
+        // 074 (D2): RPC has no dead letters; the operator API refuses a service contract instead of asking the broker.
         var api = new HighwayDeadLetters(_catalog, _options, _engine, _engineInternals);
 
-        var result = await api.PeekAsync<UnitDlqServiceRequest>(10);
+        var act = () => api.PeekAsync<UnitDlqServiceRequest>(10);
 
-        result.Should().BeEmpty();
-        await _connection.Received(1).DlqPeekAsync("SVC", "orders.service", 10, Arg.Any<CancellationToken>());
+        await act.Should().ThrowAsync<NotSupportedException>().WithMessage("*orders.service*RPC has no dead letters*");
+        await _connection.DidNotReceiveWithAnyArgs().DlqPeekAsync(default!, default!, default, default);
     }
 
     [Fact]

@@ -85,6 +85,12 @@ public class MessageProjectionTests
             [HighwayEventType.DeadLetterResolved] = EventVisibility.Public,
             [HighwayEventType.DeadLetterRequeueRefused] = EventVisibility.Public,
             [HighwayEventType.DeadLetterFeedOverflow] = EventVisibility.Internal,
+            // 074: how an RPC request ended without an answer
+            [HighwayEventType.RpcExpired] = EventVisibility.Public,
+            [HighwayEventType.RpcFailedFinal] = EventVisibility.Public,
+            [HighwayEventType.RpcReplyLate] = EventVisibility.Public,
+            [HighwayEventType.RpcCancelled] = EventVisibility.Public,
+            [HighwayEventType.RpcFailFast] = EventVisibility.Public,
         };
 
         var all = Enum.GetValues<HighwayEventType>();

@@ -32,7 +32,30 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
         : base(descriptor.RequestType, connection, executor, nodeName, concurrency, wake, logger, renewalInterval, maxProcessingTime, abandonGrace, maxAbandonedHandlers)
     {
         _descriptor = descriptor;
+
+        // 074 (R8 AC2): an [Idempotent] RPC keeps its stored answer for at least twice the contract's timeout, so a
+        // caller that timed out and retries with the same key gets the original outcome, not a second run.
+        if (IdempotencyWindow is { } window)
+        {
+            var timeout = ServiceTimeouts.For(descriptor.RequestType) ?? DefaultCallTimeout;
+            if (window < timeout * 2) IdempotencyWindow = timeout * 2;
+        }
     }
+
+    /// <summary>The broker's and the client's default call timeout (074): what a contract without one is held to.</summary>
+    private static readonly TimeSpan DefaultCallTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// 074: a request's handler is cancelled at its caller's deadline when that comes before MaxProcessingTime — the
+    /// remaining time the broker sent with the claim, relative, so no clocks are compared.
+    /// </summary>
+    protected override TimeSpan TimeLimitFor(ClaimedWork work)
+        => work.Remaining is { } remaining && (MaxProcessingTime <= TimeSpan.Zero || remaining < MaxProcessingTime)
+            ? (remaining > TimeSpan.Zero ? remaining : TimeSpan.FromMilliseconds(1))
+            : MaxProcessingTime;
+
+    /// <summary>074 (D3): an abandoned request is acknowledged — its caller is not waiting for a second run.</summary>
+    protected override Task OnAbandonedAsync(ClaimedWork work) => Connection.AckAsync(work.Token, CancellationToken.None);
 
     public string ServiceName => _descriptor.Name;
 
@@ -46,7 +69,11 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
 
     protected override async Task ProcessAsync(ClaimedWork work, CancellationToken ct)
     {
-        var (token, requestId, payload) = work;
+        var (token, requestId, payload, _) = work;
+
+        // 074 (D6): calls this handler makes inherit its deadline.
+        using var ambient = TimeLimitFor(work) is { } limit && limit > TimeSpan.Zero ? AmbientDeadline.Enter(limit) : null;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         object? request = null;
         Output result;
 
@@ -171,20 +198,47 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
                 .ConfigureAwait(false);
         }
 
-        // Abandoned (074): the request was given up and will be redelivered — answer nothing here.
+        // Abandoned (074): the request was given up (and acknowledged) — answer nothing here.
         if (IsAbandoned(ct)) return;
+
+        // 074: an answer after the caller's deadline is wanted by nobody — the work is over, so the claim is settled,
+        // but nothing is replied (the broker would discard it anyway). Measured against the remaining time this worker
+        // was given, on its own clock, so it never confuses a deadline with the engine stopping.
+        if (work.Remaining is { } remaining && System.Diagnostics.Stopwatch.GetElapsedTime(started) >= remaining)
+        {
+            Observability.HighwayClientMetrics.RecordRpcDeadlineExceeded();
+            Logger.LogDebug("Request '{RequestId}' on '{Service}' finished after its caller's deadline; not replied",
+                requestId, _descriptor.Name);
+            await Connection.AckAsync(token, CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
 
         // Answered with CancellationToken.None: the handler has run; its token may be the expired cap.
         await ReplyRawThenAckAsync(requestId, token, envelopeBytes, CancellationToken.None).ConfigureAwait(false);
     }
 
-    /// <summary>The handler stopped at MaxProcessingTime: the caller gets a 504, and the request is settled.</summary>
-    protected override Task OnProcessingTimeExceededAsync(ClaimedWork work, CancellationToken workToken)
-        => ReplyThenAckAsync(work.Id, work.Token, new GenericOutput
+    /// <summary>
+    /// The handler stopped at its time limit. At the caller's deadline (074) that is not a failure — the caller has
+    /// stopped waiting, so nothing is replied and the claim is acknowledged. At MaxProcessingTime with time left, the
+    /// caller gets a 504 and the request is settled.
+    /// </summary>
+    protected override async Task OnProcessingTimeExceededAsync(ClaimedWork work, CancellationToken workToken)
+    {
+        if (TimeLimitFor(work) != MaxProcessingTime || MaxProcessingTime <= TimeSpan.Zero)
+        {
+            Observability.HighwayClientMetrics.RecordRpcDeadlineExceeded();
+            Logger.LogDebug("Request '{RequestId}' on '{Service}' reached its caller's deadline; its handler stopped",
+                work.Id, _descriptor.Name);
+            await Connection.AckAsync(work.Token, CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
+        await ReplyThenAckAsync(work.Id, work.Token, new GenericOutput
         {
             StatusCode = StatusCodes.Status504GatewayTimeout,
             Error = new ErrorDetail { Code = "PROCESSING_TIME_EXCEEDED", Message = "processing exceeded MaxProcessingTime" },
-        }, CancellationToken.None);
+        }, CancellationToken.None).ConfigureAwait(false);
+    }
 
     /// <summary>Sends the reply envelope, THEN acks — a crash between the two still delivers the response.</summary>
     private Task ReplyThenAckAsync(string requestId, string token, Output result, CancellationToken ct)
@@ -199,7 +253,14 @@ internal sealed class RpcWorkerLoop : SingleMessageWorkerLoop
     {
         try
         {
-            await Connection.ReplyAsync(requestId, responseEnvelope, ct).ConfigureAwait(false);
+            // With the claim token the broker discards a reply after the deadline (074): the caller has gone, and the
+            // work is over either way — so it is still acknowledged below.
+            if (!await Connection.ReplyAsync(requestId, responseEnvelope, token, ct).ConfigureAwait(false))
+            {
+                Observability.HighwayClientMetrics.RecordRpcLateReply();
+                Logger.LogDebug("Reply to '{RequestId}' on '{Service}' came after its deadline and was discarded",
+                    requestId, _descriptor.Name);
+            }
         }
         catch (HighwayTransportException ex)
         {

@@ -36,15 +36,34 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   `{app}-{machine}`, so several services from the same binaries on one machine are separate nodes. The
   default `SubscriptionGroup` keeps the old value, `{app}-{machine}`, so those copies still share one
   group and pub/sub behaves as before. An explicitly set `NodeName` or `SubscriptionGroup` is unchanged.
+- **RPC requests have deadlines, and no dead letters** (feature 074). A request lives exactly as long as
+  its caller waits and never runs after it; one that fails its last attempt is removed and recorded
+  (`RpcFailedFinal`) instead of dead-lettered. `HW.DLQ`, `HW.CLAIM DEAD` and session `deadLetters` refuse
+  `SVC` targets, an `IDeadLetter<T>` for an RPC request is a startup error, and `IHighwayDeadLetters`
+  refuses service contracts. `HW.CLAIM SVC` rows gain a fourth element (the remaining time), `HW.CALL`
+  takes `TIMEOUT`, `HW.REPLY` takes `TOKEN`, and a call to a service no node has ever served answers
+  `HW_NO_WORKERS` (`503`). `IHighwayClient` gains `ExecuteAsync(request, timeout, ct)`.
+- **Upgrading from 2.5.6:** its `server.rpcRequestTtl` and `server.rpcDuplicateWindow` are not in 3.0 —
+  every call carries its own deadline, and the duplicate filter remembers a call until that deadline
+  (`server.rpcDuplicateFilter`).
 
 ### Fixed
 
+- **An outage left a backlog that ran for nobody, and a hung service needed a restart** (feature 074).
+  Requests queued while workers were down ran in full when they came back, long after their callers had
+  given up; a handler hung on a dependency held its worker until the process restarted; and every
+  connection blip re-sent every pending call. Now: a request is never handed out, redelivered or answered
+  after its caller's deadline; the handler's token fires at the deadline and a handler that ignores it is
+  abandoned and its claim acknowledged, so the service keeps answering; and pending calls are re-sent only
+  when the master actually moved, once, with the time left.
 - **A retried call, send or publish could run twice** (feature 074, carried from 2.5.6 and 2.6.0). A
   request whose reply was lost was re-sent and stored again. The broker now remembers the ids it has
   stored — `HW.CALL` by request id, `HW.SEND` by message id, and `HW.PUBLISH` by a new `ID` the client
-  sends once per publish and reuses across its retries — and answers a repeat within a 10-minute window
+  sends once per publish and reuses across its retries — and answers a repeat (a call until its own deadline, a
+  send or publish within a 10-minute window)
   without storing it. Ids are remembered only after their commit, so a refused one is never suppressed;
-  a dead-lettered call's id is forgotten. Windows: `server.rpcDuplicateWindow`,
+  a call's id is forgotten when its request leaves unanswered. Settings: `server.rpcDuplicateFilter` (calls are
+  remembered until their own deadline),
   `server.sendDuplicateWindow`, `server.publishDuplicateWindow` (0 disables).
 - **A hung handler was duplicated, and kept its worker slot** (feature 074). At `MaxProcessingTime`
   renewal stopped while the handler kept running, so another worker started the same message, and a
@@ -85,6 +104,18 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
 
 ### Added
 
+- **RPC deadlines** (feature 074). The timeout is the call's own (`ExecuteAsync(request, timeout)`), the
+  contract's (`[Service(Timeout = "00:05:00")]`) or `CallTimeout`; inside a handler, calls inherit the time
+  left. The broker fixes the deadline with its own clock; workers get the remaining time. A caller that
+  gives up withdraws its queued request (`HW.CANCEL`). Broker options `defaultRpcTimeout` (30 s),
+  `maxRpcTimeout` (1 h), `minRemainingToStart`, `rpcLeaseGrace`, `rpcFailFast`, `maxExpiredPerClaim`,
+  `rpcLogInterval`. Events `RpcExpired`, `RpcFailedFinal`, `RpcReplyLate`, `RpcCancelled`, `RpcFailFast`;
+  metrics `highway.rpc.expired`, `.failed`, `.replies.late`, `.failfast`, `.cancelled`, `.queue_wait` and
+  client `highway.client.rpc.deadline_exceeded`, `.cancels`, `.replies.late`; `HW.STATS` service rows show
+  the oldest waiting request against its deadline and how requests ended; the dashboard's service page
+  shows the same. `[SideEffects]` marks a handler for a startup reminder when its request is not
+  `[Idempotent]`; an `[Idempotent]` RPC keeps its answer for at least twice its timeout.
+
 - **Duplicate counters** (feature 074): `HW.STATS` reports `callDuplicates`, `sendDuplicates` and
   `publishDuplicates`; the meter `highway.messages.duplicates{verb}`; client meters for cancelled and
   abandoned handlers. Options `AbandonGrace` and `MaxAbandonedHandlers`.
@@ -92,7 +123,8 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
 - **Dead-letter contracts & declarative retry policies** (feature 073).
   - Strongly-typed `IDeadLetter<T>` contract handlers to consume dead-letter feed notifications (`HW.CLAIM DEAD`) and resolve them atomically with `Keep()`, `Discard()`, or `Requeue(delay)`.
   - Poison payload resilience: deserialization failures dispatch to `IDeadLetter<T>` with `Message = null` and raw payload preserved.
-  - Lineage tracking trailer `[0xFE][u16 requeues]` on queue entries; RPC dead letters permit inspection/purging but refuse requeuing.
+  - Requeue lineage on queue entries (`[u16 requeues][u32 magic]`), visible to handlers and capped by `MaxRequeues`.
+  - Dead letters are for queues and subscriber groups; RPC has none (074).
   - Typed operator API `IHighwayDeadLetters` (`PeekAsync`, `CountAsync`, `RequeueAsync`, `PurgeAsync`, `RequeueAllAsync`, `PurgeAllAsync`) for management across services, queues, and subscriber groups.
   - Declarative retry policies via `[Retry(MaxAttempts, Backoff, MaxRequeues)]` supporting fixed, exponential, and deterministic integer-only FNV-1a jitter rescheduling into delayed space before dead-lettering.
   - Server dashboard Dead Letters panel on entity details page with payload previews and API key authentication.

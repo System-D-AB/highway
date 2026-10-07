@@ -38,6 +38,7 @@ internal static class BoxKeys
     public const byte Schedules = 0x08;      // [job] -> JobScheduleRecord
     public const byte ScheduleIndex = 0x09;  // [nextFire:8][job] -> empty
     public const byte NodeIndex = 0x0A;      // [node][seq:8] -> empty
+    public const byte RpcIndex = 0x0B;       // [requestId] -> ready seq (u64); service boxes only (074, HW.CANCEL)
 
     /// <summary>Box kinds as stored in the name index. Queues include group queues (<c>{channel}@{group}</c>).</summary>
     public enum Kind : byte { Service = 1, Queue = 2, DeadFeed = 3 }

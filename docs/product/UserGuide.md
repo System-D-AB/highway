@@ -144,10 +144,32 @@ if (result.StatusCode == StatusCodes.Status200OK)
   the response. `ExecuteAsync` does not throw for service-level outcomes.
 - **Competing consumers.** Deploy multiple instances of the same service and
   Highway load-balances between them automatically.
-- **Timeouts.** Callers get a response or an explicit timeout — never a silent
-  hang. Default: 30 seconds.
-- **Fast-fail.** Set `FastFailEnabled = true` to get an immediate 404 when no
-  node hosts the service, instead of waiting for the timeout.
+- **Timeouts and deadlines.** Callers get a response or an explicit timeout — never a silent
+  hang. The timeout is the call's own (`ExecuteAsync(request, TimeSpan.FromSeconds(5))`), else the
+  contract's (`[Service("reports.run", Timeout = "00:05:00")]`), else `CallTimeout` (30 s). The broker
+  is told it and holds the request to it: **a request never runs after its caller stops waiting** —
+  not from the queue, not on a retry — and a late answer is discarded. The broker caps any timeout at
+  an hour (`MaxRpcTimeout`).
+- **Your handler's token is the deadline.** The `CancellationToken` your service receives fires when
+  the caller's time is up. Pass it to everything you await; stopping there is not a failure. A handler
+  that ignores it is abandoned shortly after so the worker keeps serving others.
+- **Calls inside a handler inherit its deadline.** A service that calls another service passes on only
+  the time its own caller has left — an inner call never outlives the outer one.
+- **Nobody home fails fast.** A call to a service no node has ever served (a typo, a service not yet
+  deployed) returns `503` (`NO_WORKERS`) at once. A service whose workers are only busy or restarting is
+  queued, and its deadline decides.
+- **Cancelling withdraws.** Cancelling the call's `CancellationToken` (the user left the page) throws
+  `OperationCanceledException` as before, and withdraws the request if no worker has started it.
+- **Commands versus queries.** A query is safe to repeat. A command may have happened even when its
+  caller timed out: make its request `[Idempotent]` and reuse the same key when you retry — the stored
+  answer is kept for at least twice the timeout — or send it through a queue (`SendAsync`) and report the
+  result separately. Marking a handler `[SideEffects]` gets a startup reminder when its request is not
+  `[Idempotent]`.
+- **No dead letters.** An RPC request that fails every attempt, or whose caller stopped waiting, is
+  removed and recorded (`RpcFailedFinal`, `RpcExpired`), never parked: its caller already has its answer
+  (an error or a timeout). Work that must eventually happen belongs on a queue.
+- **Client-side fast-fail.** `FastFailEnabled = true` additionally asks discovery before calling, and
+  returns `404` when no node is live right now.
 
 ---
 
@@ -490,7 +512,7 @@ public sealed class InvoiceDeadLetterHandler : IDeadLetter<GenerateInvoice>
 - **Never re-fed automatically:** Highway never automatically re-feeds dead letters without explicit instructions from a handler or operator.
 - **Subscriber groups:** a handler for a published contract (`IDeadLetter<OrderPlaced>`) handles **your** group's dead letters, so the application must also subscribe (`ISubscribe<OrderPlaced>`); startup fails otherwise, naming the channel.
 - **Poison messages:** Payloads that fail JSON deserialization still dispatch to `IDeadLetter<T>` with `deadLetter.Message == null` and raw bytes preserved in `deadLetter.RawPayload`.
-- **RPC Dead Letters:** RPC services also support `IDeadLetter<T>`. Handlers can `Keep` or `Discard`, but cannot `Requeue` because the calling RPC client has already timed out.
+- **RPC Dead Letters (removed in 3.0):** RPC has no dead letters — an `IDeadLetter<T>` for an RPC request is a startup error (`RpcDeadLetterHandlerException`). Formerly: RPC services also supported `IDeadLetter<T>`. Handlers can `Keep` or `Discard`, but cannot `Requeue` because the calling RPC client has already timed out.
 
 ### Typed Operator API (`IHighwayDeadLetters`)
 

@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -16,7 +17,7 @@ public class QueueCommandTests : IDisposable
 {
     private const string Queue = "invoices";
 
-    private readonly HighwayTestServer _server = new(o => o.Lease = TimeSpan.FromMilliseconds(50));
+    private readonly HighwayTestServer _server = new(o => { o.Lease = TimeSpan.FromMilliseconds(50); o.RpcFailFast = false; });
 
     public void Dispose() => _server.Dispose();
 
@@ -117,6 +118,7 @@ public class QueueCommandTests : IDisposable
     {
         using var strict = new HighwayTestServer(o =>
         {
+            o.RpcFailFast = false;
             o.Lease = TimeSpan.FromMilliseconds(50);
             o.MaxDeliveryAttempts = 1;
         });

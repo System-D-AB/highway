@@ -62,19 +62,25 @@ public class HwDlqCommandTests
         reply.Should().NotContain("requestId");
     }
 
+    [Theory]
+    [InlineData("PEEK")]
+    [InlineData("COUNT")]
+    [InlineData("REQUEUE")]
+    [InlineData("PURGE")]
+    public void Dlq_AServiceTarget_IsRefused_NamingTheRule(string action)
+    {
+        // 074 (D2): RPC has no dead letters, so there is nothing for HW.DLQ to show or move on a service.
+        using var h = new CommandHarness();
+        CommandHarness.AsText(h.Run(new HwDlqCommand(), action, "SVC", "billing.charge"))
+            .Should().StartWith("-ERR HW_INVALID_ARG").And.Contain("RPC has no dead letters");
+    }
+
     [Fact]
-    public void Dlq_Peek_ServiceTarget_ReturnsDeadId_Requeues_And_RequestId()
+    public void ClaimDead_OnAService_IsRefused()
     {
         using var h = new CommandHarness();
-        DeadLetterOne(h, "SVC", "billing.charge", "req-456");
-
-        var reply = CommandHarness.AsText(h.Run(new HwDlqCommand(), "PEEK", "SVC", "billing.charge"));
-        reply.Should().Contain("deadId");
-        reply.Should().Contain("requeues");
-        reply.Should().Contain("0");
-        reply.Should().Contain("requestId");
-        reply.Should().Contain("req-456");
-        reply.Should().NotContain("messageId");
+        CommandHarness.AsText(h.Run(new HwClaimCommand(), "DEAD", "SVC", "billing.charge", "node-1"))
+            .Should().StartWith("-ERR HW_INVALID_ARG").And.Contain("RPC has no dead letters");
     }
 
     [Fact]

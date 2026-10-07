@@ -212,4 +212,25 @@ public enum HighwayEventType
 
     /// <summary>A dead-letter feed reached its MaxDeadLetterEntries bound and dropped its oldest notification (073).</summary>
     DeadLetterFeedOverflow = 32,
+
+    /// <summary>
+    /// An RPC request's deadline passed before it was answered, and it was removed without running (again) (074).
+    /// <c>ErrorCode</c> is the stage: <c>queue</c> (never started) or <c>redelivery</c> (its worker stopped).
+    /// </summary>
+    RpcExpired = 33,
+
+    /// <summary>
+    /// An RPC request failed on its last attempt with time left, and was removed — RPC has no dead letters (074).
+    /// <c>ErrorCode</c> carries the failure type and detail.
+    /// </summary>
+    RpcFailedFinal = 34,
+
+    /// <summary>A handler replied after its request's deadline; the reply was discarded (074).</summary>
+    RpcReplyLate = 35,
+
+    /// <summary>A caller withdrew a request that was still queued (<c>HW.CANCEL</c>, 074).</summary>
+    RpcCancelled = 36,
+
+    /// <summary>A call to a service no node has ever served was refused at once (<c>HW_NO_WORKERS</c>, 074).</summary>
+    RpcFailFast = 37,
 }

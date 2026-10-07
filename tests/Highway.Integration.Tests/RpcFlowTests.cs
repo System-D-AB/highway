@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -11,7 +12,7 @@ namespace Highway.Integration.Tests;
 /// </summary>
 public class RpcFlowTests : IDisposable
 {
-    private readonly HighwayTestServer _server = new();
+    private readonly HighwayTestServer _server = new(o => o.RpcFailFast = false);
     private readonly ConnectionMultiplexer _redis;
     private readonly IDatabase _db;
 
@@ -44,7 +45,8 @@ public class RpcFlowTests : IDisposable
         var rows = (RedisResult[])result!;
         rows.Should().HaveCount(1);
         var row = (RedisResult[])rows[0]!;
-        row.Should().HaveCount(3);
+        row.Should().HaveCount(4, "an RPC row carries the request's remaining time (074)");
+        long.Parse((string)row[3]!).Should().BeInRange(1, 30_000, "a call without TIMEOUT gets the 30 s broker default");
         ((string)row[0]!).Should().NotBeNullOrEmpty("the lease token is the claim's handle");
         ((string)row[1]!).Should().Be("req-100");
         ((string)row[2]!).Should().Be("{\"amount\":99.99}");

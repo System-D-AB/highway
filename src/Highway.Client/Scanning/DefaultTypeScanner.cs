@@ -216,6 +216,10 @@ internal sealed class DefaultTypeScanner : ITypeScanner
             if (type.GetCustomAttribute<ServiceAttribute>() is not { } attribute)
                 continue;
 
+            // 074 (D7): a declared timeout that does not parse is a startup error, not a silent 30 s.
+            if (attribute.Timeout is { } declared && !Engine.ServiceTimeouts.TryParse(declared, out _))
+                throw new InvalidServiceTimeoutException(type, declared);
+
             var implementsIReturn = type.GetInterfaces()
                 .Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IReturn<>));
 
@@ -435,8 +439,7 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                 }
                 else if (requestContracts.TryGetValue(messageType, out var sName))
                 {
-                    targetKind = DeadLetterTargetKind.Service;
-                    targetName = sName;
+                    throw new RpcDeadLetterHandlerException(messageType, type, sName);   // 074 (D2)
                 }
                 else if (messageContracts.TryGetValue(messageType, out var cName))
                 {
@@ -453,8 +456,7 @@ internal sealed class DefaultTypeScanner : ITypeScanner
                 }
                 else if (services.FirstOrDefault(s => s.RequestType == messageType)?.Name is { } hostedService)
                 {
-                    targetKind = DeadLetterTargetKind.Service;
-                    targetName = hostedService;
+                    throw new RpcDeadLetterHandlerException(messageType, type, hostedService);   // 074 (D2)
                 }
                 else if (channels.FirstOrDefault(c => c.MessageType == messageType)?.Name is { } hostedChannel)
                 {

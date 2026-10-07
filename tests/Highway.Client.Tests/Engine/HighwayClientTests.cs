@@ -52,7 +52,7 @@ public class HighwayClientTests
         response.StatusCode.Should().Be(StatusCodes.Status404NotFound);
         response.Error!.Code.Should().Be("SERVICE_NOT_FOUND");
         await _connection.DidNotReceive().CallAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -70,7 +70,7 @@ public class HighwayClientTests
     public async Task ExecuteAsync_TransportFailureOnSend_Returns503Data_WithoutWaitingForTimeout()
     {
         _connection
-            .CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>())
             .Returns<Task>(_ => throw new HighwayTransportException("server rejected"));
 
         var response = await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
@@ -82,7 +82,7 @@ public class HighwayClientTests
     [Fact]
     public async Task ExecuteAsync_NoReply_Returns504Data()
     {
-        _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+        _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
         _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
@@ -95,21 +95,21 @@ public class HighwayClientTests
     [Fact]
     public async Task ExecuteAsync_SendsHwCallWithTheCatalogServiceName()
     {
-        _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+        _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
         _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
         await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 
         await _connection.Received(1).CallAsync(
-            "test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+            "test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task ExecuteAsync_ConcurrentCalls_UseDistinctRequestIds()
     {
         var ids = new System.Collections.Concurrent.ConcurrentBag<string>();
-        _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+        _connection.CallAsync("test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>())
             .Returns(ci => { ids.Add(ci.ArgAt<string>(1)); return Task.CompletedTask; });
         _connection.TakeReplyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns((byte[]?)null);
 
@@ -225,7 +225,7 @@ public class HighwayClientTests
         response.StatusCode.Should().Be(StatusCodes.Status404NotFound);
         response.Error!.Code.Should().Be("SERVICE_NOT_FOUND");
         await _connection.DidNotReceive().CallAsync(
-            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+            Arg.Any<string>(), Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -237,7 +237,7 @@ public class HighwayClientTests
         await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 
         await _connection.Received(1).CallAsync(
-            "test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+            "test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -252,7 +252,7 @@ public class HighwayClientTests
         await CreateClient().ExecuteAsync(new TestRequest { Input = "x" });
 
         await _connection.Received(1).CallAsync(
-            "test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+            "test.hello", Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<TimeSpan?>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

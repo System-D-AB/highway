@@ -80,8 +80,8 @@ public class RpcWorkerLoopTests : IDisposable
         var wake = new LoopWake();
         await RunOnePassAsync(CreateLoop(wake), wake);
 
-        await _connection.Received(1).ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
-        await _connection.Received(1).ReplyAsync("r2", Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+        await _connection.Received(1).ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
+        await _connection.Received(1).ReplyAsync("r2", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -94,8 +94,8 @@ public class RpcWorkerLoopTests : IDisposable
         var order = new List<string>();
         _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
             .Returns(W("r1", RequestEnvelope("a")), (ClaimedWork?)null);
-        _connection.ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
-            .Returns(_ => { lock (order) order.Add("REPLY"); return Task.CompletedTask; });
+        _connection.ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => { lock (order) order.Add("REPLY"); return Task.FromResult(true); });
         _connection.AckAsync("t-r1", Arg.Any<CancellationToken>())
             .Returns(_ => { lock (order) order.Add("ACK"); return Task.FromResult(true); });
 
@@ -111,8 +111,8 @@ public class RpcWorkerLoopTests : IDisposable
         byte[]? replyBytes = null;
         _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
             .Returns(W("bad", "not-json"u8.ToArray()), (ClaimedWork?)null);
-        _connection.ReplyAsync("bad", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
-            .Returns(ci => { replyBytes = ci.Arg<byte[]>(); return Task.CompletedTask; });
+        _connection.ReplyAsync("bad", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(ci => { replyBytes = ci.Arg<byte[]>(); return Task.FromResult(true); });
 
         var wake = new LoopWake();
         await RunOnePassAsync(CreateLoop(wake), wake);
@@ -131,8 +131,8 @@ public class RpcWorkerLoopTests : IDisposable
     {
         _connection.ClaimAsync(WorkKind.Service, "test.hello", "test-node", Arg.Any<CancellationToken>())
             .Returns(W("r1", RequestEnvelope("a")), (ClaimedWork?)null);
-        _connection.ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
-            .Returns<Task>(_ => throw new HighwayTransportException("permanent"));
+        _connection.ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns<Task<bool>>(_ => throw new HighwayTransportException("permanent"));
 
         var wake = new LoopWake();
         await RunOnePassAsync(CreateLoop(wake), wake);
@@ -215,7 +215,7 @@ public class RpcWorkerLoopTests : IDisposable
         await stop.CancelAsync();
         await run;
 
-        await _connection.Received(1).ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+        await _connection.Received(1).ReplyAsync("r1", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>());
         await _connection.Received(1).AckAsync("t-r1", Arg.Any<CancellationToken>());
     }
 }

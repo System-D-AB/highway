@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using System.Collections.Concurrent;
 using FluentAssertions;
 using Highway.Abstractions;
@@ -54,7 +55,7 @@ public class RpcOnceAfterOutageTests : IAsyncLifetime
     [Fact]
     public async Task ACallReSentManyTimesDuringAnOutage_RunsOnce_WhenTheWorkerReturns()
     {
-        _server = new HighwayTestServer();
+        _server = new HighwayTestServer(o => o.RpcFailFast = false);
         var key = "cart-" + Guid.NewGuid().ToString("N");
         var db = (await ConnectionMultiplexer.ConnectAsync(_server.ConnectionString)).GetDatabase();
         var payload = Envelope(key, DateTime.UtcNow);

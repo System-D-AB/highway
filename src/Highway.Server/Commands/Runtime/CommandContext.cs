@@ -81,6 +81,9 @@ internal sealed class CommandContext
     /// <inheritdoc cref="Calls"/>
     public RecentIds<long>? Publishes { get; }
 
+    /// <summary>The broker's rate-limited log of RPC requests that ended unanswered (074). One per broker.</summary>
+    public RpcOutcomeLog RpcLog { get; }
+
     public CommandContext(
         IHighwayStore store,
         StripedLock locks,
@@ -95,7 +98,8 @@ internal sealed class CommandContext
         Resp.InstanceRegistry? instances = null,
         RecentIds<byte>? calls = null,
         RecentIds<byte>? sends = null,
-        RecentIds<long>? publishes = null)
+        RecentIds<long>? publishes = null,
+        RpcOutcomeLog? rpcLog = null)
     {
         Store = store;
         Locks = locks;
@@ -111,5 +115,6 @@ internal sealed class CommandContext
         Calls = calls;
         Sends = sends;
         Publishes = publishes;
+        RpcLog = rpcLog ?? new RpcOutcomeLog();
     }
 }

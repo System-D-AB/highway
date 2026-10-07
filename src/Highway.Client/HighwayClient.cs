@@ -41,7 +41,18 @@ internal sealed class HighwayClient : IHighwayClient
         _logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger<HighwayClient>();
     }
 
-    public async Task<TResponse> ExecuteAsync<TResponse>(IReturn<TResponse> request, CancellationToken ct = default)
+    public Task<TResponse> ExecuteAsync<TResponse>(IReturn<TResponse> request, CancellationToken ct = default)
+        where TResponse : Output
+        => ExecuteCoreAsync(request, perCallTimeout: null, ct);
+
+    public Task<TResponse> ExecuteAsync<TResponse>(IReturn<TResponse> request, TimeSpan timeout, CancellationToken ct = default)
+        where TResponse : Output
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        return ExecuteCoreAsync(request, timeout, ct);
+    }
+
+    private async Task<TResponse> ExecuteCoreAsync<TResponse>(IReturn<TResponse> request, TimeSpan? perCallTimeout, CancellationToken ct)
         where TResponse : Output
     {
         var responseType = typeof(TResponse);
@@ -86,6 +97,28 @@ internal sealed class HighwayClient : IHighwayClient
             }
         }
 
+        // 074: how long this caller waits — the call's own timeout, else the contract's, else CallTimeout — capped by
+        // the time left on the call whose handler is making this one (D6): an inner call never outlives its caller.
+        // D1: the timeout goes on the wire only when this call or its contract sets one (or a handler's deadline caps
+        // it); otherwise the broker's DefaultRpcTimeout applies — the same 30 s as CallTimeout by default.
+        var declared = perCallTimeout ?? ServiceTimeouts.For(request.GetType());
+        var timeout = declared ?? _options.CallTimeout;
+        var sendTimeout = declared is not null;
+        // Never wait longer than the broker will run the request (it clamps to its MaxRpcTimeout, learned at start).
+        if (timeout > _options.LearnedMaxRpcTimeout) { timeout = _options.LearnedMaxRpcTimeout; sendTimeout = true; }
+        if (AmbientDeadline.Remaining is { } left)
+        {
+            if (left <= TimeSpan.Zero)
+            {
+                return Cast<TResponse>(PendingCallRegistry.BuildErrorResponse(
+                    responseType,
+                    StatusCodes.Status504GatewayTimeout,
+                    "DEADLINE_PASSED",
+                    $"The call to '{serviceName}' was not made: the request this handler is serving has already reached its deadline."));
+            }
+            if (left < timeout) { timeout = left; sendTimeout = true; }
+        }
+
         var requestIdForSpan = Guid.NewGuid().ToString("N");
 
         // Span first, so the traceparent it establishes rides the envelope and
@@ -120,13 +153,33 @@ internal sealed class HighwayClient : IHighwayClient
         }
 
         var requestId = requestIdForSpan;
-        var responseTask = pending.Register(requestId, responseType, _options.CallTimeout, ct,
+        var responseTask = pending.Register(requestId, responseType, timeout, ct,
             serviceName, envelope);   // replay data: re-driven same-id after a failover (042-1b)
 
         var rpcStart = System.Diagnostics.Stopwatch.GetTimestamp();   // 051 R2: caller-side RPC latency
         try
         {
-            await connection.CallAsync(serviceName, requestId, envelope, ct).ConfigureAwait(false);
+            try
+            {
+                await connection.CallAsync(serviceName, requestId, envelope, sendTimeout ? timeout : null, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                pending.MarkSent(requestId);   // 074: a withdrawal waits for this send
+            }
+        }
+        catch (HighwayTransportException ex) when (ex.Message.Contains("HW_NO_WORKERS", StringComparison.Ordinal))
+        {
+            // 074 (D4): no node has ever served this service — a typo or a service not deployed. Answered at once,
+            // so the caller can fall back instead of waiting out its timeout.
+            var failure = PendingCallRegistry.BuildErrorResponse(
+                responseType,
+                StatusCodes.Status503ServiceUnavailable,
+                "NO_WORKERS",
+                $"No node has ever served '{serviceName}'.");
+            pending.TryFail(requestId, failure);
+            HighwayClientMetrics.RecordRpc(ok: false, System.Diagnostics.Stopwatch.GetElapsedTime(rpcStart).TotalSeconds);
+            return Cast<TResponse>(failure);
         }
         catch (HighwayTransportException ex)
         {

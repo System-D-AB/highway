@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -16,8 +17,8 @@ public class ServerIsolationTests
     [Fact]
     public void TwoTestServers_Isolated()
     {
-        using var server1 = new HighwayTestServer();
-        using var server2 = new HighwayTestServer();
+        using var server1 = new HighwayTestServer(o => o.RpcFailFast = false);
+        using var server2 = new HighwayTestServer(o => o.RpcFailFast = false);
 
         using var redis1 = ConnectionMultiplexer.Connect(server1.ConnectionString);
         using var redis2 = ConnectionMultiplexer.Connect(server2.ConnectionString);

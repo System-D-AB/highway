@@ -125,16 +125,26 @@ internal sealed class HwStatsCommand : HighwayCommand
     private static List<(string, string)> NamedStats(CommandContext ctx, IStoreSnapshot snap, string name)
     {
         var serviceHosts = ctx.Store.SetMembers(snap, HighwayKeyspace.SetPrefix(HighwayNames.RegistrationService(name)));
-        if (serviceHosts.Count > 0)
+        // 074: a service is a service once it has been served, even with every host gone — its queued requests are
+        // still waiting on their deadlines, and that is exactly when an operator looks.
+        if (serviceHosts.Count > 0 || RegistrySupport.HasBeenServed(ctx.Store, name))
         {
             var c = Counters(ctx, BoxKeys.Kind.Service, name);
+            var (expired, failedFinal, cancelled) = ctx.RpcLog.Totals(name);
+            var (oldestAgeMs, oldestRemainingMs) = OldestRequest(ctx, name);
             return
             [
                 ("kind", "service"),
                 ("queueDepth", c.Ready.ToString()),
                 ("hosts", serviceHosts.Count.ToString()),
                 ("inFlight", c.InFlight.ToString()),
-                ("deadLettered", c.Dead.ToString()),
+                // 074: how long the oldest queued request has waited, and how long its caller still will (0 when none).
+                ("oldestAgeMs", oldestAgeMs.ToString()),
+                ("oldestRemainingMs", oldestRemainingMs.ToString()),
+                // 074: requests that ended without an answer, since this broker process started. RPC has no dead letters.
+                ("expired", expired.ToString()),
+                ("failedFinal", failedFinal.ToString()),
+                ("cancelled", cancelled.ToString()),
             ];
         }
 
@@ -193,10 +203,28 @@ internal sealed class HwStatsCommand : HighwayCommand
             ("callDuplicates", (ctx.Calls?.Duplicates ?? 0).ToString()),
             ("sendDuplicates", (ctx.Sends?.Duplicates ?? 0).ToString()),
             ("publishDuplicates", (ctx.Publishes?.Duplicates ?? 0).ToString()),
+            // 074: the deadline a call without TIMEOUT gets, and the longest any may ask for — a client compares its
+            // CallTimeout with the first and says so once if they differ.
+            ("defaultRpcTimeoutMs", ((long)ctx.Options.DefaultRpcTimeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            ("maxRpcTimeoutMs", ((long)ctx.Options.MaxRpcTimeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture)),
             // 057-b: advertise the server's configured message-size limit so a client learns it at
             // connect and never falsely rejects below a raised server limit.
             ("maxPayloadBytes", ctx.Options.MaxPayloadBytes.ToString(System.Globalization.CultureInfo.InvariantCulture)),
         ];
+    }
+
+    /// <summary>The oldest queued request's age and remaining time, in milliseconds (074); zeros when none waits.</summary>
+    private static (long AgeMs, long RemainingMs) OldestRequest(CommandContext ctx, string service)
+    {
+        if (BoxCommandSupport.Find(ctx, BoxKeys.Kind.Service, service) is not { } box) return default;
+        using var wb = BoxCommandSupport.Open(ctx, box, BoxKeys.Kind.Service);
+        foreach (var entry in wb.ReadyEntries(1))
+        {
+            if (!Envelope.TryGetDeadline(entry, out var accepted, out var deadline)) break;
+            return (Math.Max(0, (ctx.NowTicks - accepted) / TimeSpan.TicksPerMillisecond),
+                    RpcDeadlines.RemainingMs(deadline, ctx.NowTicks));
+        }
+        return default;
     }
 
     /// <summary>Collects service and channel names from a stored catalog, ignoring malformed content (the Garnet command's reader, verbatim in behavior).</summary>

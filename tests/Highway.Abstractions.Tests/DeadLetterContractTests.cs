@@ -34,9 +34,6 @@ public class DeadLetterContractTests
         var queue = new DeadLetterTarget(DeadLetterTargetKind.Queue, "orders");
         queue.ToString().Should().Be("Q:orders");
 
-        var svc = new DeadLetterTarget(DeadLetterTargetKind.Service, "billing.charge");
-        svc.ToString().Should().Be("SVC:billing.charge");
-
         var grp = new DeadLetterTarget(DeadLetterTargetKind.Group, "events", "billing");
         grp.ToString().Should().Be("Q:events@billing");
     }

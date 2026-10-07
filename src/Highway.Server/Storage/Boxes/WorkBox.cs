@@ -195,7 +195,38 @@ internal sealed class WorkBox : IDisposable
         _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.Ready, seq), entry);
         Add(CReady, 1);
         if (TracksBytes) Add(CBytes, entry.Length);
+        if (IsServiceBox)
+        {
+            // 074: a queued request can be withdrawn by id (HW.CANCEL) — the index says where it waits.
+            Decode(entry, out var id, out _, out _);
+            _store.Set(Batch, BoxKeys.Name(Id, BoxKeys.RpcIndex, Encoding.UTF8.GetString(id)), BoxKeys.I64((long)seq));
+        }
         return seq;
+    }
+
+    /// <summary>Drops the id index entry of a ready request leaving the ready space, if it still points at it (074).</summary>
+    private void UnindexRpc(string requestId, ulong seq)
+    {
+        var key = BoxKeys.Name(Id, BoxKeys.RpcIndex, requestId);
+        if ((ulong)BoxKeys.ReadI64(_store.Read(Batch, key)) == seq) _store.Delete(Batch, key);
+    }
+
+    /// <summary>
+    /// Withdraws a request that is still waiting in the ready space (074, <c>HW.CANCEL</c>). False when it was
+    /// already claimed, finished, unknown — or waiting out a retry backoff, which its deadline ends anyway.
+    /// </summary>
+    public bool CancelQueued(string requestId)
+    {
+        var indexKey = BoxKeys.Name(Id, BoxKeys.RpcIndex, requestId);
+        if (_store.Read(Batch, indexKey) is not { } raw) return false;
+        var seq = (ulong)BoxKeys.ReadI64(raw);
+        _store.Delete(Batch, indexKey);
+        var key = BoxKeys.Seq(Id, BoxKeys.Ready, seq);
+        if (_store.Read(Batch, key) is not { } entry) return false;
+        _store.Delete(Batch, key);
+        Add(CReady, -1);
+        if (TracksBytes) Add(CBytes, -entry.Length);
+        return true;
     }
 
     /// <summary>Holds a queue entry until <paramref name="dueTicks"/> (promoted by <see cref="PromoteDue"/>).</summary>
@@ -234,40 +265,95 @@ internal sealed class WorkBox : IDisposable
     // Claim / settle
     // =====================================================================================
 
-    internal readonly record struct Claimed(ulong Token, byte[] Id, byte[] Payload, ushort Attempts);
+    /// <summary>A claimed entry. <paramref name="DeadlineTicks"/> and <paramref name="AcceptedTicks"/> are set for an RPC request (074).</summary>
+    internal readonly record struct Claimed(ulong Token, byte[] Id, byte[] Payload, ushort Attempts,
+        long? DeadlineTicks = null, long AcceptedTicks = 0);
+
+    /// <summary>
+    /// How a claim treats RPC deadlines (074): a request whose deadline has passed, or with less than
+    /// <paramref name="MinRemainingTicks"/> left, is removed instead of handed out — at most
+    /// <paramref name="MaxExpired"/> per claim — and a claim's lease ends at <c>min(now + lease, deadline + grace)</c>.
+    /// </summary>
+    internal readonly record struct DeadlinePolicy(long LeaseTicks, long GraceTicks, long MinRemainingTicks, int MaxExpired);
+
+    /// <summary>Request ids the last <see cref="Claim"/> removed because their deadline had passed or was too near (074).</summary>
+    public List<string> ExpiredOnClaim { get; } = [];
+
+    /// <summary>True when the last <see cref="Claim"/> stopped at <see cref="DeadlinePolicy.MaxExpired"/> with entries left (074).</summary>
+    public bool ExpiryBoundReached { get; private set; }
+
+    /// <summary>
+    /// The tick a claim's lease is indexed at (074): the sweep expires a claim indexed at <c>t</c> at <c>t + lease</c>,
+    /// so an RPC request is anchored to expire at <c>deadline + grace</c> when that is sooner — a worker that dies holding
+    /// a 30-second call does not hold it for a 5-minute lease.
+    /// </summary>
+    public static long LeaseAnchor(byte[] entry, long nowTicks, long leaseTicks, long graceTicks)
+        => leaseTicks > 0 && Envelope.TryGetDeadline(entry, out var deadline)
+            ? Math.Min(nowTicks, deadline + graceTicks - leaseTicks)
+            : nowTicks;
 
     /// <summary>Moves up to <paramref name="max"/> ready entries in-flight for <paramref name="node"/>.</summary>
-    public List<Claimed> Claim(string node, long nowTicks, int max, string storageName)
+    public List<Claimed> Claim(string node, long nowTicks, int max, string storageName, DeadlinePolicy? deadlines = null)
     {
         var claimed = new List<Claimed>(Math.Min(max, 16));
+        ExpiredOnClaim.Clear();
+        ExpiryBoundReached = false;
         if (max <= 0) return claimed;
 
         var head = (ulong)Get(CHead);
-        var ready = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Ready), BoxKeys.Seq(Id, BoxKeys.Ready, head), max);
-        foreach (var (key, entry) in ready)
+        var moved = false;
+        while (claimed.Count < max && !ExpiryBoundReached)
         {
-            if (Envelope.IsLegacyEntry(entry)) throw new StorageFormatException(storageName);
-            var seq = BoxKeys.TrailingSeq(key);
-            _store.Delete(Batch, key);
-            head = seq + 1;
-            Add(CReady, -1);
-            if (TracksBytes) Add(CBytes, -entry.Length);
+            var ready = _store.Scan(Batch, BoxKeys.Space(Id, BoxKeys.Ready), BoxKeys.Seq(Id, BoxKeys.Ready, head), max - claimed.Count);
+            if (ready.Count == 0) break;
+            foreach (var (key, entry) in ready)
+            {
+                if (Envelope.IsLegacyEntry(entry)) throw new StorageFormatException(storageName);
+                var seq = BoxKeys.TrailingSeq(key);
+                _store.Delete(Batch, key);
+                head = seq + 1;
+                moved = true;
+                Add(CReady, -1);
+                if (TracksBytes) Add(CBytes, -entry.Length);
+                if (IsServiceBox)
+                {
+                    Decode(entry, out var indexedId, out _, out _);
+                    UnindexRpc(Encoding.UTF8.GetString(indexedId), seq);
+                }
 
-            _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, seq), InFlightRecord.Encode(nowTicks, node, entry));
-            _store.Set(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, nowTicks, seq), []);
-            _store.Set(Batch, BoxKeys.NameSeq(Id, BoxKeys.NodeIndex, node, seq), []);
-            _rt.Lower(Id, BoxKeys.Lease, nowTicks);
-            Add(CInFlight, 1);
+                long? deadline = null;
+                long accepted = 0;
+                if (deadlines is { } policy && Envelope.TryGetDeadline(entry, out accepted, out var d))
+                {
+                    if (d <= nowTicks || d - nowTicks < policy.MinRemainingTicks)
+                    {
+                        // 074: its caller has gone (or will have before the work could finish) — never run it.
+                        Decode(entry, out var expiredId, out _, out _);
+                        ExpiredOnClaim.Add(Encoding.UTF8.GetString(expiredId));
+                        if (ExpiredOnClaim.Count >= policy.MaxExpired) { ExpiryBoundReached = true; break; }
+                        continue;
+                    }
+                    deadline = d;
+                }
 
-            Decode(entry, out var id, out var payload, out var attempts);
-            claimed.Add(new Claimed(seq, id.ToArray(), payload.ToArray(), attempts));
+                var anchor = deadlines is { } p ? LeaseAnchor(entry, nowTicks, p.LeaseTicks, p.GraceTicks) : nowTicks;
+                _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, seq), InFlightRecord.Encode(anchor, node, entry));
+                _store.Set(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, anchor, seq), []);
+                _store.Set(Batch, BoxKeys.NameSeq(Id, BoxKeys.NodeIndex, node, seq), []);
+                _rt.Lower(Id, BoxKeys.Lease, anchor);
+                Add(CInFlight, 1);
+
+                Decode(entry, out var id, out var payload, out var attempts);
+                claimed.Add(new Claimed(seq, id.ToArray(), payload.ToArray(), attempts, deadline, accepted));
+            }
+            if (deadlines is null) break;   // without deadlines nothing is skipped: one page was the whole answer
         }
+
+        if (moved)
+            _store.Set(Batch, BoxKeys.Counter(Id, CHead), BoxKeys.I64((long)head));
 
         if (claimed.Count > 0)
-        {
-            _store.Set(Batch, BoxKeys.Counter(Id, CHead), BoxKeys.I64((long)head));
             _store.Set(Batch, BoxKeys.Name(Id, BoxKeys.Workers, node), BoxKeys.I64(nowTicks));
-        }
         return claimed;
     }
 
@@ -280,13 +366,15 @@ internal sealed class WorkBox : IDisposable
     }
 
     /// <summary>"Still working": the claim's lease restarts now. False when not held.</summary>
-    public bool Touch(ulong token, long nowTicks)
+    public bool Touch(ulong token, long nowTicks, DeadlinePolicy? deadlines = null)
     {
         if (ReadInFlight(token) is not { } rec) return false;
+        // 074: renewing an RPC claim never carries its lease past deadline + grace — that would only delay the sweep.
+        var anchor = deadlines is { } p ? LeaseAnchor(rec.Entry, nowTicks, p.LeaseTicks, p.GraceTicks) : nowTicks;
         _store.Delete(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, rec.ClaimTicks, token));
-        _store.Set(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, nowTicks, token), []);
-        _rt.Lower(Id, BoxKeys.Lease, nowTicks);
-        _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, token), InFlightRecord.Encode(nowTicks, rec.Node, rec.Entry));
+        _store.Set(Batch, BoxKeys.TicksSeq(Id, BoxKeys.Lease, anchor, token), []);
+        _rt.Lower(Id, BoxKeys.Lease, anchor);
+        _store.Set(Batch, BoxKeys.Seq(Id, BoxKeys.InFlight, token), InFlightRecord.Encode(anchor, rec.Node, rec.Entry));
         return true;
     }
 
@@ -322,6 +410,34 @@ internal sealed class WorkBox : IDisposable
     internal readonly record struct DeadLettered(string Id, ushort Attempts, ulong Seq, byte[] Record);
 
     /// <summary>
+    /// An RPC request recovery removed instead of returning (074): <paramref name="Expired"/> when its deadline had
+    /// passed (or a backoff would land past it), otherwise it failed its last attempt with time left —
+    /// <paramref name="Failure"/> is the reported failure, if any. RPC requests are never dead-lettered.
+    /// </summary>
+    internal readonly record struct RpcEnded(string Id, bool Expired, ushort Attempts, string? Failure);
+
+    /// <summary>RPC requests this box's recovery removed since it was opened (074).</summary>
+    public List<RpcEnded> RpcEndings { get; } = [];
+
+    /// <summary>A service box: neither byte-tracked (queues and groups) nor a dead-letter feed (074).</summary>
+    private bool IsServiceBox => !TracksBytes && !RawEntries;
+
+    /// <summary>The deadline of an RPC request in a service box (074); none for any other entry.</summary>
+    private bool TryGetRpcDeadline(byte[] entry, out long deadline)
+    {
+        deadline = 0;
+        return IsServiceBox && Envelope.TryGetDeadline(entry, out deadline);
+    }
+
+    private static string? FailureText(byte[] entry)
+    {
+        if (!Envelope.TryGetFailureBlock(entry, out var block, out _)) return null;
+        Envelope.DecodeFailureBlock(block, out var type, out _, out var detail);
+        var text = Encoding.UTF8.GetString(type) + ": " + Encoding.UTF8.GetString(detail);
+        return text.Length > 300 ? text[..300] + "…" : text;
+    }
+
+    /// <summary>
     /// Recovers claims whose lease started before <paramref name="leaseExpiry"/>: each returns to ready
     /// with its attempt count incremented, or is dead-lettered past <paramref name="maxAttempts"/>. Reads
     /// only the lease index from its floor up to the expiry — never a live claim.
@@ -355,7 +471,7 @@ internal sealed class WorkBox : IDisposable
     /// delivery was made and lost with the node), never dead-lettering — dead-node recovery and departure,
     /// exactly as <c>RequeueNodeWork</c> did. Returns how many.
     /// </summary>
-    public int RequeueNode(string node)
+    public int RequeueNode(string node, long nowTicks)
     {
         var prefix = BoxKeys.Name(Id, BoxKeys.NodeIndex, node);
         var count = 0;
@@ -368,6 +484,12 @@ internal sealed class WorkBox : IDisposable
                 if (ReadInFlight(seq) is not { } rec) { _store.Delete(Batch, key); continue; }
                 RemoveInFlight(seq, rec);
                 Decode(rec.Entry, out var id, out var payload, out var attempts);
+                if (TryGetRpcDeadline(rec.Entry, out var deadline) && nowTicks >= deadline)
+                {
+                    // 074: its caller has gone — a request is returned only while someone still waits for it.
+                    RpcEndings.Add(new RpcEnded(Encoding.UTF8.GetString(id), true, Envelope.NextAttempt(attempts), null));
+                    continue;
+                }
                 Enqueue(Carry(rec.Entry,
                     Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), Envelope.NextAttempt(attempts))));
                 count++;
@@ -382,10 +504,24 @@ internal sealed class WorkBox : IDisposable
     {
         Decode(entry, out var id, out var payload, out var attempts);
         var next = Envelope.NextAttempt(attempts);
+        var isRpc = TryGetRpcDeadline(entry, out var deadline);
+        if (isRpc && nowTicks >= deadline)
+        {
+            // 074: expired — never redelivered for a caller that has gone.
+            RpcEndings.Add(new RpcEnded(Encoding.UTF8.GetString(id), true, next, null));
+            return;
+        }
         var rebuilt = Carry(entry, Envelope.EncodeRpcEntry(id.ToArray(), payload.ToArray(), next));
         var effectiveMax = policy.MaxAttempts > 0 ? policy.MaxAttempts : maxAttempts;
         if (effectiveMax > 0 && next > effectiveMax)
         {
+            if (isRpc)
+            {
+                // 074 (D2): RPC has no dead letters — a request that failed its last attempt is removed, counted and
+                // recorded with its failure, never parked for later.
+                RpcEndings.Add(new RpcEnded(Encoding.UTF8.GetString(id), false, next, FailureText(entry)));
+                return;
+            }
             var record = DeadLetter.Encode(nowTicks, next, DeadLetter.MaxAttempts, rebuilt);
             var deadSeq = PushDead(record, maxDeadEntries);
             outcomes.Add(new DeadLettered(Encoding.UTF8.GetString(id), next, deadSeq, record));
@@ -396,6 +532,11 @@ internal sealed class WorkBox : IDisposable
         {
             var messageId = Encoding.UTF8.GetString(id);
             var delayTicks = policy.CalculateBackoffTicks(messageId, next);
+            if (isRpc && nowTicks + delayTicks >= deadline)
+            {
+                RpcEndings.Add(new RpcEnded(messageId, true, next, null));   // 074: the retry would come too late
+                return;
+            }
             if (delayTicks > 0)
             {
                 EnqueueDelayed(rebuilt, nowTicks + delayTicks);

@@ -54,4 +54,22 @@ internal static class HighwayClientMetrics
     /// <summary>A hung handler was abandoned after MaxProcessingTime + AbandonGrace (074 Part B).</summary>
     public static void RecordHandlerAbandoned(string kind)
         => HandlersAbandoned.Add(1, new KeyValuePair<string, object?>("kind", kind));
+
+    private static readonly Counter<long> RpcDeadlines =
+        Meter.CreateCounter<long>("highway.client.rpc.deadline_exceeded", "{request}", "RPC handlers stopped at their caller's deadline (074).");
+
+    private static readonly Counter<long> RpcCancels =
+        Meter.CreateCounter<long>("highway.client.rpc.cancels", "{request}", "HW.CANCEL sent for calls their caller gave up on, tagged by result (withdrawn, not_waiting, failed) (074).");
+
+    private static readonly Counter<long> RpcLateReplies =
+        Meter.CreateCounter<long>("highway.client.rpc.replies.late", "{reply}", "Replies the broker discarded because they came after the request's deadline (074).");
+
+    /// <summary>An RPC handler was stopped at its caller's deadline (074).</summary>
+    public static void RecordRpcDeadlineExceeded() => RpcDeadlines.Add(1);
+
+    /// <summary>The result of an HW.CANCEL for a call its caller gave up on (074).</summary>
+    public static void RecordRpcCancel(string result) => RpcCancels.Add(1, new KeyValuePair<string, object?>("result", result));
+
+    /// <summary>A reply arrived after its request's deadline and was discarded (074).</summary>
+    public static void RecordRpcLateReply() => RpcLateReplies.Add(1);
 }

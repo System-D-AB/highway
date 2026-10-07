@@ -1,3 +1,5 @@
+// 074 (D2): RPC has no dead letters — these dead-letter mechanics tests drive a queue (HW.SEND / HW.CLAIM Q),
+// where dead letters exist. They were written against a service before 074.
 using System.Text;
 using FluentAssertions;
 using Highway.Server;
@@ -20,13 +22,13 @@ namespace Highway.Integration.Tests;
 /// </summary>
 public class FailureContextTests : IDisposable
 {
-    private const string Service = "fc.svc";
+    private const string Queue = "fc.q";
 
     private readonly HighwayTestServer _server = new(o =>
     {
         o.Lease = TimeSpan.FromMilliseconds(50);
         o.MaxDeliveryAttempts = 2;
-    });
+            });
 
     public void Dispose() => _server.Dispose();
 
@@ -36,7 +38,7 @@ public class FailureContextTests : IDisposable
     /// <summary>Reads one dead letter as a field/value map — the shape HW.DLQ PEEK returns.</summary>
     private static async Task<Dictionary<string, string>> PeekOneAsync(IDatabase db, string service)
     {
-        var result = (RedisResult[])(await db.ExecuteAsync("HW.DLQ", "PEEK", "SVC", service))!;
+        var result = (RedisResult[])(await db.ExecuteAsync("HW.DLQ", "PEEK", "Q", service))!;
         result.Should().HaveCount(1, "exactly one message should have dead-lettered");
 
         var flat = (RedisResult[])result[0]!;
@@ -47,7 +49,7 @@ public class FailureContextTests : IDisposable
     }
 
     /// <summary>Claims the next due request for <paramref name="node"/> (null when nothing is due).</summary>
-    private static Task<Wire5.Claim?> ClaimAsync(IDatabase db, string node) => db.ClaimSvcAsync(Service, node);
+    private static Task<Wire5.Claim?> ClaimAsync(IDatabase db, string node) => db.ClaimQAsync(Queue, node);
 
     /// <summary>Claims <paramref name="requestId"/> for <paramref name="node"/> and reports a failure against that claim.</summary>
     private static async Task ClaimAndFailAsync(IDatabase db, string node, string requestId, string type, string detail)
@@ -67,7 +69,7 @@ public class FailureContextTests : IDisposable
     public async Task FirstType_SurvivesRequeue_AcrossTwoWorkers()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.CALL", Service, "req-1",
+        await db.ExecuteAsync("HW.SEND", Queue, "req-1",
             Encoding.UTF8.GetBytes("""{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{}}"""));
 
         // node-a claims it and reports a timeout, then dies without acknowledging.
@@ -89,7 +91,7 @@ public class FailureContextTests : IDisposable
         }
         await ClaimAsync(db, "node-b");
 
-        var dead = await PeekOneAsync(db, Service);
+        var dead = await PeekOneAsync(db, Queue);
 
         dead.Should().ContainKey("failureType").WhoseValue.Should().Be("System.InvalidOperationException",
             "the LAST failure is what the message died of");
@@ -104,7 +106,7 @@ public class FailureContextTests : IDisposable
     public async Task AFailureReportedOnce_SurvivesToTheDeadLetterWithNoFirstType()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.CALL", Service, "req-2",
+        await db.ExecuteAsync("HW.SEND", Queue, "req-2",
             Encoding.UTF8.GetBytes("""{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{}}"""));
 
         await ClaimAndFailAsync(db, "node-a", "req-2",
@@ -116,7 +118,7 @@ public class FailureContextTests : IDisposable
             await ClaimAsync(db, "node-a");
         }
 
-        var dead = await PeekOneAsync(db, Service);
+        var dead = await PeekOneAsync(db, Queue);
 
         dead["failureType"].Should().Be("System.TimeoutException");
         dead.Should().NotContainKey("failureFirstType",
@@ -132,7 +134,7 @@ public class FailureContextTests : IDisposable
     public async Task ADeadLetterWithNoReportedFailure_SaysSoExplicitly()
     {
         var db = await ConnectAsync();
-        await db.ExecuteAsync("HW.CALL", Service, "req-3",
+        await db.ExecuteAsync("HW.SEND", Queue, "req-3",
             Encoding.UTF8.GetBytes("""{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{}}"""));
 
         for (var i = 0; i < 6; i++)
@@ -142,7 +144,7 @@ public class FailureContextTests : IDisposable
         }
         await ClaimAsync(db, "node-a");
 
-        var dead = await PeekOneAsync(db, Service);
+        var dead = await PeekOneAsync(db, Queue);
 
         dead.Should().NotContainKey("failureType");
         dead.Should().ContainKey("failure");
@@ -158,7 +160,7 @@ public class FailureContextTests : IDisposable
     {
         var db = await ConnectAsync();
         const string body = """{"v":1,"src":"t","ts":"2026-08-08T00:00:00Z","body":{"Amount":42}}""";
-        await db.ExecuteAsync("HW.CALL", Service, "req-4", Encoding.UTF8.GetBytes(body));
+        await db.ExecuteAsync("HW.SEND", Queue, "req-4", Encoding.UTF8.GetBytes(body));
 
         await ClaimAndFailAsync(db, "node-a", "req-4", "SomeException", "detail");
 
@@ -168,9 +170,9 @@ public class FailureContextTests : IDisposable
             await ClaimAsync(db, "node-a");
         }
 
-        var dead = await PeekOneAsync(db, Service);
+        var dead = await PeekOneAsync(db, Queue);
 
         dead["payload"].Should().Be(body, "the trailer must never bleed into the payload");
-        dead["requestId"].Should().Be("req-4");
+        dead["messageId"].Should().Be("req-4");
     }
 }

@@ -272,8 +272,8 @@ public class HungHandlerTests : IDisposable
         HangableService.Handler = async (r, ct) => { await Task.Delay(TimeSpan.FromSeconds(30), ct); return new TestResponse(); };
         byte[]? reply = null;
         _connection.ClaimAsync(WorkKind.Service, "test.service", "test-node", Arg.Any<CancellationToken>()).Returns(Req("r-1", "x"), None);
-        _connection.ReplyAsync("r-1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
-            .Returns(ci => { reply = ci.Arg<byte[]>(); return Task.CompletedTask; });
+        _connection.ReplyAsync("r-1", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(ci => { reply = ci.Arg<byte[]>(); return Task.FromResult(true); });
         var wake = new LoopWake();
         var loop = new RpcWorkerLoop(_service, _connection, _executor, "test-node", 1, wake, NullLogger.Instance,
             TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(60), TimeSpan.FromSeconds(5));
@@ -300,8 +300,8 @@ public class HungHandlerTests : IDisposable
         };
         byte[]? reply = null;
         _connection.ClaimAsync(WorkKind.Service, "test.service", "test-node", Arg.Any<CancellationToken>()).Returns(Req("r-1", "x"), None);
-        _connection.ReplyAsync("r-1", Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
-            .Returns(ci => { reply = ci.Arg<byte[]>(); return Task.CompletedTask; });
+        _connection.ReplyAsync("r-1", Arg.Any<byte[]>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(ci => { reply = ci.Arg<byte[]>(); return Task.FromResult(true); });
         var wake = new LoopWake();
         var loop = new RpcWorkerLoop(_service, _connection, _executor, "test-node", 1, wake, NullLogger.Instance,
             TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(60), TimeSpan.FromSeconds(5));
@@ -500,7 +500,7 @@ public class HungHandlerTests : IDisposable
             stored.Should().NotBeNull("the redelivery replies with this answer instead of waiting out an in-progress marker");
             ((TestResponse)HighwayJson.DeserializeBody(HighwayJson.DecodeEnvelope(stored!), typeof(TestResponse))!).Echo.Should().Be("late");
             Count(nameof(IHighwayConnection.ReplyAsync)).Should().Be(0);
-            Acked("ir-1").Should().BeFalse();
+            Acked("ir-1").Should().BeTrue("074 (D3): an abandoned request is acknowledged when abandoned — its caller is not waiting for a second run");
         }
         finally
         {
@@ -684,5 +684,58 @@ public class HungHandlerTests : IDisposable
 
         options.MaxAbandonedHandlers = 0;
         FluentActions.Invoking(() => HighwayOptionsValidator.Validate(options)).Should().NotThrow();
+    }
+
+    // ---- 074 Part A: the caller's deadline ------------------------------------------------------------
+
+    [Fact]
+    public async Task RpcHandler_StoppedAtItsCallersDeadline_IsAcknowledged_WithoutAReply()
+    {
+        // MaxProcessingTime is 30 s here; the caller's remaining time (300 ms) is the sooner limit. Stopping there is
+        // not a failure and not a 504 to send: the caller has stopped waiting, so the claim is simply settled.
+        HangableService.Handler = async (r, ct) => { await Task.Delay(TimeSpan.FromSeconds(30), ct); return new TestResponse(); };
+        var work = new ClaimedWork("tok-r-1", "r-1", HighwayJson.EncodeEnvelope("caller", new TestRequest { Text = "x" }), TimeSpan.FromMilliseconds(300));
+        _connection.ClaimAsync(WorkKind.Service, "test.service", "test-node", Arg.Any<CancellationToken>()).Returns(work, None);
+        var wake = new LoopWake();
+        var loop = new RpcWorkerLoop(_service, _connection, _executor, "test-node", 1, wake, NullLogger.Instance,
+            TimeSpan.FromMilliseconds(20), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(5));
+
+        using var stop = new CancellationTokenSource();
+        var run = loop.RunAsync(TimeSpan.FromMilliseconds(20), stop.Token, CancellationToken.None);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        wake.Signal();
+        (await Eventually(() => Acked("r-1"), TimeSpan.FromSeconds(5))).Should().BeTrue();
+        await stop.CancelAsync();
+        await run;
+
+        started.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5), "cut at the 300 ms deadline, not the 30 s cap");
+        Count(nameof(IHighwayConnection.ReplyAsync)).Should().Be(0, "nobody is waiting for an answer");
+        Count(nameof(IHighwayConnection.FailAsync)).Should().Be(0, "stopping at the deadline is not a failure");
+    }
+
+    [Fact]
+    public async Task AnHandlerThatIgnoresItsDeadline_AndAnswersLate_IsAcknowledged_WithoutAReply()
+    {
+        // The window the review found: the handler ignores the 300 ms deadline but finishes before it is abandoned
+        // (AbandonGrace 5 s). Its answer is wanted by nobody — the claim is settled, nothing is replied.
+        HangableService.Handler = async (r, ct) =>
+        {
+            await Task.Delay(700, CancellationToken.None);
+            return new TestResponse { Echo = "late", StatusCode = StatusCodes.Status200OK };
+        };
+        var work = new ClaimedWork("tok-r-1", "r-1", HighwayJson.EncodeEnvelope("caller", new TestRequest { Text = "x" }), TimeSpan.FromMilliseconds(300));
+        _connection.ClaimAsync(WorkKind.Service, "test.service", "test-node", Arg.Any<CancellationToken>()).Returns(work, None);
+        var wake = new LoopWake();
+        var loop = new RpcWorkerLoop(_service, _connection, _executor, "test-node", 1, wake, NullLogger.Instance,
+            TimeSpan.FromMilliseconds(20), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(5));
+
+        using var stop = new CancellationTokenSource();
+        var run = loop.RunAsync(TimeSpan.FromMilliseconds(20), stop.Token, CancellationToken.None);
+        wake.Signal();
+        (await Eventually(() => Acked("r-1"), TimeSpan.FromSeconds(5))).Should().BeTrue();
+        await stop.CancelAsync();
+        await run;
+
+        Count(nameof(IHighwayConnection.ReplyAsync)).Should().Be(0, "the caller stopped waiting before the answer came");
     }
 }

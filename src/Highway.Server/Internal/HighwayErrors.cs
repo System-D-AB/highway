@@ -65,6 +65,22 @@ internal static class HighwayErrors
 
     public const string Internal = "HW_INTERNAL";
 
+    /// <summary>
+    /// 074: <c>HW.CALL</c> to a service no node has ever declared. Permanent for this call: nothing will answer it,
+    /// so the caller gets a 503 at once instead of waiting out its timeout. A service whose workers are merely
+    /// down is queued, never refused.
+    /// </summary>
+    public const string NoWorkersCode = "HW_NO_WORKERS";
+
+    /// <summary>
+    /// 074 (D2): why an <c>SVC</c> dead-letter target is refused — said the same way by every command that refuses it.
+    /// </summary>
+    public const string RpcHasNoDeadLetters =
+        "RPC has no dead letters: an expired or failed request is removed, counted and recorded (RpcExpired, RpcFailedFinal), never parked; dead letters are for Q targets";
+
+    /// <summary>Formats <c>ERR HW_NO_WORKERS …</c> naming the service.</summary>
+    public static string NoWorkers(string service) => Format(NoWorkersCode, $"no node has ever served '{service}'");
+
     /// <summary>Formats <c>ERR {code} {detail}</c>.</summary>
     public static string Format(string code, string detail) => $"ERR {code} {detail}";
 

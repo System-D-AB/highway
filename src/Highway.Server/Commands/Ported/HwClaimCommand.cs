@@ -34,6 +34,9 @@ internal sealed class HwClaimCommand : HighwayCommand
     private readonly List<WorkBox.DeadLettered> _deadLettered = [];
     private readonly List<WorkBox.JobFire> _jobs = [];
     private readonly List<string> _claimedIds = [];
+    private readonly List<string> _expired = [];   // 074: RPC requests removed at claim, their deadline passed
+    private readonly List<WorkBox.RpcEnded> _ended = [];   // 074: RPC requests recovery removed (expired / failed)
+    private bool _expiryBound;
     private int _notificationsEnqueued;
     private int _feedOverflowCount;
     private string? _feedTarget;
@@ -48,7 +51,9 @@ internal sealed class HwClaimCommand : HighwayCommand
         {
             _isDead = true;
             if (!BoxCommandSupport.TryParseTarget(input.Next(ref idx), out _kind))
-                return Fail(HighwayErrors.InvalidArg, "target must be SVC or Q");
+                return Fail(HighwayErrors.InvalidArg, "target must be Q");
+            if (_kind == BoxKeys.Kind.Service)
+                return Fail(HighwayErrors.InvalidArg, HighwayErrors.RpcHasNoDeadLetters);   // 074 (D2)
         }
         else
         {
@@ -209,9 +214,22 @@ internal sealed class HwClaimCommand : HighwayCommand
         if (_kind == BoxKeys.Kind.Service)
             RecoverDeadNodes(ctx, wb);
 
-        var claimed = wb.Claim(_node, ctx.NowTicks, _count, BoxCommandSupport.StorageName(_kind, _name));
+        var service = _kind == BoxKeys.Kind.Service;
+        // 074: a worker claiming from a service proves it is served — fail-fast must not refuse calls to it.
+        if (service) RegistrySupport.MarkServedOnClaim(ctx.Store, _name, ctx.NowTicks);
+        var claimed = wb.Claim(_node, ctx.NowTicks, _count, BoxCommandSupport.StorageName(_kind, _name),
+            service ? RpcDeadlines.Policy(ctx) : null);
+        _expired.AddRange(wb.ExpiredOnClaim);
+        _expiryBound = wb.ExpiryBoundReached;
+        _ended.AddRange(wb.RpcEndings);
         wb.Commit();
         wbFeed?.AfterCommit();
+        RpcDeadlines.Forget(ctx, _name, _ended);
+
+        // 074: an expired request has left the broker unanswered; a caller re-sending it is owed nothing, but its
+        // id no longer names queued work. Under the box lock, after the commit.
+        if (ctx.Calls is { } expiredCalls)
+            foreach (var id in _expired) expiredCalls.Forget(_name, id);
 
         // 074: a request no longer held here must stop suppressing its re-send — a caller still waiting is owed a
         // fresh attempt. Forgotten only once the dead-lettering is committed (a failed commit leaves it queued and
@@ -227,7 +245,18 @@ internal sealed class HwClaimCommand : HighwayCommand
         var rows = new List<IReadOnlyList<byte[]>>(claimed.Count);
         foreach (var c in claimed)
         {
-            rows.Add([Encoding.ASCII.GetBytes(BoxCommandSupport.Token(box, c.Token)), c.Id, c.Payload]);
+            var token = Encoding.ASCII.GetBytes(BoxCommandSupport.Token(box, c.Token));
+            if (c.DeadlineTicks is { } deadline)
+            {
+                // 074: an RPC row carries the request's remaining time — relative, so no clocks are compared.
+                rows.Add([token, c.Id, c.Payload,
+                    Encoding.ASCII.GetBytes(RpcDeadlines.RemainingMs(deadline, ctx.NowTicks).ToString(System.Globalization.CultureInfo.InvariantCulture))]);
+                ctx.Metrics?.RecordRpcQueueWait(TimeSpan.FromTicks(Math.Max(0, ctx.NowTicks - c.AcceptedTicks)).TotalSeconds);
+            }
+            else
+            {
+                rows.Add([token, c.Id, c.Payload]);
+            }
             _claimedIds.Add(Encoding.UTF8.GetString(c.Id));
         }
         writer.ArrayOfArrays(rows);
@@ -249,7 +278,7 @@ internal sealed class HwClaimCommand : HighwayCommand
             if (record is null || record.Length < NodeRegistration.HeaderSize) continue;
             if (!NodeRegistration.IsStale(RegistrySupport.SeenTicks(ctx.Store, snap, node, record), ctx.NowTicks, ctx.Options.NodeExpiry))
                 continue;
-            wb.RequeueNode(node);
+            wb.RequeueNode(node, ctx.NowTicks);
             RegistrySupport.RemoveFromServiceIndex(ctx.Store, wb.Batch, _name, node);
             RegistrySupport.RemoveRegistration(ctx.Store, wb.Batch, node);
         }
@@ -281,6 +310,18 @@ internal sealed class HwClaimCommand : HighwayCommand
             ctx.Recorder.Record(service ? HighwayEventType.RpcClaimed : HighwayEventType.QueueClaimed,
                 _name, nodeId: _node, requestId: id);
             if (!service) ctx.Metrics?.RecordDelivered();
+        }
+
+        RpcDeadlines.Report(ctx, _name, _node, _ended);
+
+        if (_expired.Count > 0)
+        {
+            foreach (var id in _expired)
+                ctx.Recorder.Record(HighwayEventType.RpcExpired, _name, nodeId: _node, requestId: id, errorCode: "queue");
+            ctx.Metrics?.RecordRpcExpired("queue", _expired.Count);
+            ctx.RpcLog.Expired(ctx.Recorder.Logger, _name, "queue", _expired.Count, ctx.NowTicks, ctx.Options.RpcLogInterval);
+            // Stopped at the bound with more behind it: ring, so a worker comes straight back instead of polling.
+            if (_expiryBound) ctx.Doorbell.Ring(HighwayKeys.ServiceDoorbell(_name), []);
         }
 
         if (_feedTarget is not null)

@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -59,6 +60,7 @@ public class TlsTests : IDisposable
     {
         o.Tls.CertFileName = _pfxPath;
         o.Tls.CertPassword = CertPassword;
+        o.RpcFailFast = false;
     });
 
     /// <summary>
@@ -81,7 +83,7 @@ public class TlsTests : IDisposable
             server.ConnectionString, TrustingClient());
 
         // A command over the encrypted socket, not merely a successful handshake.
-        await connection.CallAsync("tls.svc", "req-1", "payload"u8.ToArray());
+        await connection.CallAsync("tls.svc", "req-1", "payload"u8.ToArray(), timeout: null);
 
         connection.Should().NotBeNull();
     }
@@ -126,7 +128,7 @@ public class TlsTests : IDisposable
     [Fact]
     public async Task TlsClientAgainstAPlaintextServer_Fails()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
 
         var connect = async () => await HighwayConnection.ConnectAsync(
             server.ConnectionString, TrustingClient());
@@ -144,6 +146,7 @@ public class TlsTests : IDisposable
 
         using var server = new HighwayTestServer(o =>
         {
+            o.RpcFailFast = false;
             o.Tls.CertFileName = _pfxPath;
             o.Tls.CertPassword = CertPassword;
             o.Authentication.Password = password;

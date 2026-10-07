@@ -63,12 +63,12 @@ public class IdempotencyTests : IDisposable
 {
     // These tests drive a "redelivery" by repeating HW.CALL with the same request id — a stand-in for lease
     // recovery, which re-enters the request without HW.CALL. The broker itself suppresses a repeated HW.CALL
-    // within RpcDuplicateWindow (074), which would hide the WORKER behaviour these tests are about
+    // before its deadline (074), which would hide the WORKER behaviour these tests are about
     // ([Idempotent] dedupes; a plain contract runs again), so the broker filter is off for this server.
     private readonly HighwayTestServer _server = new(o =>
     {
         o.Lease = TimeSpan.FromMilliseconds(50);
-        o.RpcDuplicateWindow = TimeSpan.Zero;
+        o.RpcDuplicateFilter = false;
     });
 
     public IdempotencyTests()
@@ -177,8 +177,10 @@ public class IdempotencyTests : IDisposable
         expiresAt.Should().NotBeNull("the marker must expire rather than accumulate forever");
         var ttl = TimeSpan.FromTicks(expiresAt!.Value - DateTime.UtcNow.Ticks);
         ttl.Should().BeGreaterThan(TimeSpan.Zero);
-        ttl.Should().BeLessThanOrEqualTo(TimeSpan.FromSeconds(30),
-            "the window comes from [Idempotent(WindowSeconds = 30)]");
+        ttl.Should().BeLessThanOrEqualTo(TimeSpan.FromSeconds(60),
+            "the window is [Idempotent(WindowSeconds = 30)], raised for RPC to twice the call timeout (074: 2 × 30 s) so a " +
+            "caller retrying after a timeout still finds the stored answer");
+        ttl.Should().BeGreaterThan(TimeSpan.FromSeconds(30), "the RPC floor applies");
     }
 
     private static async Task WaitForAsync(Func<bool> condition, int timeoutMs = 5000)

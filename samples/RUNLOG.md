@@ -14,6 +14,39 @@ documentation defect and loses it.
 
 ---
 
+## 2026-10-08 — feature 074 Part A (RPC deadlines)
+
+**Libraries:** protocol **5.0** (Highway 3.0), storage format 4.
+**Ran:** the three-process topology from published builds — `Highway.Samples.Broker --port 6532`,
+`Highway.Samples.OrderService`, `Highway.Samples.Storefront` with `order 2 widget`, `get ORD-NOPE`,
+`cancel ORD-1`, `stats orders.create`.
+
+### Observed (storefront, trimmed)
+
+```
+> order 2 widget         ORD-6089  2 x widget  total 19,98 kr      (+ the OrderPlaced event)
+> get ORD-NOPE           status 404  ORDER_NOT_FOUND               (404 as data, not an exception)
+> cancel ORD-1           status 404  SERVICE_NOT_FOUND  (failed in 2 ms - fast-fail via the registry)
+> stats orders.create    kind service, queueDepth 0, hosts 1, inFlight 0,
+                         oldestAgeMs 0, oldestRemainingMs 0, expired 0, failedFinal 0, cancelled 0
+```
+
+### Verified
+
+| Scenario | Result |
+|---|---|
+| RPC round trip with the deadline on the wire (`HW.CALL … TIMEOUT 30000`, 4-column claim rows) | ✅ |
+| A typed 404 is still data | ✅ |
+| Client fast-fail for a contract nobody hosts | ✅ 2 ms |
+| `HW.STATS` service row shows the 074 fields; no `deadLettered` (RPC has no dead letters) | ✅ |
+
+The deadline behaviours themselves — a hung handler cut off at its caller's deadline while the service keeps
+answering, a backlog expiring instead of running, an inner call ending with its outer caller, a withdrawn
+request, broker fail-fast — are run end to end over TCP by `RpcDeadlineIntegrationTests` (real engines, real
+broker), since the samples have no hanging service.
+
+---
+
 ## 2026-10-07 — feature 073 (dead-letter contracts), after verification fixes
 
 **Libraries:** protocol **5.0** (Highway 3.0), storage format 4.

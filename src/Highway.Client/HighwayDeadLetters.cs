@@ -139,10 +139,7 @@ internal sealed class HighwayDeadLetters : IHighwayDeadLetters
         }
 
         var sAttr = type.GetCustomAttribute<ServiceAttribute>();
-        if (sAttr is not null)
-        {
-            return (new DeadLetterTarget(DeadLetterTargetKind.Service, sAttr.Name), "SVC", sAttr.Name);
-        }
+        if (sAttr is not null) throw RpcHasNoDeadLetters(type, sAttr.Name);
 
         var cAttr = type.GetCustomAttribute<ChannelAttribute>();
         if (cAttr is not null)
@@ -157,10 +154,7 @@ internal sealed class HighwayDeadLetters : IHighwayDeadLetters
             return (new DeadLetterTarget(DeadLetterTargetKind.Queue, qName), "Q", qName);
         }
 
-        if (_catalog.GetServiceNameForRequestType(type) is { Length: > 0 } sName)
-        {
-            return (new DeadLetterTarget(DeadLetterTargetKind.Service, sName), "SVC", sName);
-        }
+        if (_catalog.GetServiceNameForRequestType(type) is { Length: > 0 } sName) throw RpcHasNoDeadLetters(type, sName);
 
         if (_catalog.GetChannelNameForMessageType(type) is { Length: > 0 } cName)
         {
@@ -171,4 +165,10 @@ internal sealed class HighwayDeadLetters : IHighwayDeadLetters
 
         throw new ArgumentException($"Type '{type.FullName}' is not a recognized Highway contract. Contracts must be annotated with [Queue], [Service], or [Channel].", nameof(T));
     }
+
+    /// <summary>074 (D2): an RPC contract has no dead letters to inspect or move.</summary>
+    private static NotSupportedException RpcHasNoDeadLetters(Type type, string service)
+        => new($"'{type.FullName}' is the request of service '{service}', and RPC has no dead letters: an expired or " +
+               "failed request is removed and recorded (RpcExpired, RpcFailedFinal), never parked. Dead letters exist " +
+               "for queues ([Queue]) and subscriber groups ([Channel]).");
 }

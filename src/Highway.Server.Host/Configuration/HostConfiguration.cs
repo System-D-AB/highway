@@ -53,8 +53,18 @@ public sealed class HostConfiguration
             throw new ConfigurationException(
                 $"server.maxDeliveryAttempts cannot be negative, but was {Server.MaxDeliveryAttempts}. Use 0 for unlimited retries.");
 
-        if (Server.RpcDuplicateWindow < TimeSpan.Zero)
-            throw new ConfigurationException($"server.rpcDuplicateWindow cannot be negative, but was {Server.RpcDuplicateWindow}. Use 00:00:00 to disable.");
+        if (Server.DefaultRpcTimeout <= TimeSpan.Zero)
+            throw new ConfigurationException($"server.defaultRpcTimeout must be positive, but was {Server.DefaultRpcTimeout}.");
+        if (Server.MaxRpcTimeout < Server.DefaultRpcTimeout)
+            throw new ConfigurationException($"server.maxRpcTimeout ({Server.MaxRpcTimeout}) cannot be below server.defaultRpcTimeout ({Server.DefaultRpcTimeout}).");
+        if (Server.MinRemainingToStart < TimeSpan.Zero)
+            throw new ConfigurationException($"server.minRemainingToStart cannot be negative, but was {Server.MinRemainingToStart}.");
+        if (Server.RpcLeaseGrace < TimeSpan.Zero)
+            throw new ConfigurationException($"server.rpcLeaseGrace cannot be negative, but was {Server.RpcLeaseGrace}.");
+        if (Server.MaxExpiredPerClaim < 1)
+            throw new ConfigurationException($"server.maxExpiredPerClaim must be at least 1, but was {Server.MaxExpiredPerClaim}.");
+        if (Server.RpcLogInterval <= TimeSpan.Zero)
+            throw new ConfigurationException($"server.rpcLogInterval must be positive, but was {Server.RpcLogInterval}.");
         if (Server.SendDuplicateWindow < TimeSpan.Zero)
             throw new ConfigurationException($"server.sendDuplicateWindow cannot be negative, but was {Server.SendDuplicateWindow}. Use 00:00:00 to disable.");
         if (Server.PublishDuplicateWindow < TimeSpan.Zero)
@@ -132,7 +142,14 @@ public sealed class ServerSection
     public TimeSpan SubscriberRetirementThreshold { get; set; } = TimeSpan.FromHours(24);
     public int MaxDeliveryAttempts { get; set; } = 5;
     public int MaxDeadLetterEntries { get; set; } = 10_000;
-    public TimeSpan RpcDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);     // 074
+    public bool RpcDuplicateFilter { get; set; } = true;                              // 074
+    public TimeSpan DefaultRpcTimeout { get; set; } = TimeSpan.FromSeconds(30);       // 074
+    public TimeSpan MaxRpcTimeout { get; set; } = TimeSpan.FromHours(1);              // 074
+    public TimeSpan MinRemainingToStart { get; set; } = TimeSpan.FromMilliseconds(100); // 074
+    public TimeSpan RpcLeaseGrace { get; set; } = TimeSpan.FromSeconds(5);            // 074
+    public bool RpcFailFast { get; set; } = true;                                     // 074
+    public int MaxExpiredPerClaim { get; set; } = 256;                                // 074
+    public TimeSpan RpcLogInterval { get; set; } = TimeSpan.FromMinutes(1);           // 074
     public TimeSpan SendDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10);    // 074
     public TimeSpan PublishDuplicateWindow { get; set; } = TimeSpan.FromMinutes(10); // 074
     public bool PubSubBackoffEnabled { get; set; }

@@ -53,7 +53,7 @@ internal sealed class QueueWorkerLoop : SingleMessageWorkerLoop
 
     protected override async Task ProcessAsync(ClaimedWork work, CancellationToken ct)
     {
-        var (token, messageId, payload) = work;
+        var (token, messageId, payload, _) = work;
         object? message;
         try
         {

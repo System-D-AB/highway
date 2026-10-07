@@ -159,7 +159,23 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                         && int.TryParse(stats[i + 1].ToString(), out var serverMax) && serverMax > 0)
                     {
                         _options.LearnedServerMaxPayloadBytes = serverMax;
-                        break;
+                    }
+                    // 074: the broker's deadline for a call that names none. They are meant to agree: a caller that
+                    // waits longer than the broker runs the request just times out later, for nothing.
+                    else if (stats[i].ToString() == "maxRpcTimeoutMs"
+                        && long.TryParse(stats[i + 1].ToString(), out var maxMs) && maxMs > 0)
+                    {
+                        _options.LearnedMaxRpcTimeout = TimeSpan.FromMilliseconds(maxMs);
+                    }
+                    else if (stats[i].ToString() == "defaultRpcTimeoutMs"
+                        && long.TryParse(stats[i + 1].ToString(), out var brokerMs)
+                        && Math.Abs(brokerMs - (long)_options.CallTimeout.TotalMilliseconds) > 1)
+                    {
+                        _logger.LogInformation(
+                            "CallTimeout is {CallTimeout} but the broker's default RPC timeout is {BrokerDefault}. A call " +
+                            "without its own timeout waits CallTimeout while the broker runs it until its default — set " +
+                            "them equal, or give calls a timeout.",
+                            _options.CallTimeout, TimeSpan.FromMilliseconds(brokerMs));
                     }
                 }
             }
@@ -170,7 +186,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
             // 068 C3: the new master may not hold this node's session (a fresh node, a re-bootstrapped
             // standby) — re-declare it first, so subscriptions and schedules exist before calls re-drive.
             var pendingForReplay = _pendingCalls;
-            connection.Converged += () => _ = ReestablishThenReplayAsync(pendingForReplay);
+            connection.Converged += () => _ = ReestablishThenReplayAsync(connection, pendingForReplay);
 
             var executor = new ServiceExecutor(_catalog, _scopeFactory);
             var watcher = new DoorbellWatcher(_connection, _pendingCalls, _options.DoorbellsEnabled, _loggerFactory);
@@ -181,6 +197,18 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
 
             foreach (var service in _catalog.AllServices)
             {
+                // 074 (R8 AC3): a nudge, never an error — a timed-out call leaves its caller not knowing whether
+                // side-effecting work happened; [Idempotent] (and a key reused on retry) or a queue removes the doubt.
+                if (Attribute.IsDefined(service.ImplementationType, typeof(SideEffectsAttribute))
+                    && !Attribute.IsDefined(service.RequestType, typeof(IdempotentAttribute)))
+                {
+                    _logger.LogInformation(
+                        "Service '{Service}' ({Handler}) is marked [SideEffects] but its request is not [Idempotent]: a " +
+                        "caller that times out cannot tell whether the work happened, and a retry may do it twice. Make " +
+                        "the request [Idempotent] and reuse its key on retry, or send the work through a queue.",
+                        service.Name, service.ImplementationType.Name);
+                }
+
                 var wake = new LoopWake();
                 watcher.RegisterServiceWake(service.Name, wake);
                 var loop = new RpcWorkerLoop(
@@ -330,7 +358,7 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
                 _loggerFactory.CreateLogger<SessionKeeper>(),
                 SessionKeeper.Instance.Of(_options),
                 [.. _catalog.AllDeadLetters.Select(d => new SessionKeeper.DeadLetterDeclaration(
-                    d.TargetKind == DeadLetterTargetKind.Service ? "SVC" : "Q",
+                    "Q",   // 074: dead letters are for queues and groups only
                     d.TargetKind == DeadLetterTargetKind.Group ? $"{d.TargetName}@{group}" : d.TargetName))],
                 policies);
 
@@ -516,11 +544,19 @@ internal sealed class HighwayEngine : IHighwayEngine, IHighwayEngineInternals, I
     /// <summary>Marks an in-flight operation complete.</summary>
     internal void EndOperation() => Interlocked.Decrement(ref _activeOperations);
 
-    /// <summary>After a failover adoption: the session first (the new master may not hold it), then the pending calls.</summary>
-    private async Task ReestablishThenReplayAsync(PendingCallRegistry pending)
+    private readonly ReplayGate _replayGate = new();
+
+    /// <summary>
+    /// After a failover adoption: the session first (the new master may not hold it), then — only if the master
+    /// actually moved, and once per move (074) — the pending calls, each with the time its caller has left.
+    /// Re-sending on every reconnect turned a connection blip into duplicate work (as 2.5 clients did).
+    /// </summary>
+    private async Task ReestablishThenReplayAsync(HighwayConnection connection, PendingCallRegistry pending)
     {
         if (_session is { } session)
             await session.ReestablishAsync("failover").ConfigureAwait(false);
+        if (!_replayGate.ShouldReplay(connection.MasterChangeCount))
+            return;   // converged on the same master: nothing it holds was lost, nothing to re-send
         await pending.ReplayPendingAsync().ConfigureAwait(false);
     }
 

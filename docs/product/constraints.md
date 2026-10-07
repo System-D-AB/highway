@@ -153,18 +153,20 @@ under the queue's lock: one this broker stored on that queue within `server.send
 remembered and its retry is stored. The memory is per broker process and is cleared on every epoch change
 (an id remembered under the old epoch may name a write the failover lost): after a failover a re-sent message
 may be stored again (at-least-once, as before; `[Idempotent]` suppresses the second run). The same rule
-protects `HW.CALL` by request id (`server.rpcDuplicateWindow`); a call's id is forgotten when it is
-dead-lettered, so a caller still waiting can re-send.
+protects `HW.CALL` by request id, for as long as the call's deadline (`server.rpcDuplicateFilter`); a
+call's id is forgotten when its request leaves unanswered, so a caller still waiting can re-send.
 
 ### C1.8 — A hung handler degrades one message, not its worker
 
 **Status: Met** — feature 074 (3.0).
 
-A handler is cancelled at `MaxProcessingTime`. One that stops is a failure for queues and subscribers
-(`HW.FAIL ProcessingTimeExceeded`, redelivered or dead-lettered by normal attempt counting), a `504` for
-RPC, and a `KEEP` for a dead-letter handler. One that ignores the cancellation — including one blocked
-synchronously — is **abandoned** `AbandonGrace` later: its worker slot is freed, its lease is no longer
-renewed (lease recovery redelivers the message), and an Error is logged. When `MaxAbandonedHandlers`
+A handler is cancelled at `MaxProcessingTime` — an RPC handler at its caller's deadline when that is
+sooner (C3.4). One that stops is a failure for queues and subscribers (`HW.FAIL ProcessingTimeExceeded`,
+redelivered or dead-lettered by normal attempt counting), a `504` for RPC (at the deadline, simply the
+end of the request: acknowledged, not retried), and a `KEEP` for a dead-letter handler. One that ignores
+the cancellation — including one blocked synchronously — is **abandoned** `AbandonGrace` later: its worker
+slot is freed, its lease is no longer renewed (lease recovery redelivers a queued message; an RPC claim is
+acknowledged, its caller not waiting for a second run), and an Error is logged. When `MaxAbandonedHandlers`
 (default: the loop's concurrency) abandoned handlers are still running, the loop stops claiming and says
 so once a minute, and resumes as soon as one ends; handlers already running when the bound is reached
 can still be abandoned, so the most that can ever be running abandoned is
@@ -301,25 +303,62 @@ before. The memory is per broker process and is cleared on every epoch change.
 
 Departure and dead-node pruning **requeue** unacknowledged requests rather than deleting
 them — a request in flight belongs to a caller who is still waiting, not to the node
-processing it.
+processing it. Since 074 that holds exactly as long as the caller waits: a request whose
+deadline has passed is removed instead (C3.3), because nobody is waiting for it any more.
 
 This is the line that makes decommissioning coherent: queued *messages* belong to a
 subscriber that has declared it no longer exists; in-flight *requests* do not.
 
 ### C3.2 — A caller always gets an answer or a timeout, never silence
 
-**Status: Met.** Proven by invariant I3 under sustained load across thousands of RPC invocations by feature 032 (`assurance/runs/2026-08-18T10-47-30/`).
+**Status: Met.** Proven by invariant I3 under sustained load across thousands of RPC invocations by feature 032 (`assurance/runs/2026-08-18T10-47-30/`); restated with the deadline by feature 074.
 
-`CallTimeout` (30 s default) bounds the wait. Errors are data (`Output.StatusCode`), not
-exceptions.
+Every call has a **deadline**: its own timeout (`ExecuteAsync(request, timeout)`), else its
+contract's `[Service(Timeout)]`, else `CallTimeout` (30 s), capped inside a handler by the time
+left on the call that handler serves. The caller waits exactly that long; the broker is told it
+and holds the request to it. Errors are data (`Output.StatusCode`), not exceptions; a service
+nobody has ever served answers `503` at once instead of waiting out the deadline.
 
-### C3.3 — Retry budget may outlive the caller
+### C3.3 — A request never runs after its deadline
 
-**Status: Met, and worth knowing.**
+**Status: Met** — feature 074 (3.0). *Replaces "retry budget may outlive the caller", which
+described the defect: a 5-minute lease against a 30-second caller let a stuck request be
+retried — and finally dead-lettered — long after anyone waited for it, and a backlog built up
+during an outage ran in full, for nobody, when the workers came back.*
 
-`Lease` defaults to 5 minutes against a 30-second `CallTimeout`, so a stuck request exhausts
-its attempts long after the caller gave up. The dead letter is the only trace anyone will
-see. This is why `RpcBackoffEnabled` is off by default.
+The broker fixes the deadline with its own clock when it accepts the call and stores it with
+the request. After it: a claim removes the request unrun; lease recovery, dead-node recovery
+and departure never return it; a retry backoff that would land past it ends it; a reply to it
+is discarded. A request that fails its last attempt with time left is removed too. **RPC has
+no dead letters** — every such request is counted (`highway.rpc.expired`,
+`highway.rpc.failed`), recorded (`RpcExpired`, `RpcFailedFinal`, the latter with the failure)
+and summarised in the broker log once per service per minute. An RPC claim's lease ends with
+the deadline (plus a 5 s grace), so a worker that dies holding a 30-second call does not hold
+it for five minutes.
+
+### C3.4 — A handler stops when its caller stops waiting
+
+**Status: Met** — feature 074 (3.0).
+
+A worker is told each request's remaining time — relative, so no clocks are compared — and
+cancels the handler's token at it (or at `MaxProcessingTime`, when sooner). Stopping at the
+deadline is not a failure: the claim is acknowledged, nothing is retried. A handler that ignores
+the cancellation is abandoned `AbandonGrace` later and its claim acknowledged — its caller is not
+waiting for a second run — within the bound of C1.8. Calls a handler makes inherit its remaining
+time, so an inner call never outlives the caller waiting on the outer one.
+
+### C3.5 — One call is one request
+
+**Status: Met** — feature 074 (3.0).
+
+The client re-sends pending calls only when the master actually moved to another endpoint, once
+per move, and with each call's remaining time — a call with none left is answered locally as a
+timeout, never re-sent. A connection that recovers in place re-sends nothing. The broker
+acknowledges a repeated `HW.CALL` for a request id it queued, until that request's deadline,
+without queueing it again (C1.7). A caller that gives up early withdraws its queued request
+(`HW.CANCEL`). Across a failover the duplicate memory is per broker: a request the new primary
+already held may run twice — bounded by its deadline, harmless for a query; a command that must
+not run twice is `[Idempotent]` or goes through a queue.
 
 ---
 
@@ -920,8 +959,10 @@ defensible: users get the free path, and the suite still covers the secured one.
 | C2.6 | Subscriptions and jobs follow the node across failovers | ✅ Met (067/068, 3.0) |
 | C2.7 | Retried publish delivered once within the duplicate window | ✅ Met (074) |
 | C3.1 | In-flight requests survive departure | ✅ Met |
-| C3.2 | An answer or a timeout, never silence | ✅ Met |
-| C3.3 | Retry budget may outlive the caller | ✅ Met |
+| C3.2 | An answer or a timeout, never silence | ✅ Met (deadline: 074) |
+| C3.3 | A request never runs after its deadline | ✅ Met (074) |
+| C3.4 | A handler stops when its caller stops waiting | ✅ Met (074) |
+| C3.5 | One call is one request | ✅ Met (074) |
 | C4.1 | Retention 100 days | ❌ Not met — needs a framing change |
 | C4.2 | Size cap 1 GB, in bytes | ✅ **Met** (016) |
 | C4.3 | Limits are never silent | ✅ **Met** (016) |

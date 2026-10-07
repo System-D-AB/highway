@@ -41,6 +41,7 @@ public class BoundedStructureTests
         ("Lease",         "box/03 [claim][seq]",        "EXEMPT: one entry per in-flight claim, as above"),
         ("NodeIndex",     "box/0A [node][seq]",         "EXEMPT: one entry per in-flight claim, as above"),
         ("Workers",       "box/07 [node]",              "EXEMPT: one entry per worker node"),
+        ("RpcIndex",      "box/0B [requestId]",         "EXEMPT: one entry per queued RPC request, removed with it (074)"),
         ("Schedules",     "box/08 [job]",               "EXEMPT: one per declared job (028); replaced, never grown, by each fire"),
         ("ScheduleIndex", "box/09 [nextFire][job]",     "EXEMPT: one per declared job, as above"),
         ("NameIndex",     "box0/01 [kind][name]",       "EXEMPT: one per service / queue / group queue name"),
@@ -54,6 +55,7 @@ public class BoundedStructureTests
         ("RegistrationService",  "s reg:svc:{service}", "EXEMPT: one entry per node hosting the service"),
         ("RegistrationNode",     "k reg:node:{node}",   "EXEMPT: one per node; expired by heartbeat timeout (006)"),
         ("RegistrationSeen",     "k reg:seen:{node}",   "EXEMPT: one per node, as above"),
+        ("ServiceServed",        "k reg:served:{service}", "EXEMPT: one per service name ever declared (074 fail-fast); a few bytes, never deleted"),
         ("Families",      "box0/10 (the family keys)",  "EXEMPT: the container of the rows above; bounded by them"),
 
         // --- scalars: fixed size by construction ---

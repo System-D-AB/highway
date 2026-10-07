@@ -51,6 +51,7 @@ internal sealed class CommandDispatcher
     private readonly RecentIds<byte> _calls;          // 074: repeated HW.CALL request ids, one per server
     private readonly RecentIds<byte> _sends;          // 074: repeated HW.SEND message ids
     private readonly RecentIds<long> _publishes;      // 074: repeated HW.PUBLISH publish ids → group count
+    private readonly RpcOutcomeLog _rpcLog = new();   // 074: RPC requests that ended unanswered, rate-limited
 
     public CommandDispatcher(
         IHighwayStore store,
@@ -64,7 +65,8 @@ internal sealed class CommandDispatcher
         InstanceRegistry? instances = null)
     {
         _instances = instances;
-        _calls = new RecentIds<byte>(options.RpcDuplicateWindow);
+        // A call is remembered until its own deadline (074); the window bounds the longest any can ask for.
+        _calls = new RecentIds<byte>(options.RpcDuplicateFilter ? options.MaxRpcTimeout : TimeSpan.Zero);
         _sends = new RecentIds<byte>(options.SendDuplicateWindow);
         _publishes = new RecentIds<long>(options.PublishDuplicateWindow);
         _store = store;
@@ -215,7 +217,7 @@ internal sealed class CommandDispatcher
         var args = new byte[frame.Count - 1][];
         for (var i = 1; i < frame.Count; i++) args[i - 1] = frame[i];
 
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps, _boxes, _instances, _calls, _sends, _publishes);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, DateTime.UtcNow.Ticks, _replication, _metrics, _sweeps, _boxes, _instances, _calls, _sends, _publishes, _rpcLog);
         var command = entry.Factory();
 
         // HW.CALL carries the RPC request/latency instruments (051 R1): time the server-side
@@ -226,7 +228,7 @@ internal sealed class CommandDispatcher
             var start = System.Diagnostics.Stopwatch.GetTimestamp();
             var enqueued = command.Execute(ctx, new CommandInput(args), writer);
             // A suppressed re-send (074) is counted as a duplicate, not as a second request.
-            if (command is not HwCallCommand { IsDuplicate: true })
+            if (command is not HwCallCommand { IsDuplicate: true } and not HwCallCommand { IsFailFast: true })
                 metrics.RecordRpcRequest(enqueued, System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalSeconds);
             return;
         }
@@ -251,8 +253,9 @@ internal sealed class CommandDispatcher
     /// </summary>
     private static Dictionary<string, Entry> BuildRegistry() => new(StringComparer.Ordinal)
     {
-        ["HW.CALL"]        = new(4,  () => new HwCallCommand()),
-        ["HW.REPLY"]       = new(3,  () => new HwReplyCommand()),
+        ["HW.CALL"]        = new(-4, () => new HwCallCommand()),   // 074: optional TIMEOUT <ms>
+        ["HW.CANCEL"]      = new(3,  () => new HwCancelCommand()), // 074
+        ["HW.REPLY"]       = new(-3, () => new HwReplyCommand()),  // 074: optional TOKEN <token>
         ["HW.RESULT"]      = new(2,  () => new HwResultCommand()),
         ["HW.SEND"]        = new(-4, () => new HwSendCommand()),
         ["HW.PUBLISH"]     = new(-3, () => new HwPublishCommand()),

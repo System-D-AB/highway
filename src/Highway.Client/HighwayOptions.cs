@@ -177,6 +177,12 @@ public sealed class HighwayOptions : IHighwayConnectionSettings
     public TimeSpan AbandonGrace { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
+    /// The broker's MaxRpcTimeout, learned from <c>HW.STATS</c> at start (074): no call waits longer than the broker
+    /// will run its request. One hour until learned — the broker's default.
+    /// </summary>
+    internal TimeSpan LearnedMaxRpcTimeout { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
     /// Abandoned handlers that may still be running before a worker loop stops claiming new work (it resumes
     /// as soon as one ends). 0 (default) means the loop's concurrency.
     /// </summary>

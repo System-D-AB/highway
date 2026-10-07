@@ -473,7 +473,7 @@ public class MembershipTests
         var t0 = 10_000_000_000_000L;
 
         // dead-node registered and holding one claimed request; caller is fresh.
-        h.Run(new HwCallCommand(), t0, "orders", "req-1", "payload");
+        h.Run(new HwCallCommand(), t0, "orders", "req-1", "payload", "TIMEOUT", "3600000");   // 074: outlives the test's clock
         h.Run(new HwClaimCommand(), t0, "SVC", "orders", "dead-node"); // dead-node claims req-1
         h.Run(new HwSessionCommand(), t0, "dead-node", SessionOf(Encoding.UTF8.GetString(BuildCatalog("orders"))));
 
@@ -483,7 +483,7 @@ public class MembershipTests
 
         // The requeued request is what live-node claims.
         var text = CommandHarness.AsText(reply);
-        text.Should().StartWith("*1\r\n*3\r\n");
+        text.Should().StartWith("*1\r\n*4\r\n", "an RPC row carries its remaining time (074)");
         text.Should().Contain("req-1");
 
         // dead-node dropped from discovery and the registry (070: the 2.x svc:nodes set this used to check

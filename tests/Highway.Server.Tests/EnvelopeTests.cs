@@ -161,4 +161,51 @@ public class EnvelopeTests
         Envelope.TryGetLineage(wb.ReadInFlight(claimed[0].Token)!.Entry, out var requeues, out _).Should().BeTrue();
         requeues.Should().Be(ushort.MaxValue);
     }
+
+    // =========================================================================
+    // RPC deadline trailer (074 T1)
+    // =========================================================================
+
+    [Fact]
+    public void Deadline_RoundTrips_AndIsNotPartOfThePayload()
+    {
+        var entry = Envelope.WithDeadline(Envelope.EncodeRpcEntry("r-1"u8, SamplePayload, 2), 100L, 123_456_789L);
+
+        Envelope.TryGetDeadline(entry, out var accepted, out var deadline).Should().BeTrue();
+        accepted.Should().Be(100L);
+        deadline.Should().Be(123_456_789L);
+        Envelope.DecodeRpcEntry(entry, out var id, out var payload, out var attempts);
+        Encoding.UTF8.GetString(id).Should().Be("r-1");
+        payload.ToArray().Should().Equal(SamplePayload);
+        attempts.Should().Be(2);
+    }
+
+    [Fact]
+    public void Deadline_SurvivesAFailureBlockAndLineage_AndEveryReEncode()
+    {
+        var entry = Envelope.WithDeadline(Envelope.EncodeRpcEntry("r-1"u8, SamplePayload, 1), 7L, 42L);
+        var failed = Envelope.WithFailureBlock(entry, Envelope.EncodeFailureBlock("T"u8, default, "d"u8));
+        var both = Envelope.WithLineage(failed, 3);
+
+        Envelope.TryGetDeadline(both, out var deadline).Should().BeTrue();
+        deadline.Should().Be(42L);
+        Envelope.DecodeRpcEntry(both, out _, out var payload, out _);
+        payload.ToArray().Should().Equal(SamplePayload);
+        Envelope.TryGetFailureBlock(both, out _, out _).Should().BeTrue();
+
+        // A redelivery re-encodes from the decoded parts; the carry must put the deadline back.
+        Envelope.DecodeRpcEntry(both, out var id, out var p, out var a);
+        var rebuilt = Envelope.CarryFailureBlock(both, Envelope.EncodeRpcEntry(id, p, Envelope.NextAttempt(a)));
+        Envelope.TryGetDeadline(rebuilt, out var carriedAccepted, out var carried).Should().BeTrue();
+        carriedAccepted.Should().Be(7L);
+        carried.Should().Be(42L);
+        Envelope.TryGetLineage(rebuilt, out var requeues, out _).Should().BeTrue();
+        requeues.Should().Be(3);
+    }
+
+    [Fact]
+    public void AnEntryWithoutADeadline_HasNone()
+    {
+        Envelope.TryGetDeadline(Envelope.EncodeRpcEntry("m-1"u8, SamplePayload), out _).Should().BeFalse();
+    }
 }

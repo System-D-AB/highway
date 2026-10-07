@@ -127,7 +127,7 @@ opens it. A 2.x and a 3.0 node therefore never form a pair.
 1. Stop the standby, install 3.0 on it, run `highways --wipe-data`, and leave it stopped. The 2.x
    primary serves alone.
 2. Drain what must not be lost on the 2.x primary (waiting, deferred and dead-lettered work; RPC in
-   flight drains within its timeout).
+   flight ends within its callers' deadlines).
 3. Stop the 2.x primary, then start the 3.0 node as primary. Clients (on the 3.0 client) fail over to
    it and declare their sessions. Downtime is the gap between these two steps.
 4. Install 3.0 on the old primary, `--wipe-data`, start it as standby: it re-syncs from the new primary.

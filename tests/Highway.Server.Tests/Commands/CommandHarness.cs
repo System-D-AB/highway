@@ -21,11 +21,15 @@ internal sealed class CommandHarness : IDisposable
     private readonly HighwayServerOptions _options;
     private readonly Highway.Server.Storage.Boxes.BoxRuntime _boxes = new();   // one per server, as the dispatcher holds
 
-    public CommandHarness(IHighwayStore? store = null, HighwayServerOptions? options = null, StripedLock? locks = null)
+    public CommandHarness(IHighwayStore? store = null, HighwayServerOptions? options = null, StripedLock? locks = null,
+        bool rpcFailFast = false)
     {
         _store = store ?? new InMemoryStore();
         _locks = locks ?? new StripedLock();
+        // 074: fail-fast refuses a call to a service no session has declared. Command tests exercise other behaviour
+        // and call services directly, so the harness turns it off unless a test asks for it.
         _options = options ?? new HighwayServerOptions();
+        _options.RpcFailFast = rpcFailFast;
         _recorder = new FlightRecorder(_options.Observability);
     }
 
@@ -49,12 +53,18 @@ internal sealed class CommandHarness : IDisposable
     /// <paramref name="nowTicks"/> (default: a fixed test clock) and returns the raw RESP
     /// reply bytes.
     /// </summary>
-    public byte[] Run(HighwayCommand command, long nowTicks, params string[] args)
+    public byte[] Run(HighwayCommand command, long nowTicks, params string[] args) => RunWith(command, nowTicks, RpcLog, args);
+
+    /// <summary>The broker's RPC outcome log (074): one per harness, as the dispatcher holds one per broker.</summary>
+    public Highway.Server.Commands.Runtime.RpcOutcomeLog RpcLog { get; } = new();
+
+    /// <summary>Runs with a given RPC outcome log (074).</summary>
+    public byte[] RunWith(HighwayCommand command, long nowTicks, Highway.Server.Commands.Runtime.RpcOutcomeLog rpcLog, params string[] args)
     {
         var replication = _store is Highway.Server.Storage.Rocks.RocksDbStore rocks
             ? rocks.Replication
             : null;
-        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes, instances: Instances, calls: Calls, sends: Sends, publishes: Publishes);
+        var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes, instances: Instances, calls: Calls, sends: Sends, publishes: Publishes, rpcLog: rpcLog);
         var input = CommandInput.FromStrings(args);
         var writer = new RespWriter();
         command.Execute(ctx, input, writer);
@@ -74,11 +84,12 @@ internal sealed class CommandHarness : IDisposable
 
     public static string AsText(byte[] resp) => Encoding.UTF8.GetString(resp);
 
-    /// <summary>A parsed 5.0 claim row.</summary>
-    public readonly record struct Claim(string Token, string Id, string Payload);
+    /// <summary>A parsed 5.0 claim row. <paramref name="RemainingMs"/> is set on an RPC row (074).</summary>
+    public readonly record struct Claim(string Token, string Id, string Payload, long? RemainingMs = null);
 
     /// <summary>
-    /// Parses an HW.CLAIM reply — <c>*N</c> rows of <c>*3 [$token $id $payload]</c>, or <c>*0</c> — into its rows.
+    /// Parses an HW.CLAIM reply — <c>*N</c> rows of <c>*3 [$token $id $payload]</c> (queues) or
+    /// <c>*4 [$token $id $payload $remainingMs]</c> (services, 074), or <c>*0</c> — into its rows.
     /// </summary>
     private static readonly string CrLf = new(['\r', '\n']);
 
@@ -89,10 +100,18 @@ internal sealed class CommandHarness : IDisposable
         var rows = new List<Claim>();
         if (!lines[0].StartsWith('*') || lines[0] == "*0" || lines[0] == "*-1") return rows;
         var i = 1;
-        while (i < lines.Length && lines[i].StartsWith("*3"))
+        while (i < lines.Length && (lines[i] == "*3" || lines[i] == "*4"))
         {
-            rows.Add(new Claim(lines[i + 2], lines[i + 4], lines[i + 6]));
-            i += 7;
+            if (lines[i] == "*4")
+            {
+                rows.Add(new Claim(lines[i + 2], lines[i + 4], lines[i + 6], long.Parse(lines[i + 8])));
+                i += 9;
+            }
+            else
+            {
+                rows.Add(new Claim(lines[i + 2], lines[i + 4], lines[i + 6]));
+                i += 7;
+            }
         }
         return rows;
     }

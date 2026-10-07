@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using System.Text;
 using FluentAssertions;
 using Highway.Abstractions;
@@ -48,6 +49,7 @@ public class LongRunningTaskTests : IDisposable
     {
         o.Lease = TimeSpan.FromMilliseconds(800);
         o.MaxDeliveryAttempts = 3;
+        o.RpcFailFast = false;
     });
 
     public LongRunningTaskTests()
@@ -172,7 +174,7 @@ public class LongRunningTaskTests : IDisposable
     public void Touch_ResetsTheClock_SoTheSweepLeavesTheEntryAlone()
     {
         // Its own server: a lease long enough to observe, short enough to test.
-        using var slow = new HighwayTestServer(o => o.Lease = TimeSpan.FromMilliseconds(600));
+        using var slow = new HighwayTestServer(o => { o.Lease = TimeSpan.FromMilliseconds(600); o.RpcFailFast = false; });
         var db = ConnectionMultiplexer.Connect(slow.ConnectionString).GetDatabase();
 
         db.Send("lr.clock", "msg-1", Envelope());

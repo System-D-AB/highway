@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using System.Text;
 using FluentAssertions;
 using Highway.Server;
@@ -20,7 +21,7 @@ namespace Highway.Integration.Tests;
 /// </summary>
 public class HwFailCommandTests : IDisposable
 {
-    private readonly HighwayTestServer _server = new();
+    private readonly HighwayTestServer _server = new(o => o.RpcFailFast = false);
 
     public void Dispose() => _server.Dispose();
 

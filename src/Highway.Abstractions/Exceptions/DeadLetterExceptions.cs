@@ -16,6 +16,17 @@ public sealed class UnknownDeadLetterContractException(Type messageType, Type ha
                 "but this contract is neither referenced nor handled in the application.");
 
 /// <summary>
+/// A dead-letter handler was discovered for an RPC request contract (074). RPC has no dead letters: a request ends
+/// with an answer, an error or a timeout, and one that expired or failed its last attempt is removed and recorded
+/// (<c>RpcExpired</c>, <c>RpcFailedFinal</c>) — never parked for a handler to run after its caller has gone.
+/// </summary>
+public sealed class RpcDeadLetterHandlerException(Type messageType, Type handlerType, string service)
+    : Exception($"The dead-letter handler '{handlerType.FullName}' handles '{messageType.FullName}', the request of " +
+                $"service '{service}', but RPC has no dead letters: an expired or failed request is removed and recorded " +
+                "(RpcExpired, RpcFailedFinal), never parked. Remove the handler; for work that must eventually happen, " +
+                "use a queue (ISend) and handle its dead letters instead.");
+
+/// <summary>
 /// A dead-letter handler was discovered for a published contract this application does not subscribe to (073). A
 /// subscriber group's dead letters belong to the group's own queue, and this application's group has none for a
 /// channel it does not subscribe to — the handler could never be called.

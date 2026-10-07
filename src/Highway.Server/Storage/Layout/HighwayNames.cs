@@ -60,6 +60,12 @@ internal static class HighwayNames
     /// </summary>
     public static string RegistrationSeen(string nodeId) => $"reg:seen:{nodeId}";
 
+    /// <summary>
+    /// 074: present once any node has declared <paramref name="service"/> in its session — the "has ever been
+    /// served" fact fail-fast reads. Never deleted: a service whose workers are all gone still queues calls.
+    /// </summary>
+    public static string ServiceServed(string service) => $"reg:served:{service}";
+
     // --- Counters (family n) ---------------------------------------------------
 
     /// <summary>Per-channel message-ID sequence.</summary>

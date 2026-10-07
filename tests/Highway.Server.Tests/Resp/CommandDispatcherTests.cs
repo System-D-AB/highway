@@ -22,7 +22,7 @@ public class CommandDispatcherTests
     private static CommandDispatcher NewDispatcher(out IHighwayStore store)
     {
         store = new InMemoryStore();
-        var options = new HighwayServerOptions();
+        var options = new HighwayServerOptions { RpcFailFast = false };   // 074: these call services no session declared
         var recorder = new FlightRecorder(options.Observability);
         return new CommandDispatcher(store, new StripedLock(), new NullDoorbell(), recorder, options);
     }
@@ -80,7 +80,7 @@ public class CommandDispatcherTests
         var dispatcher = NewDispatcher(out _);
         dispatcher.ServedCommands.Should().BeEquivalentTo(new[]
         {
-            "HW.CALL", "HW.REPLY", "HW.RESULT", "HW.SEND", "HW.PUBLISH", "HW.CLAIM", "HW.ACK",
+            "HW.CALL", "HW.CANCEL", "HW.REPLY", "HW.RESULT", "HW.SEND", "HW.PUBLISH", "HW.CLAIM", "HW.ACK",
             "HW.TOUCH", "HW.FAIL", "HW.DLQ", "HW.IDEM", "HW.SESSION", "HW.HEARTBEAT", "HW.UNSUBSCRIBE",
             "HW.JOB", "HW.DISCOVER", "HW.STATS", "HW.REPLAY",
             "HW.REPL.HELLO", "HW.REPL.PULL", "HW.REPL.ACK",
@@ -97,7 +97,7 @@ public class CommandDispatcherTests
         // unique meter name so a parallel embedded server's Highway.Server meter cannot leak in.
         var meterName = "Highway.Server.Test." + Guid.NewGuid().ToString("N");
         var store = new InMemoryStore();
-        var options = new HighwayServerOptions();
+        var options = new HighwayServerOptions { RpcFailFast = false };   // 074: these call services no session declared
         var recorder = new FlightRecorder(options.Observability);
         using var metrics = new HighwayMetrics(replication: null, () => [], recorder, meterName);
         var dispatcher = new CommandDispatcher(
@@ -127,7 +127,7 @@ public class CommandDispatcherTests
         // 074 review: the dispatcher times and counts every HW.CALL; a re-send the broker suppressed is not a request.
         var meterName = "Highway.Server.Test." + Guid.NewGuid().ToString("N");
         var store = new InMemoryStore();
-        var options = new HighwayServerOptions();
+        var options = new HighwayServerOptions { RpcFailFast = false };   // 074: these call services no session declared
         var recorder = new FlightRecorder(options.Observability);
         using var metrics = new HighwayMetrics(replication: null, () => [], recorder, meterName);
         var dispatcher = new CommandDispatcher(
@@ -163,7 +163,7 @@ public class CommandDispatcherTests
                 Priority = 100,
             });
             var feeder = store.Replication;
-            var options = new HighwayServerOptions();
+            var options = new HighwayServerOptions { RpcFailFast = false };   // 074: these call services no session declared
             var dispatcher = new CommandDispatcher(
                 store, new StripedLock(), new NullDoorbell(), new FlightRecorder(options.Observability), options, replication: feeder);
 

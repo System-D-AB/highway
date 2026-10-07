@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -28,7 +29,7 @@ public class SessionStateIsolationTests
     [Fact]
     public void ValidationFailure_DoesNotPoisonTheNextCallOnTheSameConnection()
     {
-        using var server = new HighwayTestServer(o => o.MaxPayloadBytes = 16);
+        using var server = new HighwayTestServer(o => { o.MaxPayloadBytes = 16; o.RpcFailFast = false; });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -44,7 +45,7 @@ public class SessionStateIsolationTests
     [Fact]
     public void RepeatedFailuresThenSuccess_AllBehaveIndependently()
     {
-        using var server = new HighwayTestServer(o => o.MaxPayloadBytes = 16);
+        using var server = new HighwayTestServer(o => { o.MaxPayloadBytes = 16; o.RpcFailFast = false; });
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -59,7 +60,7 @@ public class SessionStateIsolationTests
     [Fact]
     public void BlankIdentifierRejection_DoesNotPoisonOtherCommands()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -77,7 +78,7 @@ public class SessionStateIsolationTests
     [Fact]
     public void EmptyClaimAfterASuccessfulOne_RecordsNothingExtra()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 
@@ -102,7 +103,7 @@ public class SessionStateIsolationTests
     [Fact]
     public void EmptyReceiveAfterANonEmptyOne_RecordsNothingExtra()
     {
-        using var server = new HighwayTestServer();
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false);
         using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
         var db = redis.GetDatabase();
 

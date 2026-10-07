@@ -124,9 +124,9 @@ internal static class Envelope
     {
         RequireCurrentFormat(data, "RPC entry");
 
-        // An entry may carry a failure block (015). It is a trailer, so it must come off
-        // before "payload is the rest" is true again.
-        DecodeRpcFraming(StripFailureBlock(data), out requestId, out payload, out attempts);
+        // An entry may carry a failure block (015), a lineage trailer (073) and, innermost, an RPC deadline (074).
+        // They are trailers, so they must come off before "payload is the rest" is true again.
+        DecodeRpcFraming(StripDeadline(StripFailureBlock(data)), out requestId, out payload, out attempts);
     }
 
     /// <summary>
@@ -300,9 +300,65 @@ internal static class Envelope
         return buf;
     }
 
+    // -------------------------------------------------------------------------
+    // RPC deadline (074): the innermost trailer on a service entry.
+    //
+    //   <entry>[i64 acceptedTicks][i64 deadlineTicks][u32 magic 0xFE0DEAD1] [failure block?] [lineage?]
+    //
+    // Innermost, so the failure block and lineage code is unchanged: they strip and re-add themselves around it,
+    // and StripFailureBlock leaves it in place. Both times are broker ticks — set by the broker that accepted the
+    // call, never compared with a client's clock. Accepted gives queue wait and age; the deadline ends the
+    // request. Queue and group entries never carry it.
+    // -------------------------------------------------------------------------
+
+    /// <summary>Marks the last four bytes of an RPC entry's deadline trailer (074). Last byte not <c>}</c>.</summary>
+    public const uint DeadlineMagic = 0xFE0DEAD1;
+
+    /// <summary>Bytes a deadline trailer adds to an entry: [i64 acceptedTicks][i64 deadlineTicks][u32 magic].</summary>
+    public const int DeadlineTrailerLength = 8 + 8 + 4;
+
+    /// <summary>
+    /// Returns <paramref name="entry"/> (an entry with no failure block or lineage) with a deadline trailer,
+    /// replacing any it already had.
+    /// </summary>
+    public static byte[] WithDeadline(ReadOnlySpan<byte> entry, long acceptedTicks, long deadlineTicks)
+    {
+        var bare = StripDeadline(entry);
+        var buf = new byte[bare.Length + DeadlineTrailerLength];
+        bare.CopyTo(buf);
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(bare.Length), acceptedTicks);
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(bare.Length + 8), deadlineTicks);
+        BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(bare.Length + 16), DeadlineMagic);
+        return buf;
+    }
+
+    /// <summary>Reads an RPC entry's deadline (broker ticks), whatever other trailers ride outside it.</summary>
+    public static bool TryGetDeadline(ReadOnlySpan<byte> entry, out long deadlineTicks)
+        => TryGetDeadline(entry, out _, out deadlineTicks);
+
+    /// <summary>Reads when the broker accepted an RPC entry and its deadline (both broker ticks).</summary>
+    public static bool TryGetDeadline(ReadOnlySpan<byte> entry, out long acceptedTicks, out long deadlineTicks)
+    {
+        var body = StripFailureBlock(entry);
+        acceptedTicks = deadlineTicks = 0;
+        if (body.Length < RpcHeader + DeadlineTrailerLength
+            || BinaryPrimitives.ReadUInt32BigEndian(body.Slice(body.Length - 4)) != DeadlineMagic)
+            return false;
+        acceptedTicks = BinaryPrimitives.ReadInt64BigEndian(body.Slice(body.Length - DeadlineTrailerLength));
+        deadlineTicks = BinaryPrimitives.ReadInt64BigEndian(body.Slice(body.Length - DeadlineTrailerLength + 8));
+        return true;
+    }
+
+    private static ReadOnlySpan<byte> StripDeadline(ReadOnlySpan<byte> body)
+        => body.Length >= RpcHeader + DeadlineTrailerLength
+           && BinaryPrimitives.ReadUInt32BigEndian(body.Slice(body.Length - 4)) == DeadlineMagic
+            ? body.Slice(0, body.Length - DeadlineTrailerLength)
+            : body;
+
     /// <summary>
     /// Removes the lineage and failure trailers, if present, so the remaining span is the entry exactly
-    /// as it would have been framed without them. Called at the head of every decode.
+    /// as it would have been framed without them. Called at the head of every decode. An RPC deadline, the
+    /// innermost trailer, stays.
     /// </summary>
     public static ReadOnlySpan<byte> StripFailureBlock(ReadOnlySpan<byte> entry)
     {
@@ -405,6 +461,8 @@ internal static class Envelope
     /// </summary>
     public static byte[] CarryFailureBlock(ReadOnlySpan<byte> source, byte[] rebuilt)
     {
+        // 074: an RPC deadline rides every re-encode too — a redelivered request keeps its caller's deadline.
+        if (TryGetDeadline(source, out var accepted, out var deadline)) rebuilt = WithDeadline(rebuilt, accepted, deadline);
         TryGetLineage(source, out var requeues, out _);
         var withBlock = TryGetFailureBlock(source, out var block, out _) ? WithFailureBlock(rebuilt, block) : rebuilt;
         return requeues > 0 ? WithLineage(withBlock, requeues) : withBlock;

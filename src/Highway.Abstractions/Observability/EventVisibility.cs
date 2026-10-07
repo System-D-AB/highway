@@ -64,6 +64,13 @@ public static class EventVisibilityMap
         HighwayEventType.DeadLetterResolved => EventVisibility.Public,
         HighwayEventType.DeadLetterRequeueRefused => EventVisibility.Public,
 
+        // 074: how an RPC request ended without an answer is the developer's fact.
+        HighwayEventType.RpcExpired => EventVisibility.Public,
+        HighwayEventType.RpcFailedFinal => EventVisibility.Public,
+        HighwayEventType.RpcReplyLate => EventVisibility.Public,
+        HighwayEventType.RpcCancelled => EventVisibility.Public,
+        HighwayEventType.RpcFailFast => EventVisibility.Public,
+
         // Everything else is the broker moving work around: claims, acknowledgements,
         // topology, lease renewals, retirement. Default rather than enumerated, because a
         // new event type is far more likely to be machinery than a developer-facing fact —

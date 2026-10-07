@@ -36,11 +36,12 @@ builder.Services.AddHighway(o =>
 
     // OFF by default in Highway, and this sample turns it on deliberately.
     //
-    // Without it, calling a service that is a valid contract but that no node
-    // currently hosts blocks for the full CallTimeout — 30 seconds of nothing.
-    // With it, the client asks the registry first and returns 404 immediately.
-    // The cost is one round trip on a cold cache, which is why it is opt-in.
-    // Try `cancel ORD-1` with this set to false to feel the difference.
+    // With it, the client asks the registry first and returns 404 immediately
+    // when no node is live right now. The cost is one round trip on a cold cache,
+    // which is why it is opt-in. Without it, a service that no node has EVER
+    // served is still refused at once — by the broker, as 503 NO_WORKERS (3.0) —
+    // while one whose workers are only restarting is queued until its deadline.
+    // Try `cancel ORD-1` with this set to false to see the broker's answer.
     o.FastFailEnabled = true;
 });
 
@@ -157,7 +158,8 @@ async Task CancelAsync(string[] parts)
     // orders.cancel is a real contract that nothing implements. The call is
     // therefore addressable but unroutable — the registry knows no live host.
     // With FastFailEnabled the client discovers that and returns 404 in
-    // milliseconds; without it, this would block for the full 30s CallTimeout.
+    // milliseconds; without it, the broker refuses it just as fast with 503
+    // NO_WORKERS, because no node has ever served it.
     var started = DateTime.UtcNow;
     var response = await client.ExecuteAsync(new CancelOrder { OrderId = id });
     var elapsed = DateTime.UtcNow - started;

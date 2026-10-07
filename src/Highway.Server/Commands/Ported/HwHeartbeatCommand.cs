@@ -28,6 +28,8 @@ namespace Highway.Server.Commands.Ported;
 /// </summary>
 internal sealed class HwHeartbeatCommand : HighwayCommand
 {
+    private readonly List<(string Service, WorkBox.RpcEnded Ended)> _ended = [];   // 074: removed on departure
+
     private enum Form { Liveness, Departure, Purge }
 
     private string _nodeId = null!;
@@ -94,8 +96,10 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
             if (BoxCommandSupport.Find(ctx, BoxKeys.Kind.Service, service) is not { } box) continue;
             using var _ = BoxCommandSupport.Lock(ctx, box);
             using var wb = BoxCommandSupport.Open(ctx, box, BoxKeys.Kind.Service);
-            wb.RequeueNode(_nodeId);
+            wb.RequeueNode(_nodeId, ctx.NowTicks);
             wb.Commit();
+            RpcDeadlines.Forget(ctx, service, wb.RpcEndings);
+            foreach (var e in wb.RpcEndings) _ended.Add((service, e));
         }
 
         using var _lock = ctx.Locks.Lock(_nodeId);
@@ -263,6 +267,8 @@ internal sealed class HwHeartbeatCommand : HighwayCommand
     protected override void AfterCommit(CommandContext ctx)
     {
         if (_form == Form.Liveness) return;
+        foreach (var group in _ended.GroupBy(e => e.Service))
+            RpcDeadlines.Report(ctx, group.Key, _nodeId, [.. group.Select(g => g.Ended)]);
         if (_form == Form.Purge && _retired.Groups > 0)
         {
             ctx.Recorder.Record(

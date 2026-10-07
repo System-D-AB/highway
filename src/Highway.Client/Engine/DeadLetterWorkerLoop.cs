@@ -38,13 +38,7 @@ internal sealed class DeadLetterWorkerLoop : SingleMessageWorkerLoop
         _descriptor = descriptor;
         _group = group;
 
-        if (descriptor.TargetKind == DeadLetterTargetKind.Service)
-        {
-            _wireKind = WorkKind.Service;
-            _wireName = descriptor.TargetName;
-            _feedTarget = $"SVC:{descriptor.TargetName}";
-        }
-        else if (descriptor.TargetKind == DeadLetterTargetKind.Group)
+        if (descriptor.TargetKind == DeadLetterTargetKind.Group)
         {
             _wireKind = WorkKind.Queue;
             _wireName = $"{descriptor.TargetName}@{group}";

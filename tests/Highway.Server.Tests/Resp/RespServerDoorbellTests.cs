@@ -21,7 +21,7 @@ public class RespServerDoorbellTests
     {
         var store = new InMemoryStore();
         var server = await RespServer.StartAsync(
-            store, new HighwayServerOptions(),
+            store, new HighwayServerOptions { RpcFailFast = false },   // 074: calls a service no session declared
             new PasswordAuthenticator(password: null, authDisabled: true),
             IPAddress.Loopback, 0);
         return (server, store);

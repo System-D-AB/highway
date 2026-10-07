@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -29,6 +30,7 @@ public class NodeExpiryTests
             o.NodeExpiry = Expiry;
             o.PruningEnabled = pruning;
             o.Lease = TimeSpan.FromMinutes(5); // long, so any recovery seen is the node sweep
+            o.RpcFailFast = false;
         });
 
     private static async Task WaitForExpiryAsync()

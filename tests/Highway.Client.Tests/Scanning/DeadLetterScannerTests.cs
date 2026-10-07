@@ -50,8 +50,20 @@ public class DeadLetterScannerTests
             => Task.FromResult(DeadLetterAction.Discard);
     }
 
+    [Queue("payments.refund")]
+    public sealed class RefundQueued : ISend
+    {
+        public decimal Amount { get; set; }
+    }
+
     [ServiceLifetime(HighwayServiceLifetime.Singleton)]
-    public sealed class PaymentDeadLetterHandler : IDeadLetter<ChargePaymentRequest>
+    public sealed class PaymentDeadLetterHandler : IDeadLetter<RefundQueued>
+    {
+        public Task<DeadLetterAction> HandleAsync(DeadLetter<RefundQueued> letter, CancellationToken ct = default)
+            => Task.FromResult(DeadLetterAction.Discard);
+    }
+
+    public sealed class ChargeDeadLetterHandler : IDeadLetter<ChargePaymentRequest>
     {
         public Task<DeadLetterAction> HandleAsync(DeadLetter<ChargePaymentRequest> letter, CancellationToken ct = default)
             => Task.FromResult(DeadLetterAction.Discard);
@@ -90,16 +102,27 @@ public class DeadLetterScannerTests
     }
 
     [Fact]
-    public void Scan_DiscoversServiceDeadLetterHandler_WithCustomLifetime()
+    public void Scan_ADeadLetterHandlerForAnRpcRequest_IsAStartupError()
     {
-        var types = new List<Type> { typeof(ChargePaymentRequest), typeof(PaymentDeadLetterHandler) };
+        // 074 (D2): RPC has no dead letters, so such a handler could never run — say so at startup.
+        var types = new List<Type> { typeof(ChargePaymentRequest), typeof(ChargeDeadLetterHandler) };
+
+        var act = () => _scanner.ScanTypes(types);
+
+        act.Should().Throw<RpcDeadLetterHandlerException>().WithMessage("*payments.charge*RPC has no dead letters*");
+    }
+
+    [Fact]
+    public void Scan_DiscoversADeadLetterHandler_WithCustomLifetime()
+    {
+        var types = new List<Type> { typeof(RefundQueued), typeof(PaymentDeadLetterHandler) };
         var result = _scanner.ScanTypes(types);
 
         result.DeadLetters.Should().ContainSingle();
         var descriptor = result.DeadLetters[0];
-        descriptor.TargetKind.Should().Be(DeadLetterTargetKind.Service);
-        descriptor.TargetName.Should().Be("payments.charge");
-        descriptor.MessageType.Should().Be(typeof(ChargePaymentRequest));
+        descriptor.TargetKind.Should().Be(DeadLetterTargetKind.Queue);
+        descriptor.TargetName.Should().Be("payments.refund");
+        descriptor.MessageType.Should().Be(typeof(RefundQueued));
         descriptor.HandlerType.Should().Be(typeof(PaymentDeadLetterHandler));
         descriptor.Lifetime.Should().Be(HighwayServiceLifetime.Singleton);
     }
@@ -162,7 +185,7 @@ public class DeadLetterScannerTests
         var types = new List<Type>
         {
             typeof(OrderPlacedMessage), typeof(OrderDeadLetterHandler),
-            typeof(ChargePaymentRequest), typeof(PaymentDeadLetterHandler)
+            typeof(RefundQueued), typeof(PaymentDeadLetterHandler)
         };
         var result = _scanner.ScanTypes(types);
 

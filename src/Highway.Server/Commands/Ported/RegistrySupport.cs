@@ -27,6 +27,48 @@ namespace Highway.Server.Commands.Ported;
 /// </summary>
 internal static class RegistrySupport
 {
+    /// <summary>074: whether any node has ever declared <paramref name="service"/> to this broker's data.</summary>
+    public static bool HasBeenServed(IHighwayStore store, string service)
+    {
+        // Served is forever, so a positive answer is cached: a busy service pays no read per call.
+        var known = KnownServed.GetOrCreateValue(store);
+        if (known.ContainsKey(service)) return true;
+        using var snap = store.Snapshot();
+        if (store.Get(snap, HighwayKeyspace.Kv(HighwayNames.ServiceServed(service))) is null) return false;
+        known.TryAdd(service, 0);
+        return true;
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IHighwayStore, System.Collections.Concurrent.ConcurrentDictionary<string, byte>> KnownServed = new();
+
+    /// <summary>
+    /// 074: records that a worker claimed from <paramref name="service"/> — a node that sends no heartbeat (and so
+    /// declares no catalog) still serves it. Once per service per store in this process: the claim path pays a read
+    /// only the first time.
+    /// </summary>
+    public static void MarkServedOnClaim(IHighwayStore store, string service, long nowTicks)
+    {
+        var known = KnownServed.GetOrCreateValue(store);
+        if (known.ContainsKey(service)) return;
+        using (var snap = store.Snapshot())
+        {
+            if (store.Get(snap, HighwayKeyspace.Kv(HighwayNames.ServiceServed(service))) is null)
+            {
+                using var batch = store.NewBatch();
+                MarkServed(store, snap, batch, service, nowTicks);
+                batch.Commit();
+            }
+        }
+        known.TryAdd(service, 0);
+    }
+
+    /// <summary>074: records that <paramref name="service"/> has been served, once (a present key is never rewritten).</summary>
+    public static void MarkServed(IHighwayStore store, IStoreSnapshot snap, IStoreBatch batch, string service, long nowTicks)
+    {
+        var key = HighwayKeyspace.Kv(HighwayNames.ServiceServed(service));
+        if (store.Get(snap, key) is null) store.Set(batch, key, BitConverter.GetBytes(nowTicks));
+    }
+
     /// <summary>Minimum bytes of a well-formed RPC processing entry (i64 + u16 header).</summary>
 
     // -------------------------------------------------------------------------

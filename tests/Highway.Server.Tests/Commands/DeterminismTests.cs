@@ -83,23 +83,24 @@ public class DeterminismTests
         using var h = new CommandHarness(options: opts);
         var t0 = 10_000_000_000_000L;
 
-        // A worker claims one request, then never acks. Its lease will expire.
-        h.Run(new HwCallCommand(), t0, "orders", "req-dead", "payload");
-        h.Run(new HwClaimCommand(), t0, "SVC", "orders", "worker-1"); // claim (attempts 0)
+        // A worker claims one message, then never acks. Its lease will expire. (A queue: since 074 an RPC request
+        // is never dead-lettered — it ends as RpcFailedFinal — so the dead-letter row is a queue's.)
+        h.Run(new HwSendCommand(), t0, "orders", "req-dead", "payload");
+        h.Run(new HwClaimCommand(), t0, "Q", "orders", "worker-1"); // claim (attempts 0)
 
         // First sweep past the lease: attempts → 1, still ≤ limit, so it is requeued.
         var lease1 = t0 + TimeSpan.FromMinutes(6).Ticks;
-        h.Run(new HwClaimCommand(), lease1, "SVC", "orders", "worker-2"); // claims the requeued entry
+        h.Run(new HwClaimCommand(), lease1, "Q", "orders", "worker-2"); // claims the requeued entry
 
         // Second sweep past the next lease: attempts → 2 > 1, so it dead-letters — the row we assert.
         var afterLease = lease1 + TimeSpan.FromMinutes(6).Ticks;
-        h.Run(new HwClaimCommand(), afterLease, "SVC", "orders", "worker-3");
+        h.Run(new HwClaimCommand(), afterLease, "Q", "orders", "worker-3");
 
         using var snap = h.Store.Snapshot();
 
         // The dead-letter list holds a REAL dead-letter record, not a marker: decode it and it
-        // is the original request's bytes wrapped in a dead-letter envelope.
-        var dlq = new StoreInspector(h.Store).ListEntries("hw:svc:orders:dlq");
+        // is the original message's bytes wrapped in a dead-letter envelope.
+        var dlq = new StoreInspector(h.Store).ListEntries("hw:q:orders:dlq");
         dlq.Should().ContainSingle("the sweep produced exactly one dead-letter row");
 
         DeadLetter.Decode(dlq[0], out var deadAtTicks, out var attempts, out _, out var original);
@@ -115,7 +116,7 @@ public class DeterminismTests
         using var h = new CommandHarness(options: opts);
         var t0 = 10_000_000_000_000L;
 
-        h.Run(new HwCallCommand(), t0, "orders", "req-1", "the-payload");
+        h.Run(new HwCallCommand(), t0, "orders", "req-1", "the-payload", "TIMEOUT", "3600000");   // 074: outlives the clock
         h.Run(new HwClaimCommand(), t0, "SVC", "orders", "worker-1"); // claims req-1
 
         // Sweep after the lease: the entry is requeued (attempts < limit), as a real queue row.
@@ -124,7 +125,7 @@ public class DeterminismTests
 
         // worker-2 claims the requeued entry — the row exists and is the original request.
         var text = CommandHarness.AsText(reply);
-        text.Should().StartWith("*1\r\n*3\r\n", "one claimed row: token, id, payload");
+        text.Should().StartWith("*1\r\n*4\r\n", "one claimed row: token, id, payload, remaining time (074)");
         text.Should().Contain("req-1");
         text.Should().Contain("the-payload", "the requeued row carries the original payload bytes");
     }

@@ -1,3 +1,4 @@
+// 074: these tests make raw HW.CALLs to services no session declared, so fail-fast is off for their servers.
 using FluentAssertions;
 using Highway.Server;
 using StackExchange.Redis;
@@ -30,7 +31,7 @@ public class DurabilityTests : IDisposable
     }
 
     private HighwayTestServer NewDurableServer() =>
-        new(o => o.DataDir = _dataDir);
+        new(o => { o.DataDir = _dataDir; o.RpcFailFast = false; });
 
     [Fact]
     public void Restart_RecoversQueuedRequests_PublishedMessages_AndReplySlots()
@@ -102,7 +103,7 @@ public class DurabilityTests : IDisposable
     [Fact]
     public void Restart_MemoryOnly_LosesState_DocumentedExpectation()
     {
-        using var server = new HighwayTestServer(); // no data dir → memory-only
+        using var server = new HighwayTestServer(o => o.RpcFailFast = false); // no data dir → memory-only
         var cs = server.ConnectionString;
 
         using (var redis = ConnectionMultiplexer.Connect(cs))

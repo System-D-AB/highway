@@ -11,8 +11,10 @@ leads people to misuse pub/sub for work that must not be lost.*
 
 ## Overview
 
-A queue is **RPC minus the reply** — the same claim, lease, attempt-counting and dead-lettering
-machinery, with no response slot. You get:
+A queue is **RPC minus the reply, and minus the deadline** — the same claim, lease and
+attempt-counting machinery, with no response slot and no caller waiting: a queued message waits for
+a worker however long that takes, and work that cannot be done is dead-lettered rather than dropped
+(RPC, whose answer is worthless once its caller has gone, has no dead letters). You get:
 
 - **Fire-and-forget send.** Enqueuing never requires a running worker; the message waits until one
   claims it. That is the whole point of a queue.

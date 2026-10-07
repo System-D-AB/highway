@@ -39,6 +39,12 @@ internal sealed class HighwayMetrics : IDisposable
     private readonly Counter<long> _refused;
     private readonly Counter<long> _deadLettered;
     private readonly Counter<long> _messageDuplicates;   // 074
+    private readonly Counter<long> _rpcExpired;          // 074
+    private readonly Counter<long> _rpcFailedFinal;      // 074
+    private readonly Counter<long> _rpcRepliesLate;      // 074
+    private readonly Counter<long> _rpcFailFast;         // 074
+    private readonly Counter<long> _rpcCancelled;        // 074
+    private readonly Histogram<double> _rpcQueueWait;    // 074
     private readonly Counter<long> _deadLettersResolved;
     private readonly Counter<long> _deadLettersRequeued;
     private readonly Counter<long> _promotions;
@@ -74,6 +80,12 @@ internal sealed class HighwayMetrics : IDisposable
         _refused = _meter.CreateCounter<long>("highway.messages.refused", "{message}", "Sends refused for a full queue (HW.QSEND, QUEUE_FULL).");
         _messageDuplicates = _meter.CreateCounter<long>("highway.messages.duplicates", "{message}", "Repeated HW.CALL, HW.SEND or HW.PUBLISH acknowledged without storing again (074), tagged by verb.");
         _deadLettered = _meter.CreateCounter<long>("highway.messages.deadlettered", "{message}", "Messages moved to the dead-letter list on exhausting their attempts.");
+        _rpcExpired = _meter.CreateCounter<long>("highway.rpc.expired", "{request}", "RPC requests removed unanswered at their deadline (074), tagged by stage (queue, redelivery).");
+        _rpcFailedFinal = _meter.CreateCounter<long>("highway.rpc.failed", "{request}", "RPC requests removed after failing their last attempt (074; RPC has no dead letters).");
+        _rpcRepliesLate = _meter.CreateCounter<long>("highway.rpc.replies.late", "{reply}", "Replies discarded because they arrived after the request's deadline (074).");
+        _rpcFailFast = _meter.CreateCounter<long>("highway.rpc.failfast", "{request}", "Calls refused at once: no node has ever served the service (074).");
+        _rpcCancelled = _meter.CreateCounter<long>("highway.rpc.cancelled", "{request}", "Queued requests withdrawn by their caller (HW.CANCEL, 074).");
+        _rpcQueueWait = _meter.CreateHistogram<double>("highway.rpc.queue_wait", "s", "Seconds from a call's acceptance to its claim (074).");
         _deadLettersResolved = _meter.CreateCounter<long>("highway.deadletters.resolved", "{letter}", "Dead letters resolved, tagged by action (ack, requeue, purge) and by (handler, operator).");
         _deadLettersRequeued = _meter.CreateCounter<long>("highway.deadletters.requeued", "{letter}", "Dead letters requeued back into their target.");
         _promotions = _meter.CreateCounter<long>("highway.replication.promotions", "{event}", "Times this node promoted to primary.");
@@ -140,6 +152,15 @@ internal sealed class HighwayMetrics : IDisposable
     public void RecordRefused() => _refused.Add(1);
     public void RecordDeadLettered(long count) { if (count > 0) _deadLettered.Add(count); }
     public void RecordMessageDuplicate(string verb) => _messageDuplicates.Add(1, new KeyValuePair<string, object?>("verb", verb));
+    public void RecordRpcExpired(string stage, long count = 1) { if (count > 0) _rpcExpired.Add(count, new KeyValuePair<string, object?>("stage", stage)); }
+    public void RecordRpcFailedFinal(long count = 1)
+    {
+        if (count > 0) _rpcFailedFinal.Add(count, new KeyValuePair<string, object?>("reason", "max_attempts"));
+    }
+    public void RecordRpcReplyLate() => _rpcRepliesLate.Add(1);
+    public void RecordRpcFailFast() => _rpcFailFast.Add(1);
+    public void RecordRpcCancelled() => _rpcCancelled.Add(1);
+    public void RecordRpcQueueWait(double seconds) => _rpcQueueWait.Record(seconds);
     public void RecordDeadLetterResolved(string action, string by, long count = 1)
     {
         if (count > 0)

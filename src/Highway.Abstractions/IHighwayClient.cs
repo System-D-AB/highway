@@ -12,6 +12,14 @@ public interface IHighwayClient
         where TResponse : Output;
 
     /// <summary>
+    /// Execute a remote procedure call with its own timeout (074): how long this caller waits, overriding the
+    /// contract's <c>[Service(Timeout)]</c> and <c>CallTimeout</c>. The broker never runs the request after it, and a
+    /// handler's token is cancelled at it. Inside a service handler, the time left on the enclosing call caps it.
+    /// </summary>
+    Task<TResponse> ExecuteAsync<TResponse>(IReturn<TResponse> request, TimeSpan timeout, CancellationToken ct = default)
+        where TResponse : Output;
+
+    /// <summary>
     /// Send work to a queue, to be handled by <b>exactly one</b> <see cref="IProcess{T}"/>
     /// (feature 014). Returns the message id.
     ///

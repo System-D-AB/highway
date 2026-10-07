@@ -138,7 +138,9 @@ internal sealed class HwSessionCommand : HighwayCommand
                     if (!d.TryGetProperty("kind", out var k) || k.ValueKind != JsonValueKind.String || k.GetString() is not { } kindStr)
                         return Fail(HighwayErrors.InvalidArg, "deadLetter: 'kind' is required");
                     if (!BoxCommandSupport.TryParseTarget(Encoding.ASCII.GetBytes(kindStr), out var kind))
-                        return Fail(HighwayErrors.InvalidArg, "deadLetter: kind must be SVC or Q");
+                        return Fail(HighwayErrors.InvalidArg, "deadLetter: kind must be Q");
+                    if (kind == BoxKeys.Kind.Service)
+                        return Fail(HighwayErrors.InvalidArg, "deadLetter: " + HighwayErrors.RpcHasNoDeadLetters);   // 074 (D2)
                     if (!d.TryGetProperty("name", out var n) || n.ValueKind != JsonValueKind.String || n.GetString() is not { } name)
                         return Fail(HighwayErrors.InvalidArg, "deadLetter: 'name' is required");
 
@@ -271,7 +273,10 @@ internal sealed class HwSessionCommand : HighwayCommand
                 RegistrySupport.TouchSeen(store, batch, _node, ctx.NowTicks);
                 RegistrySupport.SetAdd(store, batch, HighwayNames.RegistrationNodeList, _node);
                 foreach (var service in _services)
+                {
                     RegistrySupport.SetAdd(store, batch, HighwayNames.RegistrationService(service), _node);
+                    RegistrySupport.MarkServed(store, snap, batch, service, ctx.NowTicks);   // 074: fail-fast's fact
+                }
             }
             batch.Commit();
         }

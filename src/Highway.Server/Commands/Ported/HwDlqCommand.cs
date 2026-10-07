@@ -105,21 +105,19 @@ internal sealed class HwDlqCommand : HighwayCommand
 
         var kindArg = input.Next(ref idx);
         if (kindArg.Length == 0)
-            return Fail(HighwayErrors.InvalidArg, "HW.DLQ requires a target: SVC <service> or Q <queue>");
+            return Fail(HighwayErrors.InvalidArg, "HW.DLQ requires a target: Q <queue>");
 
         var kind = Encoding.ASCII.GetString(kindArg).ToUpperInvariant();
         switch (kind)
         {
             case TargetService:
-                if (!TryReadIdentifier(input, ref idx, "service", ctx.Options.MaxIdentifierBytes, out _name)) return false;
-                _kind = BoxKeys.Kind.Service;
-                break;
+                return Fail(HighwayErrors.InvalidArg, HighwayErrors.RpcHasNoDeadLetters);   // 074 (D2)
             case TargetQueue:
                 if (!TryReadDerivedIdentifier(input, ref idx, "queue", ctx.Options.MaxIdentifierBytes, out _name)) return false;
                 _kind = BoxKeys.Kind.Queue;
                 break;
             default:
-                return Fail(HighwayErrors.InvalidArg, $"unknown target '{kind}'; accepted forms are SVC <service> or Q <queue>");
+                return Fail(HighwayErrors.InvalidArg, $"unknown target '{kind}'; the accepted form is Q <queue>");
         }
 
         if (_action == ActionCount)

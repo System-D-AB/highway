@@ -26,7 +26,11 @@ internal enum WorkKind { Service, Queue }
 /// One claimed message: the opaque <see cref="Token"/> the broker issued (echoed verbatim to settle it),
 /// the message's id, and its payload.
 /// </summary>
-internal readonly record struct ClaimedWork(string Token, string Id, byte[] Payload);
+/// <summary>
+/// A claimed message. <paramref name="Remaining"/> is an RPC request's time left before its caller's deadline, as the
+/// broker measured it at the claim (074) — relative, so this process's clock is never compared with the broker's.
+/// </summary>
+internal readonly record struct ClaimedWork(string Token, string Id, byte[] Payload, TimeSpan? Remaining = null);
 internal readonly record struct DeadLetterResolutionResult(bool Held, string Status, string Detail);
 
 /// <summary>Raw representation of an entry returned by HW.DLQ PEEK.</summary>
@@ -50,7 +54,11 @@ public sealed record RawDeadLetterPeekEntry(
 internal interface IHighwayConnection
 {
     // Work: enqueue
-    Task CallAsync(string service, string requestId, byte[] envelope, CancellationToken ct = default);
+    /// <summary>HW.CALL — enqueue a request; <paramref name="timeout"/> is how long its caller waits (074).</summary>
+    Task CallAsync(string service, string requestId, byte[] envelope, TimeSpan? timeout, CancellationToken ct = default);
+
+    /// <summary>HW.CANCEL — withdraw a request still waiting in its queue (074). True when it was withdrawn.</summary>
+    Task<bool> CancelCallAsync(string service, string requestId, CancellationToken ct = default);
     Task QSendAsync(string queue, string messageId, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
     Task<long> PublishCommandAsync(string channel, byte[] envelope, DateTimeOffset? deliverAt = null, CancellationToken ct = default);
 
@@ -65,7 +73,11 @@ internal interface IHighwayConnection
     Task<bool> FailAsync(string token, string exceptionType, byte[] detail, CancellationToken ct = default);
 
     // RPC reply
-    Task ReplyAsync(string requestId, byte[] envelope, CancellationToken ct = default);
+    /// <summary>
+    /// HW.REPLY — answer a request. With its claim <paramref name="token"/> the broker discards a reply after the
+    /// request's deadline (074); false then.
+    /// </summary>
+    Task<bool> ReplyAsync(string requestId, byte[] envelope, string? token, CancellationToken ct = default);
 
     /// <summary>HW.RESULT — takes (reads and removes) a waiting reply, or null when none is waiting.</summary>
     Task<byte[]?> TakeReplyAsync(string requestId, CancellationToken ct = default);
@@ -160,6 +172,16 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     /// engine re-drives pending RPCs on it (042-1b B-T5 / parent R4).
     /// </summary>
     internal event Action? Converged;
+
+    private long _masterChanges;
+
+    /// <summary>
+    /// How many times the master actually moved to a different endpoint (074): the source raises
+    /// <c>MasterChanged</c> only then. A connection that converged back on the same master — a blip that recovered
+    /// in place, or a second failing command finding the connection already restored — leaves it unchanged, and
+    /// pending calls are not re-sent for it.
+    /// </summary>
+    internal long MasterChangeCount => Interlocked.Read(ref _masterChanges);
 
     private void NoteSuccess() => Volatile.Write(ref _lastSuccessTicks, DateTime.UtcNow.Ticks);
 
@@ -278,6 +300,7 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
         _subscriber = redis.GetSubscriber();
         _source = source;
         _lastSuccessTicks = DateTime.UtcNow.Ticks;
+        if (source is not null) source.MasterChanged += _ => Interlocked.Increment(ref _masterChanges);
 
         if (source is not null)
         {
@@ -365,12 +388,24 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     // -------------------------------------------------------------------------
 
     /// <summary>HW.CALL &lt;service&gt; &lt;requestId&gt; &lt;payload&gt;</summary>
-    public Task CallAsync(string service, string requestId, byte[] envelope, CancellationToken ct = default)
+    public Task CallAsync(string service, string requestId, byte[] envelope, TimeSpan? timeout, CancellationToken ct = default)
         => SendAsync(async () =>
         {
-            await _db.ExecuteAsync("HW.CALL", service, requestId, envelope).ConfigureAwait(false);
+            if (timeout is { } t)
+            {
+                var ms = Math.Max(1L, (long)Math.Ceiling(t.TotalMilliseconds));
+                await _db.ExecuteAsync("HW.CALL", service, requestId, envelope, "TIMEOUT",
+                    ms.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
+            }
+            else
+            {
+                await _db.ExecuteAsync("HW.CALL", service, requestId, envelope).ConfigureAwait(false);
+            }
             return true;
         }, ct);
+
+    public Task<bool> CancelCallAsync(string service, string requestId, CancellationToken ct = default)
+        => SendAsync(async () => (long)(await _db.ExecuteAsync("HW.CANCEL", service, requestId).ConfigureAwait(false)) == 1, ct);
 
     /// <summary>
     /// HW.CLAIM SVC|Q &lt;name&gt; &lt;nodeId&gt; → one claimed message, or null when nothing is due (an empty
@@ -384,7 +419,9 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
             var rows = (RedisResult[])result!;
             if (rows.Length == 0) return default(ClaimedWork?);
             var row = (RedisResult[])rows[0]!;
-            return new ClaimedWork((string)row[0]!, (string)row[1]!, (byte[])row[2]!);
+            TimeSpan? remaining = row.Length > 3 && long.TryParse((string?)row[3], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var ms) ? TimeSpan.FromMilliseconds(ms) : null;
+            return new ClaimedWork((string)row[0]!, (string)row[1]!, (byte[])row[2]!, remaining);
         }, ct);
 
     /// <summary>HW.ACK &lt;token&gt; → true when removed; false when it was no longer held (a late ack is not an error).</summary>
@@ -612,11 +649,16 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
         }, ct);
 
     /// <summary>HW.REPLY &lt;requestId&gt; &lt;payload&gt;</summary>
-    public Task ReplyAsync(string requestId, byte[] envelope, CancellationToken ct = default)
+    public Task<bool> ReplyAsync(string requestId, byte[] envelope, string? token, CancellationToken ct = default)
         => SendAsync(async () =>
         {
-            await _db.ExecuteAsync("HW.REPLY", requestId, envelope).ConfigureAwait(false);
-            return true;
+            if (token is null)
+            {
+                await _db.ExecuteAsync("HW.REPLY", requestId, envelope).ConfigureAwait(false);
+                return true;
+            }
+            var result = await _db.ExecuteAsync("HW.REPLY", requestId, envelope, "TOKEN", token).ConfigureAwait(false);
+            return result.Resp2Type != ResultType.Integer || (long)result == 1;
         }, ct);
 
     /// <summary>

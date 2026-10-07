@@ -54,7 +54,7 @@ internal abstract class SingleMessageWorkerLoop
     /// contract carries no <c>[Idempotent]</c> attribute — in which case every delivery takes
     /// exactly the path it always did.
     /// </summary>
-    protected TimeSpan? IdempotencyWindow { get; }
+    protected TimeSpan? IdempotencyWindow { get; set; }
 
     private readonly TimeSpan _renewalInterval;
 
@@ -324,9 +324,23 @@ internal abstract class SingleMessageWorkerLoop
         }
     }
 
+    /// <summary>
+    /// How long one message's handler may run before its token is cancelled (074): <c>MaxProcessingTime</c>, or —
+    /// for an RPC request — its caller's remaining time when that is sooner. Zero means no limit.
+    /// </summary>
+    protected virtual TimeSpan TimeLimitFor(ClaimedWork work) => MaxProcessingTime;
+
+    /// <summary>
+    /// Called when a handler is abandoned (074): its message was given up. Queues and subscribers leave it to lease
+    /// recovery; RPC acknowledges it, since its caller is not waiting for a second run.
+    /// </summary>
+    protected virtual Task OnAbandonedAsync(ClaimedWork work) => Task.CompletedTask;
+
     private async Task ProcessAndReleaseAsync(ClaimedWork work, CancellationToken workToken)
     {
-        if (MaxProcessingTime <= TimeSpan.Zero)
+        var limit = TimeLimitFor(work);
+        if (limit > MaxTimerSpan) limit = MaxTimerSpan;
+        if (limit <= TimeSpan.Zero)
         {
             // Zero disables renewal and the cap, restoring pre-019 behaviour exactly.
             try
@@ -375,11 +389,11 @@ internal abstract class SingleMessageWorkerLoop
             {
                 Observability.HighwayActivity.MarkProcessingCapExceeded(activity, work.Id, DateTime.UtcNow - started);
                 Logger.LogWarning(
-                    "Message '{MessageId}' on {Kind} '{Target}' reached MaxProcessingTime ({Cap}); its handler has " +
-                    "been cancelled. Its lease is renewed until the handler stops, or until it is abandoned after " +
-                    "AbandonGrace ({Grace}) if it ignores the cancellation. Either the handler is hung, or this work " +
-                    "should be chunked rather than run in one message.",
-                    work.Id, TargetKind, TargetName, MaxProcessingTime, _abandonGrace);
+                    "Message '{MessageId}' on {Kind} '{Target}' reached its time limit ({Cap}: MaxProcessingTime, or " +
+                    "its caller's deadline); its handler has been cancelled. Its lease is renewed until the handler " +
+                    "stops, or until it is abandoned after AbandonGrace ({Grace}) if it ignores the cancellation. " +
+                    "Either the handler is hung, or this work should be chunked rather than run in one message.",
+                    work.Id, TargetKind, TargetName, limit, _abandonGrace);
             }
             catch (Exception)
             {
@@ -389,18 +403,18 @@ internal abstract class SingleMessageWorkerLoop
 
         try
         {
-            cap.CancelAfter(MaxProcessingTime);
+            cap.CancelAfter(limit);
 
             // On the thread pool, so a handler that blocks synchronously before its first await
             // (Thread.Sleep, .Result, a lock) cannot stop this method reaching the abandonment check.
             var handler = Task.Run(() => ProcessAsync(work, cap.Token), CancellationToken.None);
-            var deadline = Task.Delay(MaxProcessingTime + _abandonGrace, abandonTimer.Token);
+            var deadline = Task.Delay(limit + _abandonGrace, abandonTimer.Token);
             var finished = await Task.WhenAny(handler, deadline).ConfigureAwait(false);
 
             if (finished != handler)
             {
                 abandoned = true;
-                Abandon(work.Id, handler, cap);
+                Abandon(work, limit, handler, cap);
                 return;
             }
 
@@ -458,8 +472,9 @@ internal abstract class SingleMessageWorkerLoop
     /// <summary>Abandoned invocations still running (diagnostics and tests).</summary>
     internal int AbandonedCount => _abandoned.Count;
 
-    private void Abandon(string id, Task handler, CancellationTokenSource cap)
+    private void Abandon(ClaimedWork work, TimeSpan limit, Task handler, CancellationTokenSource cap)
     {
+        var id = work.Id;
         _abandoned[cap.Token] = (id, DateTime.UtcNow);
         Observability.HighwayClientMetrics.RecordHandlerAbandoned(TargetKind);
 
@@ -467,14 +482,16 @@ internal abstract class SingleMessageWorkerLoop
         {
             Logger.LogError(
                 "Handler abandoned for message '{MessageId}' on {Kind} '{Target}' after {Elapsed}: it did not stop " +
-                "when cancelled at MaxProcessingTime. Its slot is released and its lease no longer renewed; the " +
-                "message will be redelivered when the lease expires. The handler is still running.",
-                id, TargetKind, TargetName, MaxProcessingTime + _abandonGrace);
+                "when cancelled at its time limit. Its slot is released and its lease no longer renewed; the handler " +
+                "is still running.",
+                id, TargetKind, TargetName, limit + _abandonGrace);
         }
         catch (Exception)
         {
             // A broken log sink must not leave this invocation counted against the bound forever (C7.1).
         }
+
+        _ = SafeOnAbandonedAsync(work);
 
         _ = handler.ContinueWith(t =>
         {
@@ -483,6 +500,16 @@ internal abstract class SingleMessageWorkerLoop
             cap.Dispose();
             _wake.Signal();
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private async Task SafeOnAbandonedAsync(ClaimedWork work)
+    {
+        try { await OnAbandonedAsync(work).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            try { Logger.LogWarning(ex, "Settling abandoned message '{MessageId}' on {Kind} '{Target}' failed", work.Id, TargetKind, TargetName); }
+            catch { /* C7.1 */ }
+        }
     }
 
     private void LogAbandonedLimitReachedOncePerMinute()
