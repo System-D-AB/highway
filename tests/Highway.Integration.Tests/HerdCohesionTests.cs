@@ -121,6 +121,9 @@ public class HerdCohesionTests : IDisposable
     [Fact]
     public async Task HardKill_HerdConverges_NoSplit_ZeroLoss_DuplicatesCounted()
     {
+        // 069 R4: HW_TEST_POOL_HOG=<n> keeps n thread-pool threads blocked for the whole test — the starved pool
+        // under which slow peer probes once let two standbys promote. Off by default.
+        using var hog = PoolHog.FromEnvironment();
         var node1 = StartNode("node1", 1, null);
         using var node2 = StartNode("node2", 2, node1);
         using var node3 = StartNode("node3", 3, node1);
