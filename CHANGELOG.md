@@ -30,7 +30,11 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   reached only through `HW.RESULT` and `HW.IDEM`; stock `GET`/`SET`/`DEL` now serve the opt-in cache
   only. See the 5.0 row of [`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md).
 - Replication declares the storage format in both directions (`HW.REPL.HELLO ... FORMAT 4`, and the
-  primary's reply echoes its own).
+  primary's reply echoes its own). Snapshot bootstrap checks it too: `HW.REPL.SNAPSHOT BEGIN` takes
+  `FORMAT 4` and its reply states the primary's format, so neither a 3.0 nor a 2.x replica copies a
+  snapshot in the other's format. Found by rehearsing the upgrade runbook with real 2.5.6 and 3.0
+  binaries: a blank 3.0 standby pointed at a 2.x primary used to copy its data, then refuse to start on
+  it; now it copies nothing and waits for the primary to be upgraded.
 - **The default `NodeName` includes the hosting name** (feature 072). A process running as a Windows
   service or in an IIS application pool now defaults to `{app}-{machine}-{service}` instead of
   `{app}-{machine}`, so several services from the same binaries on one machine are separate nodes. The
@@ -101,6 +105,11 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   connection name and the broker compared the raw one (072).
 - A failing broker log sink could fail a command after its commit, through the registry log lines 070
   added; those writes are now guarded like every other diagnostic (C7.1, 072).
+- `HW.SESSION` and `BYE PURGE` could fail after half-applying when concurrent sessions for the same node
+  kept moving the plan; they now always complete, under every lock on the last attempt (logged) (070).
+- A stale cached group-queue id could make `BYE PURGE` or a session retire the old queue again and leave
+  the live one orphaned; membership changes now re-check the queue against the store under their locks.
+  A publish racing a group's retirement no longer leaves an empty, member-less queue behind (070).
 
 ### Added
 
