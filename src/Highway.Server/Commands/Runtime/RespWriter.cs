@@ -125,11 +125,11 @@ internal sealed unsafe class RespWriter
         }
     }
 
-    /// <summary>HW.REPL.SNAPSHOT BEGIN: epoch, checkpoint seq, session id, manifest rows.</summary>
-    public void SnapshotBegin(ulong epoch, ulong seq, string sessionId, IReadOnlyList<(string Name, long Size)> manifest)
+    /// <summary>HW.REPL.SNAPSHOT BEGIN: epoch, checkpoint seq, session id, manifest rows, storage format (065).</summary>
+    public void SnapshotBegin(ulong epoch, ulong seq, string sessionId, IReadOnlyList<(string Name, long Size)> manifest, int format)
     {
         var idBytes = Encoding.UTF8.GetBytes(sessionId);
-        var size = ArrayHeaderSize(4) + 24 + 24 + BulkStringSize(idBytes.Length) + ArrayHeaderSize(manifest.Count);
+        var size = ArrayHeaderSize(5) + 24 + 24 + BulkStringSize(idBytes.Length) + ArrayHeaderSize(manifest.Count) + 24;
         var rows = new byte[manifest.Count][];
         var sizes = new byte[manifest.Count][];
         for (var i = 0; i < manifest.Count; i++)
@@ -144,7 +144,7 @@ internal sealed unsafe class RespWriter
         {
             var curr = ptr;
             var end = ptr + buffer.Length;
-            RespWriteUtils.TryWriteArrayLength(4, ref curr, end);
+            RespWriteUtils.TryWriteArrayLength(5, ref curr, end);
             RespWriteUtils.TryWriteInt64((long)epoch, ref curr, end);
             RespWriteUtils.TryWriteInt64((long)seq, ref curr, end);
             RespWriteUtils.TryWriteBulkString(idBytes, ref curr, end);
@@ -155,6 +155,7 @@ internal sealed unsafe class RespWriter
                 RespWriteUtils.TryWriteBulkString(rows[i], ref curr, end);
                 RespWriteUtils.TryWriteBulkString(sizes[i], ref curr, end);
             }
+            RespWriteUtils.TryWriteInt64(format, ref curr, end);
             Capture(buffer, (int)(curr - ptr));
         }
     }

@@ -239,6 +239,7 @@ public sealed class RocksDbStore : IHighwayStore
 
         int[] backoffSeconds = [1, 2, 5, 10, 30];
         var attempt = 0;
+        var formatLogged = false;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -246,6 +247,18 @@ public sealed class RocksDbStore : IHighwayStore
             {
                 BootstrapSnapshotAtomic(primaryServer, path, logger);
                 return;
+            }
+            catch (ReplicaPuller.SnapshotFormatException ex)
+            {
+                // 065: a 2.x primary under a 3.0 standby (or the reverse). Nothing is downloaded and the directory stays
+                // blank; wait, as for an unreachable primary, and bootstrap once the primary runs this major version.
+                // Each try makes the primary take a checkpoint, so try rarely: every 5 minutes.
+                var message = "[replication] primary {Primary} stores format {Theirs}; this node stores format {Ours}. Not replicating: " +
+                              "a replica must run the same major version as its primary. Waiting for the primary to be upgraded.";
+                if (!formatLogged) logger?.LogError(message, primaryHost, ex.PrimaryFormat, HighwayServerBuilder.StorageFormatVersion);
+                else logger?.LogWarning(message, primaryHost, ex.PrimaryFormat, HighwayServerBuilder.StorageFormatVersion);
+                formatLogged = true;
+                Task.Delay(TimeSpan.FromMinutes(5), cancellationToken).GetAwaiter().GetResult();
             }
             catch (Exception ex) when (IsTransientBootstrapFailure(ex))
             {

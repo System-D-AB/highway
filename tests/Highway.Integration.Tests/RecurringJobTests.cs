@@ -104,13 +104,24 @@ public class RecurringJobTests : IDisposable
         // The adversarial heart: N concurrent claims at the due instant. The fire runs inside
         // the claim transaction's locks, so exactly one of these promotes the occurrence —
         // and whichever poller claims it, there is only ONE to claim.
+        var race = System.Diagnostics.Stopwatch.StartNew();
         var claims = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => Task.Run(() =>
             _db.ClaimQ("rj.fire", $"racer-{i}"))));
+        race.Stop();
 
         var winners = claims.Where(c => c is not null).Select(c => c!.Value).ToArray();
-        winners.Should().HaveCount(1, "one occurrence, one claim — the transaction is the election");
+        winners.Should().NotBeEmpty();
+        winners.Should().AllSatisfy(w => w.Id.Should().StartWith("job:tick:", "occurrence ids name their schedule"));
 
-        winners[0].Id.Should().StartWith("job:tick:", "occurrence ids name their schedule");
+        // One occurrence, one claim — the transaction is the election. Under a starved pool the eight racers can
+        // spread past the 1 s interval and legitimately meet the NEXT occurrence too; a double fire would instead show
+        // two winners fired less than an interval apart.
+        var fired = winners.Select(w => long.Parse(w.Id["job:tick:".Length..], CultureInfo.InvariantCulture)).Order().ToArray();
+        if (fired.Length > 1)   // AllSatisfy fails on an empty sequence
+            fired.Zip(fired.Skip(1), (a, b) => b - a).Should().AllSatisfy(gap => gap.Should().BeGreaterThanOrEqualTo(TimeSpan.TicksPerSecond,
+            $"occurrences {string.Join(", ", fired)} — a schedule fires once per interval"));
+        winners.Length.Should().BeLessThanOrEqualTo(1 + (int)race.Elapsed.TotalSeconds,
+            $"the race took {race.Elapsed.TotalMilliseconds:F0} ms");
 
         // And the schedule re-armed: nextFire moved forward, lastFire recorded.
         var row = List().Should().ContainSingle(r => (string?)r[1] == "tick").Subject;

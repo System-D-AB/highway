@@ -120,8 +120,11 @@ re-bootstrapped master safe, where subscriptions and schedules would otherwise b
 **Formats must match** (3.0). A replica applies the primary's WAL byte for byte, so both must store the
 same layout. The replica form of `HW.REPL.HELLO` declares the storage format, and a primary refuses a
 replica with another one (`HW_STORAGE_FORMAT`). The primary's reply echoes its own format, so a 3.0
-replica also refuses a 2.x primary, which ignores the declaration and echoes nothing; a snapshot of 2.x data is refused when the replica
-opens it. A 2.x and a 3.0 node therefore never form a pair.
+replica also refuses a 2.x primary, which ignores the declaration and echoes nothing. Bootstrapping is
+checked the same way in both directions: a blank replica declares its format in `HW.REPL.SNAPSHOT BEGIN`
+and a primary refuses another one (or none — a 2.x replica) before taking a checkpoint; the reply states
+the primary's format, and a 2.x primary's reply, which does not, is refused before any file is
+downloaded. A refused replica stays blank and waits for the primary to be upgraded. A 2.x and a 3.0 node therefore never form a pair.
 
 **Upgrading a pair to 3.0 is a fresh start, one node at a time** (no in-place migration):
 1. Stop the standby, install 3.0 on it, run `highways --wipe-data`, and leave it stopped. The 2.x

@@ -656,7 +656,11 @@ format — by stamp, and by recognising pre-format-4 keys even without one — n
 (`highways --wipe-data`, which keeps the node's replication identity). It never opens such a directory
 as an empty, healthy-looking store. A replica declares its format in `HW.REPL.HELLO` and the primary
 echoes its own; each side refuses a mismatch (a 2.x primary, which echoes nothing, is refused by a 3.0
-replica), so a replica can never apply a WAL it would misread. **There is no in-place
+replica), so a replica can never apply a WAL it would misread. Snapshot bootstrap is checked the
+same way: `HW.REPL.SNAPSHOT BEGIN` carries the replica's format and its reply the primary's, so neither
+a 3.0 replica nor a 2.x one bootstraps a snapshot in another format (found in the 3.0 upgrade
+rehearsal: a blank 3.0 standby used to bootstrap a 2.x snapshot and then fail to start).
+**There is no in-place
 migration:** 2.x → 3.0 is a drain and a fresh start per node (see the
 [storage engine](../design/storage-engine.md) upgrade procedure).
 

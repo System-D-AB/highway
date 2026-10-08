@@ -96,6 +96,25 @@ internal sealed class ReplicaPuller : IAsyncDisposable
         return theirs == HighwayServerBuilder.StorageFormatVersion ? null : theirs.ToString(CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// 065: the primary's storage format as its <c>HW.REPL.SNAPSHOT BEGIN</c> reply states it, when it is not this
+    /// build's — or null when they match. A 2.x primary answers four elements (no format).
+    /// </summary>
+    internal static string? SnapshotFormatMismatch(RedisResult[] began)
+    {
+        if (began.Length < 5)
+            return "3 (Highway 2.x)";
+        var theirs = (long)began[4];
+        return theirs == HighwayServerBuilder.StorageFormatVersion ? null : theirs.ToString(CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>The primary's snapshot is in a storage format this build does not store (a 2.x primary under 3.0).</summary>
+    internal sealed class SnapshotFormatException(string primaryFormat) : Exception(
+        $"the primary stores format {primaryFormat}; this node stores format {HighwayServerBuilder.StorageFormatVersion}")
+    {
+        public string PrimaryFormat { get; } = primaryFormat;
+    }
+
     /// <summary>True once a WAL gap forced this replica into resync-required state (G4).</summary>
     public bool ResyncRequired { get; private set; }
 
@@ -108,7 +127,26 @@ internal sealed class ReplicaPuller : IAsyncDisposable
         var started = TimeProvider.System.GetUtcNow();
         using var mux = ConnectionMultiplexer.Connect(primaryServer);
         var db = mux.GetDatabase();
-        var began = (RedisResult[])db.Execute("HW.REPL.SNAPSHOT", "BEGIN")!;
+        // 065: declare this node's storage format (a 3.0 primary refuses another one with HW_STORAGE_FORMAT); a 3.0
+        // primary states its own as a fifth element, a 2.x primary - which ignores FORMAT - has none. A snapshot in
+        // another format would be refused by this build on open, so refuse it before downloading a byte.
+        RedisResult[] began;
+        try
+        {
+            began = (RedisResult[])db.Execute("HW.REPL.SNAPSHOT", "BEGIN", "FORMAT",
+                HighwayServerBuilder.StorageFormatVersion.ToString(CultureInfo.InvariantCulture))!;
+        }
+        catch (RedisServerException ex) when (ex.Message.Contains(Highway.Server.Internal.HighwayErrors.StorageFormat, StringComparison.Ordinal))
+        {
+            throw new SnapshotFormatException("another (the primary refused this node's format)");
+        }
+        if (SnapshotFormatMismatch(began) is { } theirs)
+        {
+            // A snapshot session pins a checkpoint on the primary until END or its restart: always try to end it.
+            try { db.Execute("HW.REPL.SNAPSHOT", "END", (string)began[2]!); }
+            catch (Exception) { /* best effort; the primary releases it on restart */ }
+            throw new SnapshotFormatException(theirs);
+        }
         var seq = (long)began[1];
         var session = (string)began[2]!;
         var manifest = (RedisResult[])began[3]!;

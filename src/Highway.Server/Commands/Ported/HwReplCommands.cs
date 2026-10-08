@@ -220,8 +220,9 @@ internal sealed class HwReplAckCommand : HighwayCommand
 }
 
 /// <summary>
-/// HW.REPL.SNAPSHOT BEGIN | GET &lt;session&gt; &lt;file&gt; &lt;offset&gt; &lt;maxBytes&gt; | END &lt;session&gt;
-/// (042 T3). Streams a RocksDB checkpoint over RESP; the replica needs no shared filesystem.
+/// HW.REPL.SNAPSHOT BEGIN FORMAT &lt;n&gt; | GET &lt;session&gt; &lt;file&gt; &lt;offset&gt; &lt;maxBytes&gt; | END &lt;session&gt;
+/// (042 T3). Streams a RocksDB checkpoint over RESP; the replica needs no shared filesystem. 065: BEGIN declares
+/// the replica's storage format and the reply states the primary's, so neither side takes a snapshot it would misread.
 /// </summary>
 internal sealed class HwReplSnapshotCommand : HighwayCommand
 {
@@ -231,6 +232,7 @@ internal sealed class HwReplSnapshotCommand : HighwayCommand
     private string _fileName = "";
     private ulong _offset;
     private int _maxBytes = 64 * 1024;
+    private long? _format;
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
     {
@@ -243,6 +245,13 @@ internal sealed class HwReplSnapshotCommand : HighwayCommand
         if (name.Equals("BEGIN", StringComparison.OrdinalIgnoreCase))
         {
             _form = Form.Begin;
+            var keyword = input.Next(ref idx);
+            if (keyword.IsEmpty) return true;   // no FORMAT: a 2.x replica, refused in Run
+            if (!Encoding.UTF8.GetString(keyword).Equals("FORMAT", StringComparison.OrdinalIgnoreCase)
+                || !long.TryParse(Encoding.UTF8.GetString(input.Next(ref idx)), System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var format))
+                return Fail(HighwayErrors.InvalidArg, "BEGIN takes FORMAT <n>");
+            _format = format;
             return true;
         }
 
@@ -283,9 +292,19 @@ internal sealed class HwReplSnapshotCommand : HighwayCommand
         switch (_form)
         {
             case Form.Begin:
+                // 065: a replica bootstraps the checkpoint as its own store, so it must store this layout. A 2.x
+                // replica sends no FORMAT (and ignores the format in the reply): refuse it before any checkpoint.
+                if (_format != HighwayServerBuilder.StorageFormatVersion)
+                {
+                    writer.Error(HighwayErrors.Format(HighwayErrors.StorageFormat,
+                        $"a replica storing format {(_format?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "3 (Highway 2.x)")} " +
+                        $"asked for a snapshot; this primary stores format {HighwayServerBuilder.StorageFormatVersion}. A replica must " +
+                        "run the same major version: upgrade it, run 'highways --wipe-data', and let it re-sync from this primary."));
+                    return;
+                }
                 var began = feeder.BeginSnapshot();
                 var manifest = began.Manifest.Select(f => (f.FileName, f.Size)).ToList();
-                writer.SnapshotBegin(began.Epoch, began.Sequence, began.SessionId, manifest);
+                writer.SnapshotBegin(began.Epoch, began.Sequence, began.SessionId, manifest, HighwayServerBuilder.StorageFormatVersion);
                 break;
             case Form.Get:
                 var chunk = feeder.ReadSnapshotChunk(_sessionId, _fileName, _offset, _maxBytes);

@@ -83,6 +83,20 @@ public class StorageFormatTests
     }
 
     [Fact]
+    public void ABlankReplica_RefusesASnapshotThatDoesNotStateItsFormat()
+    {
+        // A 2.x primary's SNAPSHOT BEGIN has four elements. Its checkpoint is format 3: bootstrapping it would leave a
+        // directory this build refuses on open, so the replica refuses it before downloading (065, rehearsal finding).
+        RedisResult[] Began(params RedisResult[] tail) =>
+            [RedisResult.Create(1), RedisResult.Create(0), RedisResult.Create((RedisValue)"s"), RedisResult.Create(Array.Empty<RedisResult>()), .. tail];
+
+        ReplicaPuller.SnapshotFormatMismatch(Began()).Should().Be("3 (Highway 2.x)");
+        ReplicaPuller.SnapshotFormatMismatch(Began(RedisResult.Create(5))).Should().Be("5");
+        ReplicaPuller.SnapshotFormatMismatch(Began(RedisResult.Create(Highway.Server.HighwayServerBuilder.StorageFormatVersion)))
+            .Should().BeNull();
+    }
+
+    [Fact]
     public void AReplica_RefusesAPrimaryThatDoesNotEchoItsFormat()
     {
         // A 2.x primary ignores the replica's FORMAT and answers [epoch, minSeq]: that is not consent.
