@@ -193,6 +193,38 @@ public class DuplicateSafetyTests
     }
 
     [Fact]
+    public void APublishWithAnEmptyId_IsRejected()
+    {
+        // Ported from 2.6.0 (PublishDuplicateTests).
+        using var h = Harness();
+        Text(h.Run(new HwPublishCommand(), T0, "news", "p", "ID", "")).Should().StartWith("-ERR HW_INVALID_ARG");
+    }
+
+    [Fact]
+    public void APublishRepeatedAfterTheWindow_IsDeliveredAgain()
+    {
+        using var h = Harness();
+        Subscribe(h, "node-1", "news", "billing");
+
+        h.Run(new HwPublishCommand(), T0, "news", "p", "ID", "pub-1");
+        h.Run(new HwPublishCommand(), T0 + TimeSpan.FromMinutes(11).Ticks, "news", "p", "ID", "pub-1");
+
+        Held(h, BoxKeys.Kind.Queue, "news@billing").Should().Be(2, "the 10-minute window has passed: it is a new publish");
+    }
+
+    [Fact]
+    public void AZeroPublishWindow_DisablesDeduplication()
+    {
+        using var h = new CommandHarness { Publishes = new RecentIds<long>(TimeSpan.Zero) };
+        Subscribe(h, "node-1", "news", "billing");
+
+        h.Run(new HwPublishCommand(), T0, "news", "p", "ID", "pub-1");
+        h.Run(new HwPublishCommand(), T0 + 1, "news", "p", "ID", "pub-1");
+
+        Held(h, BoxKeys.Kind.Queue, "news@billing").Should().Be(2);
+    }
+
+    [Fact]
     public void APublishWithoutId_IsNeverSuppressed()
     {
         using var h = Harness();

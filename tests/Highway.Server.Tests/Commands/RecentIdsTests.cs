@@ -111,6 +111,22 @@ public class RecentIdsTests
     }
 
     [Fact]
+    public void ForgottenIds_CannotGrowTheEvictionOrderPastItsBound()
+    {
+        // Ported from 2.6.0 (DuplicateSafetyReviewTests). Ids are forgotten when their request leaves unanswered
+        // (expired, failed, cancelled). Each leaves an entry in the eviction order; without a bound on the order
+        // itself, a sustained run of forgets would grow it for the whole window though the remembered set stays small.
+        var ids = new RecentIds<byte>(TimeSpan.FromHours(1), capacity: 100);
+        for (var i = 0; i < 10_000; i++)
+        {
+            ids.Admit("svc", $"r-{i}", i, 0);
+            ids.Forget("svc", $"r-{i}");
+        }
+
+        ids.OrderLength.Should().BeLessThanOrEqualTo(200);
+    }
+
+    [Fact]
     public void Scopes_AreIsolated()
     {
         var ids = new RecentIds<int>(TimeSpan.FromMinutes(10));
