@@ -1,23 +1,25 @@
 using System.Text;
 using Highway.Server.Commands.Runtime;
 using Highway.Server.Internal;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 
 namespace Highway.Server.Commands.Ported;
 
 /// <summary>
 /// Two forms (042 T1 + 042-1a D2):
 ///
-/// <para><b>Replica:</b> <c>HW.REPL.HELLO &lt;replicaId&gt; &lt;lastAppliedSeq&gt; &lt;epoch&gt;
-/// [endpoint] FORMAT &lt;n&gt;</c> → <c>[primaryEpoch, minSeq, format]</c>. The optional endpoint names where the
-/// caller is reachable — a promoting node announces itself with it, so a demoted
-/// primary's <c>-NOTPRIMARY</c> can redirect clients to the real primary.</para>
+/// <para><b>Replica:</b> <c>HW.REPL.HELLO &lt;replicaId&gt; &lt;position&gt; &lt;epoch&gt;
+/// [endpoint] FORMAT &lt;n&gt; [REPL &lt;replicationEndpoint&gt;] [NODE &lt;storeNodeId&gt;]</c> →
+/// <c>[primaryEpoch, minAcked, format, replicationEndpoint]</c>: a standby's heartbeat (contact and epoch, 076) and a
+/// promoting node's announce. The optional endpoint names where the caller is reachable — a promoting node announces
+/// itself with it, so a demoted primary's <c>-NOTPRIMARY</c> can redirect clients to the real primary; <c>REPL</c>
+/// names where its data is followed. The reply names this node's replication endpoint, which a standby follows.</para>
 ///
 /// <para><b>Client (the herd handshake):</b> <c>HW.REPL.HELLO CLIENT &lt;clientId&gt;
 /// &lt;lastSeenEpoch&gt;</c> → <c>["master"|"willing", epoch, rosterVersion]</c> when this
 /// node is the master or is willing to accept the herd, else
 /// <c>["standby", masterEndpoint, masterEpoch]</c> — the redirect a confused client
-/// follows. Willingness is the contract predicate (<see cref="ReplicationFeeder.IsWillingForHerd"/>);
+/// follows. Willingness is the contract predicate (<see cref="HighwayReplication.IsWillingForHerd"/>);
 /// answering it never promotes — promotion happens on the first accepted client verb
 /// (042-1c).</para>
 ///
@@ -37,6 +39,8 @@ internal sealed class HwReplHelloCommand : HighwayCommand
     private ulong _epoch;
     private string? _endpoint;
     private int? _format;
+    private string? _replicationEndpoint;
+    private string? _storeNodeId;
 
     protected override bool Parse(CommandContext ctx, CommandInput input)
     {
@@ -62,7 +66,7 @@ internal sealed class HwReplHelloCommand : HighwayCommand
             return false;
         if (!TryReadUInt64(input, ref idx, "epoch", out _epoch))
             return false;
-        // Optional: <endpoint> and FORMAT <n> (065 T6), in either order.
+        // Optional, in any order: <endpoint>, FORMAT <n> (065 T6), REPL <replicationEndpoint> and NODE <storeNodeId> (076).
         for (var arg = input.Next(ref idx); !arg.IsEmpty; arg = input.Next(ref idx))
         {
             var text = Encoding.UTF8.GetString(arg);
@@ -71,6 +75,18 @@ internal sealed class HwReplHelloCommand : HighwayCommand
                 if (!int.TryParse(Encoding.ASCII.GetString(input.Next(ref idx)), out var format))
                     return Fail(HighwayErrors.InvalidArg, "FORMAT requires the storage format number");
                 _format = format;
+            }
+            else if (text.Equals("REPL", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = input.Next(ref idx);
+                if (value.IsEmpty) return Fail(HighwayErrors.InvalidArg, "REPL requires the replication endpoint");
+                _replicationEndpoint = Encoding.UTF8.GetString(value);
+            }
+            else if (text.Equals("NODE", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = input.Next(ref idx);
+                if (value.IsEmpty) return Fail(HighwayErrors.InvalidArg, "NODE requires the store node id");
+                _storeNodeId = Encoding.UTF8.GetString(value);
             }
             else
             {
@@ -91,8 +107,8 @@ internal sealed class HwReplHelloCommand : HighwayCommand
             return;
         }
 
-        // 065 T6: a replica applies this primary's WAL byte for byte, so it must store the same layout.
-        // A 2.x node (format 3) sends no FORMAT: it must never pull 3.0 batches into its old keyspace.
+        // 065 T6: a replica holds this primary's data key for key, so it must store the same layout.
+        // A 2.x node (format 3) sends no FORMAT: it must never follow 3.0 data into its old keyspace.
         if (_format != HighwayServerBuilder.StorageFormatVersion)
         {
             writer.Error(HighwayErrors.Format(HighwayErrors.StorageFormat,
@@ -102,13 +118,14 @@ internal sealed class HwReplHelloCommand : HighwayCommand
             return;
         }
 
-        var (epoch, minSeq) = feeder.Hello(_replicaId, _lastApplied, _epoch, _endpoint);
-        // The reply echoes this primary's format: a 2.x primary ignores FORMAT and answers two
-        // integers, and a 3.0 replica must not take that for consent (it would pull format-3 batches).
-        writer.ThreeIntegers((long)epoch, (long)minSeq, HighwayServerBuilder.StorageFormatVersion);
+        var (epoch, minSeq) = feeder.Hello(_replicaId, _lastApplied, _epoch, _endpoint, _replicationEndpoint, _storeNodeId);
+        // The reply echoes this primary's format (a 2.x primary ignores FORMAT and answers two integers, which a 3.0
+        // replica must not take for consent) and names where this primary's data is followed (076).
+        writer.HelloReply((long)epoch, (long)minSeq, HighwayServerBuilder.StorageFormatVersion, feeder.ReplicationEndpoint,
+            feeder.IsDataLive(_storeNodeId));
     }
 
-    private void RunClientHandshake(CommandContext ctx, RespWriter writer, ReplicationFeeder feeder)
+    private void RunClientHandshake(CommandContext ctx, RespWriter writer, HighwayReplication feeder)
     {
         // A client that saw a higher epoch informs (RD7's any-channel rule).
         if (_epoch > feeder.Epoch)
@@ -139,7 +156,7 @@ internal sealed class HwReplHelloCommand : HighwayCommand
         return raw is null ? 0 : RosterRecord.Decode(raw).Version;
     }
 
-    internal static bool TryFeeder(CommandContext ctx, RespWriter writer, out ReplicationFeeder feeder)
+    internal static bool TryFeeder(CommandContext ctx, RespWriter writer, out HighwayReplication feeder)
     {
         if (ctx.Replication is { } f)
         {
@@ -149,172 +166,8 @@ internal sealed class HwReplHelloCommand : HighwayCommand
 
         feeder = null!;
         writer.Error(HighwayErrors.Format(HighwayErrors.InvalidArg,
-            "replication requires a durable RocksDB broker; this instance is ephemeral"));
+            "replication requires a durable broker; this instance is ephemeral"));
         return false;
-    }
-}
-
-/// <summary>HW.REPL.PULL &lt;fromSeq&gt; &lt;maxBytes&gt; → [epoch, [[seq, data], ...], nextSeq|nil] (042 T1).</summary>
-internal sealed class HwReplPullCommand : HighwayCommand
-{
-    private ulong _fromSeq;
-    private int _maxBytes;
-
-    protected override bool Parse(CommandContext ctx, CommandInput input)
-    {
-        var idx = 0;
-        if (!TryReadUInt64(input, ref idx, "fromSeq", out _fromSeq))
-            return false;
-        if (!TryReadUInt64(input, ref idx, "maxBytes", out var maxBytes))
-            return false;
-        if (maxBytes == 0 || maxBytes > int.MaxValue)
-            return Fail(HighwayErrors.InvalidArg, "maxBytes must be in 1..2147483647");
-        _maxBytes = (int)maxBytes;
-        return true;
-    }
-
-    protected override void Run(CommandContext ctx, RespWriter writer)
-    {
-        if (!HwReplHelloCommand.TryFeeder(ctx, writer, out var feeder))
-            return;
-        try
-        {
-            var page = feeder.Pull(_fromSeq, _maxBytes);
-            writer.ReplicationPull(page.Epoch, page.Batches, page.NextSeq);
-        }
-        catch (ReplicationGapException gap)
-        {
-            // G4: never serve a gapped stream as contiguous — the replica re-bootstraps.
-            writer.Error(HighwayErrors.Format(HighwayErrors.ReplGap,
-                $"requested={gap.RequestedSeq} firstAvailable={gap.FirstAvailableSeq}; re-sync via HW.REPL.SNAPSHOT"));
-        }
-    }
-}
-
-/// <summary>HW.REPL.ACK &lt;replicaId&gt; &lt;appliedSeq&gt; → +OK (042 T1).</summary>
-internal sealed class HwReplAckCommand : HighwayCommand
-{
-    private string _replicaId = "";
-    private ulong _appliedSeq;
-
-    protected override bool Parse(CommandContext ctx, CommandInput input)
-    {
-        var idx = 0;
-        if (!TryReadIdentifier(input, ref idx, "replicaId", ctx.Options.MaxIdentifierBytes, out _replicaId))
-            return false;
-        return TryReadUInt64(input, ref idx, "appliedSeq", out _appliedSeq);
-    }
-
-    protected override void Run(CommandContext ctx, RespWriter writer)
-    {
-        if (!HwReplHelloCommand.TryFeeder(ctx, writer, out var feeder))
-            return;
-        if (!feeder.Ack(_replicaId, _appliedSeq))
-        {
-            writer.Error(HighwayErrors.Format(HighwayErrors.InvalidArg,
-                $"replica '{_replicaId}' has no slot; send HW.REPL.HELLO first"));
-            return;
-        }
-        writer.SimpleString("OK");
-    }
-}
-
-/// <summary>
-/// HW.REPL.SNAPSHOT BEGIN FORMAT &lt;n&gt; | GET &lt;session&gt; &lt;file&gt; &lt;offset&gt; &lt;maxBytes&gt; | END &lt;session&gt;
-/// (042 T3). Streams a RocksDB checkpoint over RESP; the replica needs no shared filesystem. 065: BEGIN declares
-/// the replica's storage format and the reply states the primary's, so neither side takes a snapshot it would misread.
-/// </summary>
-internal sealed class HwReplSnapshotCommand : HighwayCommand
-{
-    private enum Form { Begin, Get, End }
-    private Form _form;
-    private string _sessionId = "";
-    private string _fileName = "";
-    private ulong _offset;
-    private int _maxBytes = 64 * 1024;
-    private long? _format;
-
-    protected override bool Parse(CommandContext ctx, CommandInput input)
-    {
-        var idx = 0;
-        var verb = input.Next(ref idx);
-        if (verb.IsEmpty)
-            return Fail(HighwayErrors.InvalidArg, "SNAPSHOT requires BEGIN, GET, or END");
-
-        var name = Encoding.UTF8.GetString(verb);
-        if (name.Equals("BEGIN", StringComparison.OrdinalIgnoreCase))
-        {
-            _form = Form.Begin;
-            var keyword = input.Next(ref idx);
-            if (keyword.IsEmpty) return true;   // no FORMAT: a 2.x replica, refused in Run
-            if (!Encoding.UTF8.GetString(keyword).Equals("FORMAT", StringComparison.OrdinalIgnoreCase)
-                || !long.TryParse(Encoding.UTF8.GetString(input.Next(ref idx)), System.Globalization.NumberStyles.None,
-                    System.Globalization.CultureInfo.InvariantCulture, out var format))
-                return Fail(HighwayErrors.InvalidArg, "BEGIN takes FORMAT <n>");
-            _format = format;
-            return true;
-        }
-
-        if (name.Equals("END", StringComparison.OrdinalIgnoreCase))
-        {
-            _form = Form.End;
-            var id = input.Next(ref idx);
-            if (id.IsEmpty) return Fail(HighwayErrors.InvalidArg, "END requires a session id");
-            _sessionId = Encoding.UTF8.GetString(id);
-            return true;
-        }
-
-        if (!name.Equals("GET", StringComparison.OrdinalIgnoreCase))
-            return Fail(HighwayErrors.InvalidArg, "SNAPSHOT form must be BEGIN, GET, or END");
-
-        _form = Form.Get;
-        var session = input.Next(ref idx);
-        var file = input.Next(ref idx);
-        if (session.IsEmpty || file.IsEmpty)
-            return Fail(HighwayErrors.InvalidArg, "GET requires sessionId, fileName, offset, maxBytes");
-        _sessionId = Encoding.UTF8.GetString(session);
-        _fileName = Encoding.UTF8.GetString(file);
-        if (!TryReadUInt64(input, ref idx, "offset", out _offset))
-            return false;
-        if (!TryReadUInt64(input, ref idx, "maxBytes", out var maxBytes))
-            return false;
-        if (maxBytes == 0 || maxBytes > int.MaxValue)
-            return Fail(HighwayErrors.InvalidArg, "maxBytes must be in 1..2147483647");
-        _maxBytes = (int)maxBytes;
-        return true;
-    }
-
-    protected override void Run(CommandContext ctx, RespWriter writer)
-    {
-        if (!HwReplHelloCommand.TryFeeder(ctx, writer, out var feeder))
-            return;
-
-        switch (_form)
-        {
-            case Form.Begin:
-                // 065: a replica bootstraps the checkpoint as its own store, so it must store this layout. A 2.x
-                // replica sends no FORMAT (and ignores the format in the reply): refuse it before any checkpoint.
-                if (_format != HighwayServerBuilder.StorageFormatVersion)
-                {
-                    writer.Error(HighwayErrors.Format(HighwayErrors.StorageFormat,
-                        $"a replica storing format {(_format?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "3 (Highway 2.x)")} " +
-                        $"asked for a snapshot; this primary stores format {HighwayServerBuilder.StorageFormatVersion}. A replica must " +
-                        "run the same major version: upgrade it, run 'highways --wipe-data', and let it re-sync from this primary."));
-                    return;
-                }
-                var began = feeder.BeginSnapshot();
-                var manifest = began.Manifest.Select(f => (f.FileName, f.Size)).ToList();
-                writer.SnapshotBegin(began.Epoch, began.Sequence, began.SessionId, manifest, HighwayServerBuilder.StorageFormatVersion);
-                break;
-            case Form.Get:
-                var chunk = feeder.ReadSnapshotChunk(_sessionId, _fileName, _offset, _maxBytes);
-                writer.SnapshotChunk(chunk.FileName, chunk.Offset, chunk.Data, chunk.NextOffset);
-                break;
-            default:
-                feeder.EndSnapshot(_sessionId);
-                writer.SimpleString("OK");
-                break;
-        }
     }
 }
 

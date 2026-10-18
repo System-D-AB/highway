@@ -1,5 +1,5 @@
 using System.Diagnostics.Metrics;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 
 namespace Highway.Server.Observability;
 
@@ -62,7 +62,7 @@ internal sealed class HighwayMetrics : IDisposable
     /// <param name="storageProperty">Reads durable storage properties if available.</param>
     /// <param name="sampleFeeds">Reads active dead-letter feed depths on demand.</param>
     public HighwayMetrics(
-        ReplicationFeeder? replication,
+        HighwayReplication? replication,
         Func<IReadOnlyList<QueueStateDto>> sampleQueues,
         FlightRecorder recorder,
         string? meterName = null,
@@ -177,7 +177,7 @@ internal sealed class HighwayMetrics : IDisposable
 
     // ---- gauge sampling helpers ----------------------------------------------
 
-    private static IEnumerable<Measurement<long>> RoleMeasurements(ReplicationFeeder feeder)
+    private static IEnumerable<Measurement<long>> RoleMeasurements(HighwayReplication feeder)
     {
         var role = feeder.Role;
         yield return new(role == ReplicaRole.Primary ? 1 : 0, new KeyValuePair<string, object?>("role", "primary"));
@@ -186,17 +186,13 @@ internal sealed class HighwayMetrics : IDisposable
         yield return new(role == ReplicaRole.Demoted ? 1 : 0, new KeyValuePair<string, object?>("role", "demoted"));
     }
 
-    private static IEnumerable<Measurement<long>> LagMeasurements(ReplicationFeeder feeder)
+    private static IEnumerable<Measurement<long>> LagMeasurements(HighwayReplication feeder)
     {
-        var latest = feeder.Engine.GetLatestSequenceNumber();
         foreach (var slot in feeder.Slots.Values)
-        {
-            var lag = latest > slot.AckedSeq ? (long)(latest - slot.AckedSeq) : 0;
-            yield return new(lag, new KeyValuePair<string, object?>("replica", slot.ReplicaId));
-        }
+            yield return new((long)slot.Lag, new KeyValuePair<string, object?>("replica", slot.ReplicaId));
     }
 
-    private static double RpoSeconds(ReplicationFeeder feeder)
+    private static double RpoSeconds(HighwayReplication feeder)
     {
         var now = feeder.Options.Clock.GetUtcNow();
         double worst = 0;

@@ -1,6 +1,7 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Server;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
@@ -13,73 +14,78 @@ namespace Highway.Server.Tests.Storage;
 /// </summary>
 public class LeadershipVisibilityTests
 {
-    private static Dictionary<string, string> Stats(ReplicationFeeder feeder)
+    private static Dictionary<string, string> Stats(HighwayReplication feeder)
         => feeder.StatsFields().ToDictionary(f => f.Name, f => f.Value, StringComparer.Ordinal);
 
     [Fact]
     public void Redundancy_Single_ForALonePrimaryWithNoRoster()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);   // default: primary, empty roster
+            using var store = CrystalHighwayStore.Open(dir);   // default: primary, empty roster
             Stats(store.Replication)["repl.redundancy"].Should().Be("single", "a lone node expects no standby");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void Redundancy_NoStandby_WhenRosterExpectsAStandbyButNoneIsAttached()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);   // primary
+            using var store = CrystalHighwayStore.Open(dir);   // primary
             RosterStore.TryUpsert(store, new RosterMember("node-a", 50, "10.0.0.1:6500"), out _, out _);
             RosterStore.TryUpsert(store, new RosterMember("node-b", 100, "10.0.0.2:6500"), out _, out _);
 
             Stats(store.Replication)["repl.redundancy"].Should().Be("no-standby", "roster expects a standby, none attached");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
-    public void Redundancy_Healthy_WithAnActiveStandbyAttached()
+    public void Redundancy_IsNotHealthy_WhileAStandbySaysHelloButReceivesNothing()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        // 076 (review H1): a hello proves the standby reaches RESP, not that it replicates. Until the replication layer
+        // shows it pulling, its slot is not Active and the set has no standby. The healthy case — a standby that follows —
+        // is proven end to end by ReplicationPairTests and RollingUpgradeTests.
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             RosterStore.TryUpsert(store, new RosterMember("node-a", 50, "10.0.0.1:6500"), out _, out _);
             RosterStore.TryUpsert(store, new RosterMember("node-b", 100, "10.0.0.2:6500"), out _, out _);
-            store.Replication.Hello("node-b", 0, store.Replication.Epoch);   // a standby attaches
+            store.Replication.Hello("node-b", 0, store.Replication.Epoch, crystalNodeId: Guid.NewGuid().ToString());
 
-            Stats(store.Replication)["repl.redundancy"].Should().Be("healthy");
+            Stats(store.Replication)["repl.redundancy"].Should().Be("no-standby");
+            store.Replication.Slots["node-b"].State.Should().Be(SlotState.Lagging);
+            store.Replication.IsDataLive(null).Should().BeFalse();
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void Redundancy_Demoted_AfterBeingSuperseded()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             store.Replication.ObserveHigherEpoch(store.Replication.Epoch + 1, "superseded", "10.0.0.9:6500");
 
             Stats(store.Replication)["repl.redundancy"].Should().Be("demoted");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void LeadershipSince_And_EventTimeline_SetOnPromote()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 Priority = 100,
@@ -93,6 +99,6 @@ public class LeadershipVisibilityTests
             stats.Should().ContainKey("repl.event.0", "recent role changes are surfaced as a timeline");
             stats.Values.Should().Contain(v => v.StartsWith("promote", StringComparison.Ordinal));
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 }

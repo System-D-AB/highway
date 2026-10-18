@@ -1,5 +1,6 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
@@ -47,10 +48,10 @@ public class HerdNoSplitTests
     public async Task ALowerStandby_DefersToALiveWillingSuccessor_InsteadOfPromoting()
     {
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewBootstrappedDir();   // 076: a standby that has bootstrapped
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: Options(clock, replica: true, "n3", 3, Lower));
+            using var store = CrystalHighwayStore.Open(dir, replication: Options(clock, replica: true, "n3", 3, Lower));
             var feeder = store.Replication;
             var answers = new Dictionary<string, (PeerAnswer, string?)>
             {
@@ -72,7 +73,7 @@ public class HerdNoSplitTests
             await feeder.ProbeHigherPeersAsync();
             feeder.IsWillingForHerd().Should().BeTrue("every higher-priority peer is gone, so n3 is the successor");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -80,10 +81,10 @@ public class HerdNoSplitTests
     {
         // The standby's own link stalled (load), but the master is alive: that is not a lost master.
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewBootstrappedDir();   // 076: a standby that has bootstrapped
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: Options(clock, replica: true, "n2", 2, Successor));
+            using var store = CrystalHighwayStore.Open(dir, replication: Options(clock, replica: true, "n2", 2, Successor));
             var feeder = store.Replication;
             feeder.RosterMembers = () => Roster;
             feeder.PeerProbe = Probe(clock, new() { [Master] = (PeerAnswer.Master, Master) });
@@ -94,7 +95,7 @@ public class HerdNoSplitTests
             feeder.IsWillingForHerd().Should().BeFalse();
             feeder.RedirectEndpoint().Should().Be(Master);
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -102,10 +103,10 @@ public class HerdNoSplitTests
     {
         // GOODBYE: the leaving master answers standby and redirects to itself, the signal to walk on.
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewBootstrappedDir();   // 076: a standby that has bootstrapped
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: Options(clock, replica: true, "n2", 2, Successor));
+            using var store = CrystalHighwayStore.Open(dir, replication: Options(clock, replica: true, "n2", 2, Successor));
             var feeder = store.Replication;
             feeder.RosterMembers = () => Roster;
             feeder.PeerProbe = Probe(clock, new() { [Master] = (PeerAnswer.Standby, Master) });
@@ -115,17 +116,17 @@ public class HerdNoSplitTests
             await feeder.ProbeHigherPeersAsync();
             feeder.IsWillingForHerd().Should().BeTrue("GOODBYE hands the herd over at once");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public async Task AStaleAnswer_IsNoEvidence()
     {
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewBootstrappedDir();   // 076: a standby that has bootstrapped
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: Options(clock, replica: true, "n2", 2, Successor));
+            using var store = CrystalHighwayStore.Open(dir, replication: Options(clock, replica: true, "n2", 2, Successor));
             var feeder = store.Replication;
             feeder.RosterMembers = () => Roster;
             feeder.PeerProbe = Probe(clock, new() { [Master] = (PeerAnswer.Unreachable, null) });
@@ -138,7 +139,7 @@ public class HerdNoSplitTests
             clock.Advance(HigherPeerWatch.Freshness + TimeSpan.FromSeconds(1));   // probes stalled
             feeder.IsWillingForHerd().Should().BeFalse("without a recent answer the master may be back");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -181,12 +182,12 @@ public class HerdNoSplitTests
     public void TwoPrimariesAtOneEpoch_TheLowerPriorityYields_AndSchedulesItsRejoin()
     {
         var clock = new ManualClock();
-        var lowDir = ReplicationToolkitSurfaceTests.NewTempDir();
-        var highDir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var lowDir = TempDirs.NewTempDir();
+        var highDir = TempDirs.NewTempDir();
         try
         {
-            using var low = RocksDbStore.Open(lowDir, replication: Options(clock, replica: false, "n3", 3, Lower));
-            using var high = RocksDbStore.Open(highDir, replication: Options(clock, replica: false, "n2", 2, Successor));
+            using var low = CrystalHighwayStore.Open(lowDir, replication: Options(clock, replica: false, "n3", 3, Lower));
+            using var high = CrystalHighwayStore.Open(highDir, replication: Options(clock, replica: false, "n2", 2, Successor));
             low.Replication.RosterMembers = () => Roster;
             high.Replication.RosterMembers = () => Roster;
             low.Replication.Epoch.Should().Be(high.Replication.Epoch);
@@ -200,13 +201,13 @@ public class HerdNoSplitTests
             low.Replication.Role.Should().Be(ReplicaRole.Demoted, "the lower-priority one yields");
             low.Replication.RedirectEndpoint().Should().Be(Successor);
             low.Replication.Transitions.Should().Contain(t => t.Contains("equal-epoch-tie-break"));
-            ReplicaPuller.ReadRejoinMarker(low.DataDir)!.Value.Endpoint.Should().Be(Successor,
+            NodeRecord.ReadRejoin(low.Crystal).Should().Be(Successor,
                 "it rejoins the survivor as its replica, like any demoted ex-primary");
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(lowDir);
-            ReplicationToolkitSurfaceTests.TryDelete(highDir);
+            TempDirs.TryDelete(lowDir);
+            TempDirs.TryDelete(highDir);
         }
     }
 }

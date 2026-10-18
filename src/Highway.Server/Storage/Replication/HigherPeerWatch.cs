@@ -1,7 +1,7 @@
 using System.Globalization;
 using StackExchange.Redis;
 
-namespace Highway.Server.Storage.Rocks;
+namespace Highway.Server.Storage.Replication;
 
 /// <summary>
 /// What a roster peer answered when probed (069 R1). <see cref="Unreachable"/> is a quick, definitive
@@ -103,13 +103,13 @@ internal static class HigherPeerWatch
     }
 
     /// <summary>The production probe: a short-lived connection and one <c>HW.REPL.HELLO PEER</c>.</summary>
-    public static Func<string, CancellationToken, Task<PeerObservation>> NetworkProbe(ReplicationFeeder feeder)
+    public static Func<string, CancellationToken, Task<PeerObservation>> NetworkProbe(HighwayReplication feeder)
         => async (endpoint, ct) =>
         {
             var started = Environment.TickCount64;
             try
             {
-                var config = ConfigurationOptions.Parse(endpoint + ReplicationFeeder.ConnectionTail(feeder.Options.PrimaryServer));
+                var config = ConfigurationOptions.Parse(endpoint + HighwayReplication.ConnectionTail(feeder.Options.PrimaryServer));
                 config.ConnectTimeout = ProbeTimeoutMs;
                 config.AsyncTimeout = ProbeTimeoutMs;
                 config.SyncTimeout = ProbeTimeoutMs;

@@ -1,10 +1,11 @@
+using Highway.Server.Storage.Crystal;
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using FluentAssertions;
 using Highway.Server.Storage.Layout;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
@@ -50,7 +51,7 @@ public class CrashReplayTests
             lastAcked.Should().BeGreaterThanOrEqualTo(0, "the harness must have acked at least one commit");
 
             // Reopen and audit: every acked seq [0..lastAcked] is present, in order, no gaps.
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             var listPrefix = HighwayKeyspace.ListPrefix(HighwayNames.Queue(Queue));
             using var snap = store.Snapshot();
             var recovered = store.ListLength(snap, listPrefix);
@@ -77,7 +78,7 @@ public class CrashReplayTests
         {
             RunToCompletion(harness, refDir, n);
             List<(byte[] Key, byte[] Value)> reference;
-            using (var store = RocksDbStore.Open(refDir))
+            using (var store = CrystalHighwayStore.Open(refDir))
                 reference = store.DumpData();
 
             // Crash run: write forever, kill after >= N acks, reopen.
@@ -101,7 +102,7 @@ public class CrashReplayTests
 
             lastAcked.Should().BeGreaterThanOrEqualTo(n);
 
-            using var crashed = RocksDbStore.Open(crashDir);
+            using var crashed = CrystalHighwayStore.Open(crashDir);
             var recovered = crashed.DumpData();
 
             // Compare the queue ENTRY keys (the `q` family), which are deterministic per

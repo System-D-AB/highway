@@ -190,6 +190,9 @@ public sealed class ReplicationSection
     public int Priority { get; set; } = 100;
     public string? AdvertiseEndpoint { get; set; }
     public string? PrimaryServer { get; set; }
+    public string? ReplicationListen { get; set; }              // 076: the replication port (default RESP port + 1)
+    public string? ReplicationAdvertiseEndpoint { get; set; }   // 076
+    public string? ReplicationSecret { get; set; }              // 076: default the broker password
     public ulong SlotLagCapSequences { get; set; } = 100_000;
     public TimeSpan SlotStaleAfter { get; set; } = TimeSpan.FromSeconds(60);
     public bool AutoFailover { get; set; }

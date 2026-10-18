@@ -196,6 +196,11 @@ public static class Program
             Console.Error.WriteLine(ex.Message);
             return ExitCodes.ConfigurationInvalid;
         }
+        catch (NotSupportedException ex)
+        {
+            Console.Error.WriteLine(ex.Message);   // 076: the storage engine offers no offline compaction yet
+            return ExitCodes.ConfigurationInvalid;
+        }
         catch (Exception ex) when (ex.Message.Contains("lock", StringComparison.OrdinalIgnoreCase))
         {
             Console.Error.WriteLine("The data directory is in use - stop the Highway broker (service) first, then run --compact.");
@@ -206,7 +211,7 @@ public static class Program
 
     /// <summary>
     /// <c>--wipe-data</c> (065 T6): empties the configured data directory for a fresh Highway 3.0 start,
-    /// keeping the node-local replication files (its epoch — its identity in the replica set). 3.0 does not
+    /// keeping the node's identity and epoch (its place in the replica set). 3.0 does not
     /// migrate 2.x data in place; this is the step between draining on 2.x and starting 3.0. The broker must
     /// be stopped.
     /// </summary>
@@ -224,8 +229,11 @@ public static class Program
                 return ExitCodes.ConfigurationInvalid;
             }
 
+            var wasStore = File.Exists(Path.Combine(dataDir, "crystal.format"));
             var removed = Highway.Server.HighwayStorageMaintenance.WipeData(dataDir);
-            Console.WriteLine($"Wiped {dataDir}: removed {removed} entr{(removed == 1 ? "y" : "ies")}; kept the node's replication files.");
+            Console.WriteLine(wasStore
+                ? $"Wiped {dataDir}: removed {removed} entr{(removed == 1 ? "y" : "ies")}; kept the node's identity and epoch."
+                : $"Wiped {dataDir}: removed {removed} entr{(removed == 1 ? "y" : "ies")} written by an earlier storage engine; the directory is empty.");
             Console.WriteLine("Every queued, in-flight, delayed and dead-lettered message in it is gone. Start the broker to begin empty.");
             return ExitCodes.Success;
         }

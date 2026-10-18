@@ -1,3 +1,4 @@
+using Highway.Server.Storage.Crystal;
 using System.Collections.Generic;
 using System.Text;
 using Highway.Server;
@@ -61,7 +62,7 @@ internal sealed class CommandHarness : IDisposable
     /// <summary>Runs with a given RPC outcome log (074).</summary>
     public byte[] RunWith(HighwayCommand command, long nowTicks, Highway.Server.Commands.Runtime.RpcOutcomeLog rpcLog, params string[] args)
     {
-        var replication = _store is Highway.Server.Storage.Rocks.RocksDbStore rocks
+        var replication = _store is Highway.Server.Storage.Crystal.CrystalHighwayStore rocks
             ? rocks.Replication
             : null;
         var ctx = new CommandContext(_store, _locks, _doorbell, _recorder, _options, nowTicks, replication, boxes: _boxes, instances: Instances, calls: Calls, sends: Sends, publishes: Publishes, rpcLog: rpcLog);

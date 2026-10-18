@@ -70,6 +70,13 @@ internal abstract class HighwayCommand
             writer.Error(HighwayErrors.StorageFormatError(ex.Message));
             return false;
         }
+        catch (SystemD.Crystal.NotPrimaryException) when (ctx.Replication is { } replication)
+        {
+            // 076: the node stood down after the dispatcher's write gate admitted this command; the store refused the
+            // write. Same answer the gate gives, so the client's herd logic moves it (review M4).
+            writer.NotPrimary(replication.RedirectEndpoint(), replication.Epoch);
+            return false;
+        }
         catch (Exception ex)
         {
             writer.Error(HighwayErrors.InternalError(ex.Message));

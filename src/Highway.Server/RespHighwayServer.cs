@@ -3,7 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using Highway.Server.Observability;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -16,7 +16,7 @@ namespace Highway.Server;
 /// Garnet-hosted <c>HighwayServer</c> on the running path.
 ///
 /// <para>Composition mirrors what <c>HighwayTestServer</c> does internally: a store built from
-/// <see cref="HighwayServerOptions.DataDir"/> (RocksDB when set, in-memory when null), a
+/// <see cref="HighwayServerOptions.DataDir"/> (SystemD.Crystal when set, in-memory when null), a
 /// <see cref="PasswordAuthenticator"/> from the auth options (loopback exempt in production, the
 /// C6.x posture), and any in-process components (the dashboard) given a store-backed
 /// <see cref="IBrokerState"/> so they read the engine directly rather than over a self-connection
@@ -35,7 +35,6 @@ public sealed class RespHighwayServer : IHighwayServer
 
     private IHighwayStore? _store;
     private RespServer? _server;
-    private ReplicaPuller? _puller;
     private IHighwayServerComponent[] _components = [];
     private bool _started;
 
@@ -80,17 +79,23 @@ public sealed class RespHighwayServer : IHighwayServer
         // the puller, so replication is visible in logs/ without HW.REPL.STATUS or extra tooling.
         var replLogger = _loggerFactory.CreateLogger("Highway.Replication");
 
-        // 050 T3: derive the shared-secret tail an auto-rejoin uses to authenticate its snapshot/pull
-        // to the learned primary (the endpoint itself carries no credentials). Set before Open.
+        // 050 T3: derive the shared-secret tail a rejoined standby uses to say hello to the learned
+        // primary (the endpoint itself carries no credentials). Set before Open.
         _opts.Replication.AuthTail = string.IsNullOrEmpty(_opts.Authentication.Password)
             ? null : $",password={_opts.Authentication.Password}";
+        // 076: Crystal replicates on its own port (RESP port + 1 unless configured, bound once replication is used),
+        // under the replica set's shared secret — the broker password unless one is configured.
+        _opts.Replication.DefaultReplicationListen = $"{_opts.BindAddress}:{_opts.Port + 1}";
+        _opts.Replication.TlsCertificate = _serverCertificate;
+        _opts.Replication.TlsRequireClientCertificate = _opts.Tls.ClientCertificateRequired;
+        _opts.Replication.ReplicationSecret ??= _opts.Authentication.Password;
 
-        // Store: RocksDB when a data directory is configured (durable), in-memory otherwise.
+        // Store: SystemD.Crystal when a data directory is configured (durable), in-memory otherwise.
         _store = _opts.DataDir is { } dir
-            ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, _opts.Replication, replLogger, cancellationToken)
+            ? Storage.Crystal.CrystalHighwayStore.Open(dir, ownsDirectory: false, _opts.Replication, replLogger, cancellationToken, _loggerFactory)
             : new InMemoryStore();
 
-        if (_store is Storage.Rocks.RocksDbStore durable)
+        if (_store is Storage.Crystal.CrystalHighwayStore durable)
         {
             durable.Replication.Logger = replLogger;
             // 050 T3: a demoted ex-primary that scheduled a rejoin needs a restart so Open re-syncs
@@ -105,12 +110,6 @@ public sealed class RespHighwayServer : IHighwayServer
         _server = RespServer
             .StartAsync(_store, _opts, authenticator, _opts.BindAddress, _opts.Port, _serverCertificate)
             .GetAwaiter().GetResult();
-
-        if (_store is Storage.Rocks.RocksDbStore rocks &&
-            !string.IsNullOrWhiteSpace(_opts.Replication.PrimaryServer))
-        {
-            _puller = new ReplicaPuller(rocks, _opts.Replication, replLogger);
-        }
 
         // Components (the dashboard) read broker state in-process from the store — never over a
         // self-connection, which the RESP server does not serve for raw commands.
@@ -161,12 +160,6 @@ public sealed class RespHighwayServer : IHighwayServer
             try { component.Dispose(); } catch { /* a component must not block teardown */ }
         }
         _components = [];
-
-        if (_puller is not null)
-        {
-            await _puller.DisposeAsync().ConfigureAwait(false);
-            _puller = null;
-        }
 
         if (_server is not null)
             await _server.DisposeAsync().ConfigureAwait(false);

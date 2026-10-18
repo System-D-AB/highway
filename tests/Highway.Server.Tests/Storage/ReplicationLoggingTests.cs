@@ -1,6 +1,7 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Server;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
@@ -8,7 +9,7 @@ namespace Highway.Server.Tests.Storage;
 
 /// <summary>
 /// Feature 047 — replication must be visible in the log. The feeder routes every role/topology
-/// transition to its <see cref="ReplicationFeeder.Logger"/>, and logs a replica attach once —
+/// transition to its <see cref="HighwayReplication.Logger"/>, and logs a replica attach once —
 /// without logging on the per-HELLO / per-ACK path that a healthy stream hammers.
 /// </summary>
 public class ReplicationLoggingTests
@@ -26,10 +27,10 @@ public class ReplicationLoggingTests
     [Fact]
     public void Promote_IsLogged()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 Priority = 100,
@@ -43,37 +44,37 @@ public class ReplicationLoggingTests
             log.Messages.Should().Contain(m => m.Contains("promote"),
                 "a promotion is a mastership move an operator must see in the log");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void ReplicaAttach_IsLoggedOnce_NotPerHello()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);   // a primary
+            using var store = CrystalHighwayStore.Open(dir);   // a primary
             var feeder = store.Replication;
             var log = new CapturingLogger();
             feeder.Logger = log;
 
             feeder.Hello("r1", lastAppliedSeq: 0, replicaEpoch: feeder.Epoch);
             feeder.Hello("r1", lastAppliedSeq: 1, replicaEpoch: feeder.Epoch);   // same replica again
-            feeder.Ack("r1", 2);
+            feeder.Hello("r1", lastAppliedSeq: 2, replicaEpoch: feeder.Epoch);   // 076: the position rides the hello
 
             log.Messages.Count(m => m.Contains("attached")).Should().Be(1,
                 "a replica attach logs once; subsequent HELLO/ACK on a healthy stream must not log");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
-    public void PlainHelloAndAck_LogNothing()
+    public void PlainHellos_LogNothing()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             var feeder = store.Replication;
             feeder.Hello("r1", 0, feeder.Epoch);   // first attach, before the logger is watching
 
@@ -81,11 +82,11 @@ public class ReplicationLoggingTests
             feeder.Logger = log;
 
             feeder.Hello("r1", 1, feeder.Epoch);
-            feeder.Ack("r1", 2);
+            feeder.Hello("r1", lastAppliedSeq: 2, replicaEpoch: feeder.Epoch);   // 076: the position rides the hello
             feeder.Hello("r1", 3, feeder.Epoch);
 
             log.Messages.Should().BeEmpty("streaming traffic must not spam the log");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 }

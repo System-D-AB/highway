@@ -1,3 +1,4 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Server.Storage.Cache;
 using Xunit;
@@ -18,18 +19,40 @@ public class CacheStoreTests
     public static IEnumerable<object[]> Stores()
     {
         yield return new object[] { "in-memory" };
-        yield return new object[] { "rocksdb" };
+        yield return new object[] { "crystal" };
     }
 
     private static IHighwayCacheStore Open(string kind, out string? dir)
     {
-        if (kind == "rocksdb")
+        if (kind == "crystal")
         {
             dir = Path.Combine(Path.GetTempPath(), "hwcache-" + Guid.NewGuid().ToString("N"));
-            return RocksDbCacheStore.Open(dir);
+            return new OwnedCrystalCache(dir);
         }
         dir = null;
         return new InMemoryCacheStore();
+    }
+
+    /// <summary>A Crystal cache store with its own Crystal store, closed with it (in the broker the store owns the cache).</summary>
+    private sealed class OwnedCrystalCache : IHighwayCacheStore
+    {
+        private readonly SystemD.Crystal.CrystalStore _store;
+        private readonly CrystalCacheStore _cache;
+
+        public OwnedCrystalCache(string dir)
+        {
+            _store = SystemD.Crystal.CrystalStore.Open(dir);
+            _cache = CrystalCacheStore.Open(_store, "highway.cache");
+        }
+
+        public byte[]? Get(string key, long nowTicks) => _cache.Get(key, nowTicks);
+        public void Set(string key, byte[] value, long expiresAtTicks) => _cache.Set(key, value, expiresAtTicks);
+        public void Remove(string key) => _cache.Remove(key);
+        public long? GetExpiryTicks(string key, long nowTicks) => _cache.GetExpiryTicks(key, nowTicks);
+        public void Clear() => _cache.Clear();
+        public void SweepExpired(long nowTicks) => _cache.SweepExpired(nowTicks);
+        public long ApproximateSizeBytes() => _cache.ApproximateSizeBytes();
+        public void Dispose() { _cache.Dispose(); _store.Dispose(); }
     }
 
     private static void Cleanup(IHighwayCacheStore store, string? dir)

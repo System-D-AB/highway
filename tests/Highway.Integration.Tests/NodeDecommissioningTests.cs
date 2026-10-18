@@ -49,6 +49,17 @@ public class NodeDecommissioningTests : IDisposable
 
     private IDatabase Db() => ConnectionMultiplexer.Connect(_server.ConnectionString).GetDatabase();
 
+    /// <summary>
+    /// A server with automatic retirement off, for the explicit BYE paths: with the 300 ms threshold above, a machine
+    /// stall of 300 ms between registering and publishing lets the publish retire the group first, and the test then
+    /// measures the sweeper instead of BYE (seen under full-suite load, 2026-10-15).
+    /// </summary>
+    private static HighwayTestServer ExplicitOnlyServer() => new(o =>
+    {
+        o.MaxQueueBytes = Limit;
+        o.SubscriberRetirementThreshold = TimeSpan.Zero;
+    });
+
     private static byte[] Payload(int bytes = 2048)
         => Encoding.UTF8.GetBytes(
             "{\"v\":1,\"src\":\"t\",\"ts\":\"2026-08-09T00:00:00Z\",\"body\":{\"Blob\":\""
@@ -173,7 +184,8 @@ public class NodeDecommissioningTests : IDisposable
     [Fact]
     public void ByePurge_RetiresSubscriptionsAndReportsWhatItDestroyed()
     {
-        var db = Db();
+        using var server = ExplicitOnlyServer();
+        var db = ConnectionMultiplexer.Connect(server.ConnectionString).GetDatabase();
         const string channel = "dc.purge";
 
         Register(db, "going-node");
@@ -187,7 +199,7 @@ public class NodeDecommissioningTests : IDisposable
         ((long)result[1]).Should().Be(2, "two messages discarded");
         ((long)result[2]).Should().BeGreaterThan(0, "and the bytes they occupied");
 
-        (_server.Inspect.ListLength($"hw:q:{channel}@going-node:q")).Should().Be(0);
+        (server.Inspect.ListLength($"hw:q:{channel}@going-node:q")).Should().Be(0);
     }
 
     /// <summary>
@@ -197,7 +209,8 @@ public class NodeDecommissioningTests : IDisposable
     [Fact]
     public void PlainBye_KeepsTheSubscriberBacklog()
     {
-        var db = Db();
+        using var server = ExplicitOnlyServer();
+        var db = ConnectionMultiplexer.Connect(server.ConnectionString).GetDatabase();
         const string channel = "dc.bye";
 
         Register(db, "restarting-node");
@@ -206,7 +219,7 @@ public class NodeDecommissioningTests : IDisposable
 
         db.Execute("HW.HEARTBEAT", "restarting-node", "BYE");
 
-        (_server.Inspect.ListLength($"hw:q:{channel}@restarting-node:q")).Should().Be(1,
+        (server.Inspect.ListLength($"hw:q:{channel}@restarting-node:q")).Should().Be(1,
             "a node that shuts down cleanly still expects its pending messages when it returns");
     }
 

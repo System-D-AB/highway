@@ -1,10 +1,11 @@
+using Highway.Server.Storage.Crystal;
 using System.Text;
 using FluentAssertions;
 using Highway.Server.Commands.Ported;
 using Highway.Server.Commands.Runtime;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Highway.Server.Tests.Storage;
 using Xunit;
 
@@ -79,17 +80,17 @@ public class DeadLetterLockAndDurabilityTests
     [Fact]
     public void ADeadLetterAndItsNotification_SurviveARestartTogether()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using (var store = RocksDbStore.Open(dir))
+            using (var store = CrystalHighwayStore.Open(dir))
             using (var h = new CommandHarness(store, Options()))
             {
                 Text(h.Run(new HwSessionCommand(), At(0), "worker-1", """{"deadLetters":[{"kind":"Q","name":"orders"}]}""")).Should().Be("+OK\r\n");
                 DeadLetterOne(h, "orders", "o-1", 0);
             }
 
-            using (var store = RocksDbStore.Open(dir))
+            using (var store = CrystalHighwayStore.Open(dir))
             using (var h = new CommandHarness(store, Options()))
             {
                 Text(h.Run(new HwDlqCommand(), At(21), "COUNT", "Q", "orders")).Should().Be(":1\r\n");
@@ -97,16 +98,16 @@ public class DeadLetterLockAndDurabilityTests
                     .Should().ContainSingle("the notification was written in the dead letter's own commit");
             }
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void AStandby_RefusesTheDeadLetterVerbs()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true, Priority = 100 });
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true, Priority = 100 });
             var feeder = store.Replication;
             feeder.TryPromote("test", out var error).Should().BeTrue(error);
             feeder.Fence("test");   // a fenced primary is not writable, and is never willing to take the herd
@@ -126,7 +127,7 @@ public class DeadLetterLockAndDurabilityTests
                 Encoding.UTF8.GetString(writer.ToArray()).Should().StartWith("-NOTPRIMARY", string.Join(' ', frame));
             }
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     private sealed class NullDoorbell : IDoorbell

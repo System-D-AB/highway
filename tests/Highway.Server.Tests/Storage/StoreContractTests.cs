@@ -1,3 +1,4 @@
+using Highway.Server.Storage.Crystal;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -12,7 +13,7 @@ namespace Highway.Server.Tests.Storage;
 /// <summary>
 /// The seam contract (038 R2.1) — one suite that defines <see cref="IHighwayStore"/>'s
 /// semantics and must pass identically against every implementation. It is written
-/// against <see cref="InMemoryStore"/> first (T2); <c>RocksDbStore</c> inherits and runs
+/// against <see cref="InMemoryStore"/> first (T2); <c>CrystalHighwayStore</c> inherits and runs
 /// the same cases (T3). The contract comes from what the commands need, not from what any
 /// engine happens to do.
 ///
@@ -733,7 +734,7 @@ public sealed class InMemoryStoreContractTests : StoreContractTests
 }
 
 /// <summary>
-/// The identical contract suite bound to <see cref="Highway.Server.Storage.Rocks.RocksDbStore"/>
+/// The identical contract suite bound to <see cref="Highway.Server.Storage.Crystal.CrystalHighwayStore"/>
 /// (T3) — proving both implementations satisfy one contract. Each store opens a fresh temp
 /// directory it owns and deletes on dispose.
 /// </summary>
@@ -742,6 +743,6 @@ public sealed class RocksDbStoreContractTests : StoreContractTests
     protected override IHighwayStore CreateStore()
     {
         var dir = Path.Combine(Path.GetTempPath(), "hw-store-" + Guid.NewGuid().ToString("N"));
-        return Highway.Server.Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: true);
+        return Highway.Server.Storage.Crystal.CrystalHighwayStore.Open(dir, ownsDirectory: true);
     }
 }

@@ -1,3 +1,4 @@
+using Highway.Server.Storage.Crystal;
 using System.Diagnostics.Metrics;
 using System.Text;
 using FluentAssertions;
@@ -7,7 +8,7 @@ using Highway.Server.Observability;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
@@ -36,14 +37,14 @@ public class InFlightChurnTests
 
     private const long T0 = 638_000_000_000_000_000L;
 
-    private static (RocksDbStore Store, Highway.Server.Tests.Commands.CommandHarness H, string Dir) Broker(HighwayServerOptions? options = null)
+    private static (CrystalHighwayStore Store, Highway.Server.Tests.Commands.CommandHarness H, string Dir) Broker(HighwayServerOptions? options = null)
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        var store = RocksDbStore.Open(dir);
+        var dir = TempDirs.NewTempDir();
+        var store = CrystalHighwayStore.Open(dir);
         return (store, new Highway.Server.Tests.Commands.CommandHarness(store, options ?? new HighwayServerOptions()), dir);
     }
 
-    private static List<(byte[] Key, byte[] Value)> InFlightRows(RocksDbStore store, uint box)
+    private static List<(byte[] Key, byte[] Value)> InFlightRows(CrystalHighwayStore store, uint box)
     {
         using var batch = store.NewBatch();
         var space = Highway.Server.Storage.Boxes.BoxKeys.Space(box, Highway.Server.Storage.Boxes.BoxKeys.InFlight);
@@ -73,7 +74,7 @@ public class InFlightChurnTests
                 .Should().Equal(before.Where((_, i) => i != 2).Select(r => Convert.ToHexString(r.Key) + Convert.ToHexString(r.Value)),
                     "the four survivors keep their keys and bytes — an ack deletes one claim by key (061 A1, 065)");
         }
-        finally { h.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { h.Dispose(); TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -87,15 +88,15 @@ public class InFlightChurnTests
                 h.Run(new HwCallCommand(), T0, "svc.echo", "r" + i, "body");
                 h.ClaimOne("SVC", "svc.echo", "worker-1", T0);
             }
-            var sequence = store.Replication.Engine.GetLatestSequenceNumber();
+            var sequence = store.CommittedWrites;
 
             for (var i = 0; i < 20; i++)
                 h.ClaimOne("SVC", "svc.echo", "worker-1", T0 + i).Should().BeNull();   // empty queue, 8 in flight
 
-            store.Replication.Engine.GetLatestSequenceNumber().Should().Be(sequence,
+            store.CommittedWrites.Should().Be(sequence,
                 "an idle claim whose lease sweep finds nothing expired stages nothing, so nothing is written (061 A2)");
         }
-        finally { h.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { h.Dispose(); TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -110,13 +111,13 @@ public class InFlightChurnTests
             h.ClaimOne("Q", "orders", "w", t += TimeSpan.FromSeconds(11).Ticks);   // attempt 1: redelivered
             for (var i = 0; i < 5; i++) h.ClaimOne("Q", "orders", "w", t);
             h.ClaimOne("Q", "orders", "w", t += TimeSpan.FromSeconds(11).Ticks).Should().BeNull("all five dead-lettered");
-            var sequence = store.Replication.Engine.GetLatestSequenceNumber();
+            var sequence = store.CommittedWrites;
 
             Highway.Server.Tests.Commands.CommandHarness.AsText(h.Run(new HwDlqCommand(), t, "PEEK", "Q", "orders")).Should().StartWith("*5");
 
-            store.Replication.Engine.GetLatestSequenceNumber().Should().Be(sequence, "PEEK is read-only (061 A1)");
+            store.CommittedWrites.Should().Be(sequence, "PEEK is read-only (061 A1)");
         }
-        finally { h.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { h.Dispose(); TempDirs.TryDelete(dir); }
     }
 
     [Theory]
@@ -128,8 +129,8 @@ public class InFlightChurnTests
         // Randomised pushes, head-pushes, pops, out-of-order removals (acks), range deletes, discarded
         // batches and epoch changes over a few lists; every pop and every scan must match a plain
         // in-memory reference. A hint that ever rose above a live key would lose a message here.
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        using var store = RocksDbStore.Open(dir);
+        var dir = TempDirs.NewTempDir();
+        using var store = CrystalHighwayStore.Open(dir);
         try
         {
             var random = new Random(seed);
@@ -197,7 +198,7 @@ public class InFlightChurnTests
                     .Select(e => Encoding.UTF8.GetString(e.Value)).Should().Equal(reference[list], $"final contents of {list}");
             }
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -219,58 +220,36 @@ public class InFlightChurnTests
     }
 
     [Fact]
-    public void Compact_DropsTombstones_AndKeepsTheData()
+    public void Compact_IsRefused_AndChangesNothing()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        // 076 R3.3: the storage engine (SystemD.Crystal) compacts delete-heavy boxes on its own and offers no offline
+        // compaction yet, so --compact is refused by name and the data is untouched.
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using (var store = RocksDbStore.Open(dir))
+            using (var store = CrystalHighwayStore.Open(dir))
             {
-                for (var round = 0; round < 20; round++)
-                {
-                    using var batch = store.NewBatch();
-                    for (var i = 0; i < 500; i++)
-                        PushTail(store, batch, "churn", new byte[256]);
-                    batch.Commit();
-                    using var drain = store.NewBatch();
-                    store.ListDrain(drain, HighwayKeyspace.ListPrefix("churn"));
-                    drain.Commit();
-                }
                 using var keep = store.NewBatch();
                 PushTail(store, keep, "kept", Encoding.UTF8.GetBytes("survivor"));
                 keep.Commit();
             }
 
-            var result = HighwayStorageMaintenance.Compact(dir);
-            result.Elapsed.Should().BeGreaterThan(TimeSpan.Zero);
+            var act = () => HighwayStorageMaintenance.Compact(dir);
+            act.Should().Throw<NotSupportedException>().WithMessage("*--compact*not available*Nothing was changed*");
 
-            using var reopened = RocksDbStore.Open(dir);
+            using var reopened = CrystalHighwayStore.Open(dir);
             using var read = reopened.NewBatch();
             reopened.ListEntries(read, HighwayKeyspace.ListPrefix("kept"))
                 .Select(e => Encoding.UTF8.GetString(e.Value)).Should().Equal("survivor");
-            reopened.ListEntries(read, HighwayKeyspace.ListPrefix("churn")).Should().BeEmpty();
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
-    }
-
-    [Fact]
-    public void Compact_RefusesADirectoryThatIsNotABrokerDatabase()
-    {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            Directory.CreateDirectory(dir);
-            var act = () => HighwayStorageMaintenance.Compact(dir);
-            act.Should().Throw<InvalidOperationException>().WithMessage("*not a Highway data directory*");
-        }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void StorageGauges_ReportMemtableDeletes()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        using var store = RocksDbStore.Open(dir);
+        var dir = TempDirs.NewTempDir();
+        using var store = CrystalHighwayStore.Open(dir);
         try
         {
             using (var batch = store.NewBatch())
@@ -285,7 +264,7 @@ public class InFlightChurnTests
             }
 
             var name = "Highway.Server.Test." + Guid.NewGuid().ToString("N");
-            using var metrics = new HighwayMetrics(null, () => [], new FlightRecorder(new HighwayServerOptions().Observability), name, store.SumProperty);
+            using var metrics = new HighwayMetrics(null, () => [], new FlightRecorder(new HighwayServerOptions().Observability), name, store.StorageProperty);
             var values = new Dictionary<string, long>();
             using var listener = new MeterListener
             {
@@ -298,7 +277,7 @@ public class InFlightChurnTests
             values.Should().ContainKey("highway.storage.estimated_keys");
             values["highway.storage.memtable_deletes"].Should().BeGreaterThanOrEqualTo(100, "the drain deleted 100 entries still in the memtable");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -307,8 +286,8 @@ public class InFlightChurnTests
         // The post-061-a production shape: pops leave tombstones in a slowly-filling memtable, and a
         // read that starts at the list's first key (a queue-depth count) steps over every one of them.
         // The scan flush trigger (T9) must turn that into a flush instead of a cost that grows with uptime.
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        using var store = RocksDbStore.Open(dir);
+        var dir = TempDirs.NewTempDir();
+        using var store = CrystalHighwayStore.Open(dir);
         try
         {
             var list = HighwayKeyspace.ListPrefix("depth");
@@ -324,14 +303,14 @@ public class InFlightChurnTests
                 store.ListLeftPop(pop, list).Should().NotBeNull();
                 pop.Commit();
             }
-            store.SumProperty("rocksdb.num-deletes-active-mem-table").Should().BeGreaterThanOrEqualTo(popped);
+            store.StorageProperty("rocksdb.num-deletes-active-mem-table").Should().BeGreaterThanOrEqualTo(popped);
 
             using (var snap = store.Snapshot())
                 store.ListLength(snap, list).Should().Be(3, "the count is unaffected by the tombstones it steps over");
 
             // RocksDB schedules a marked memtable's flush on the next write.
             var deadline = DateTime.UtcNow.AddSeconds(10);
-            while (store.SumProperty("rocksdb.num-deletes-active-mem-table") >= popped && DateTime.UtcNow < deadline)
+            while (store.StorageProperty("rocksdb.num-deletes-active-mem-table") >= popped && DateTime.UtcNow < deadline)
             {
                 using (var poke = store.NewBatch())
                 {
@@ -341,11 +320,11 @@ public class InFlightChurnTests
                 Thread.Sleep(50);
             }
 
-            store.SumProperty("rocksdb.num-deletes-active-mem-table").Should().BeLessThan(popped,
+            store.StorageProperty("rocksdb.num-deletes-active-mem-table").Should().BeLessThan(popped,
                 "a scan over thousands of memtable tombstones marks the memtable for flush");
             using (var snap = store.Snapshot())
                 store.ListLength(snap, list).Should().Be(3);
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 }

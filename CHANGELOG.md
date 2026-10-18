@@ -18,6 +18,23 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
 
 ### Breaking
 
+- **Storage and replication run on SystemD.Crystal** (feature 076). The broker's data directory is a
+  SystemD.Crystal store (NuGet `SystemD.Crystal` 1.0.0-rc.2, over RocksDB 11.8.1): Highway's key layout is
+  unchanged, and Crystal supplies the boxes, the atomic multi-box batch and **replication**. A replica
+  set's data now moves over a separate **replication port** (`server.replication.replicationListen`,
+  default the RESP port + 1), authenticated by the shared secret (`replicationSecret`, default the
+  broker password) — open it between the nodes. `HW.REPL.PULL`, `HW.REPL.ACK`, `HW.REPL.SNAPSHOT` and
+  `ERR HW_REPL_GAP` are removed; the replica `HW.REPL.HELLO` stays as the standby's heartbeat and its
+  reply names the primary's replication endpoint. Highway's failover policy is unchanged — the herd,
+  willingness, the roster, the deadman, GOODBYE, auto-rejoin, `-NOTPRIMARY` — and clients do not
+  change. A directory a 3.0 pre-release wrote on RocksDB is refused like a 2.x one; `highways
+  --compact` is refused (no offline compaction yet). Proven by re-running every suite against 3.0 on
+  RocksDB.
+- **A new node is syncing until it has caught up** (feature 076). A blank standby opens at once and
+  copies its primary's data in the background; until it holds the data and has caught up it is not a
+  standby — never willing to take the herd, no master-silence clock running — and `/ready` answers
+  `bootstrapping`. Its silence clock starts when it becomes a standby, so a slow start or a slow copy
+  can never read as a dead primary. A node restarting with its data on disk is a standby from start.
 - **Storage format 4 — every queue in its own key range** (feature 065). Each service, queue and
   subscriber group's queue is a *box* found through a catalog; claims, leases, deferred work, dead
   letters, job schedules and counters each have their own sub-range. There is **no in-place
@@ -30,11 +47,10 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   reached only through `HW.RESULT` and `HW.IDEM`; stock `GET`/`SET`/`DEL` now serve the opt-in cache
   only. See the 5.0 row of [`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md).
 - Replication declares the storage format in both directions (`HW.REPL.HELLO ... FORMAT 4`, and the
-  primary's reply echoes its own). Snapshot bootstrap checks it too: `HW.REPL.SNAPSHOT BEGIN` takes
-  `FORMAT 4` and its reply states the primary's format, so neither a 3.0 nor a 2.x replica copies a
-  snapshot in the other's format. Found by rehearsing the upgrade runbook with real 2.5.6 and 3.0
-  binaries: a blank 3.0 standby pointed at a 2.x primary used to copy its data, then refuse to start on
-  it; now it copies nothing and waits for the primary to be upgraded.
+  primary's reply echoes its own), and the data path checks it again, so neither a 3.0 nor a 2.x
+  standby copies data in the other's format. Found by rehearsing the upgrade runbook with real 2.5.6
+  and 3.0 binaries: a blank 3.0 standby pointed at a 2.x primary used to copy its data, then refuse to
+  start on it; now it copies nothing and waits for the primary to be upgraded.
 - **The default `NodeName` includes the hosting name** (feature 072). A process running as a Windows
   service or in an IIS application pool now defaults to `{app}-{machine}-{service}` instead of
   `{app}-{machine}`, so several services from the same binaries on one machine are separate nodes. The

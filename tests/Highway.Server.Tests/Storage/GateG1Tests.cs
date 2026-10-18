@@ -1,3 +1,4 @@
+using Highway.Server.Storage.Crystal;
 using System;
 using System.IO;
 using System.Linq;
@@ -105,11 +106,11 @@ public class GateG1Tests
     [Fact]
     public void StoreLayer_CommitsOnlyThroughDbWrite_SinglePoint()
     {
-        // Source-level assertion (R4.1): the RocksDB store must call db.Write in exactly one
-        // place. A second db.Write would be a second commit point, defeating the guarantee.
-        var source = ReadStoreSource("Rocks", "RocksDbStore.cs");
-        var writeCalls = Regex.Matches(source, @"_db\.Write\(").Count;
-        writeCalls.Should().Be(1, "RocksDbStore must commit through exactly one db.Write call");
+        // Source-level assertion (R4.1): the store commits in exactly one place — on Crystal (076), the batch's one
+        // Strict commit. A second commit call would be a second commit point, defeating the guarantee.
+        var source = ReadStoreSource("Crystal", "CrystalHighwayBatch.cs");
+        var commitCalls = Regex.Matches(source, @"\.Commit\(DurabilityMode\.Strict\)").Count;
+        commitCalls.Should().Be(1, "the Crystal store must commit through exactly one Commit call");
     }
 
     // -------------------------------------------------------------------------

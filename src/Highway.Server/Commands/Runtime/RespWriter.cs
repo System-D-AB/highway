@@ -93,95 +93,6 @@ internal sealed unsafe class RespWriter
         }
     }
 
-    /// <summary>
-    /// HW.REPL.PULL: <c>*3</c> epoch, array of <c>[seq, data]</c> pairs, nextSeq or null bulk.
-    /// </summary>
-    public void ReplicationPull(ulong epoch, IReadOnlyList<(ulong Seq, byte[] Data)> page, ulong? nextSeq)
-    {
-        var size = ArrayHeaderSize(3) + 24 + ArrayHeaderSize(page.Count);
-        foreach (var (_, data) in page)
-            size += ArrayHeaderSize(2) + 24 + BulkStringSize(data.Length);
-        size += nextSeq is null ? 5 : 24;
-
-        var buffer = new byte[size];
-        fixed (byte* ptr = buffer)
-        {
-            var curr = ptr;
-            var end = ptr + buffer.Length;
-            RespWriteUtils.TryWriteArrayLength(3, ref curr, end);
-            RespWriteUtils.TryWriteInt64((long)epoch, ref curr, end);
-            RespWriteUtils.TryWriteArrayLength(page.Count, ref curr, end);
-            foreach (var (seq, data) in page)
-            {
-                RespWriteUtils.TryWriteArrayLength(2, ref curr, end);
-                RespWriteUtils.TryWriteInt64((long)seq, ref curr, end);
-                RespWriteUtils.TryWriteBulkString(data, ref curr, end);
-            }
-            if (nextSeq is null)
-                RespWriteUtils.TryWriteNullArray(ref curr, end); // *-1 — "no further page"
-            else
-                RespWriteUtils.TryWriteInt64((long)nextSeq.Value, ref curr, end);
-            Capture(buffer, (int)(curr - ptr));
-        }
-    }
-
-    /// <summary>HW.REPL.SNAPSHOT BEGIN: epoch, checkpoint seq, session id, manifest rows, storage format (065).</summary>
-    public void SnapshotBegin(ulong epoch, ulong seq, string sessionId, IReadOnlyList<(string Name, long Size)> manifest, int format)
-    {
-        var idBytes = Encoding.UTF8.GetBytes(sessionId);
-        var size = ArrayHeaderSize(5) + 24 + 24 + BulkStringSize(idBytes.Length) + ArrayHeaderSize(manifest.Count) + 24;
-        var rows = new byte[manifest.Count][];
-        var sizes = new byte[manifest.Count][];
-        for (var i = 0; i < manifest.Count; i++)
-        {
-            rows[i] = Encoding.UTF8.GetBytes(manifest[i].Name);
-            sizes[i] = Encoding.UTF8.GetBytes(manifest[i].Size.ToString());
-            size += ArrayHeaderSize(2) + BulkStringSize(rows[i].Length) + BulkStringSize(sizes[i].Length);
-        }
-
-        var buffer = new byte[size];
-        fixed (byte* ptr = buffer)
-        {
-            var curr = ptr;
-            var end = ptr + buffer.Length;
-            RespWriteUtils.TryWriteArrayLength(5, ref curr, end);
-            RespWriteUtils.TryWriteInt64((long)epoch, ref curr, end);
-            RespWriteUtils.TryWriteInt64((long)seq, ref curr, end);
-            RespWriteUtils.TryWriteBulkString(idBytes, ref curr, end);
-            RespWriteUtils.TryWriteArrayLength(manifest.Count, ref curr, end);
-            for (var i = 0; i < manifest.Count; i++)
-            {
-                RespWriteUtils.TryWriteArrayLength(2, ref curr, end);
-                RespWriteUtils.TryWriteBulkString(rows[i], ref curr, end);
-                RespWriteUtils.TryWriteBulkString(sizes[i], ref curr, end);
-            }
-            RespWriteUtils.TryWriteInt64(format, ref curr, end);
-            Capture(buffer, (int)(curr - ptr));
-        }
-    }
-
-    /// <summary>HW.REPL.SNAPSHOT GET: file, offset, chunk, nextOffset or nil.</summary>
-    public void SnapshotChunk(string fileName, ulong offset, byte[] data, ulong? nextOffset)
-    {
-        var nameBytes = Encoding.UTF8.GetBytes(fileName);
-        var size = ArrayHeaderSize(4) + BulkStringSize(nameBytes.Length) + 24 + BulkStringSize(data.Length) + 24;
-        var buffer = new byte[size];
-        fixed (byte* ptr = buffer)
-        {
-            var curr = ptr;
-            var end = ptr + buffer.Length;
-            RespWriteUtils.TryWriteArrayLength(4, ref curr, end);
-            RespWriteUtils.TryWriteBulkString(nameBytes, ref curr, end);
-            RespWriteUtils.TryWriteInt64((long)offset, ref curr, end);
-            RespWriteUtils.TryWriteBulkString(data, ref curr, end);
-            if (nextOffset is null)
-                RespWriteUtils.TryWriteNullArray(ref curr, end);
-            else
-                RespWriteUtils.TryWriteInt64((long)nextOffset.Value, ref curr, end);
-            Capture(buffer, (int)(curr - ptr));
-        }
-    }
-
     /// <summary>Null array: exactly <c>*-1\r\n</c> — the empty-claim reply (distinct from a null bulk string).</summary>
     public void NullArray()
     {
@@ -218,6 +129,28 @@ internal sealed unsafe class RespWriter
             RespWriteUtils.TryWriteInt64(a, ref curr, end);
             RespWriteUtils.TryWriteInt64(b, ref curr, end);
             RespWriteUtils.TryWriteInt64(c, ref curr, end);
+            Capture(buffer, (int)(curr - ptr));
+        }
+    }
+
+    /// <summary>
+    /// The replica <c>HW.REPL.HELLO</c> reply (076): <c>[epoch, minAcked, format, replicationEndpoint, dataLive]</c> — where
+    /// a standby follows the primary's data, and whether the primary is receiving its pulls.
+    /// </summary>
+    public void HelloReply(long epoch, long minAcked, long format, string replicationEndpoint, bool dataLive)
+    {
+        var endpoint = Encoding.UTF8.GetBytes(replicationEndpoint);
+        var buffer = new byte[4 + 4 * 24 + BulkStringSize(endpoint.Length)];
+        fixed (byte* ptr = buffer)
+        {
+            var curr = ptr;
+            var end = ptr + buffer.Length;
+            RespWriteUtils.TryWriteArrayLength(5, ref curr, end);
+            RespWriteUtils.TryWriteInt64(epoch, ref curr, end);
+            RespWriteUtils.TryWriteInt64(minAcked, ref curr, end);
+            RespWriteUtils.TryWriteInt64(format, ref curr, end);
+            RespWriteUtils.TryWriteBulkString(endpoint, ref curr, end);
+            RespWriteUtils.TryWriteInt64(dataLive ? 1 : 0, ref curr, end);
             Capture(buffer, (int)(curr - ptr));
         }
     }

@@ -4,7 +4,7 @@ using Highway.Server.Internal;
 using Highway.Server.Observability;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 
 namespace Highway.Server.Resp;
 
@@ -38,7 +38,7 @@ internal sealed class CommandDispatcher
     private readonly IDoorbell _doorbell;
     private readonly FlightRecorder _recorder;
     private readonly HighwayServerOptions _options;
-    private readonly Highway.Server.Storage.Rocks.ReplicationFeeder? _replication;
+    private readonly Highway.Server.Storage.Replication.HighwayReplication? _replication;
     private readonly Highway.Server.Storage.Cache.IHighwayCacheStore? _cache;
     private readonly HighwayMetrics? _metrics;
     private readonly SweepThrottle _sweeps = new();   // 061 A2: one per server
@@ -59,7 +59,7 @@ internal sealed class CommandDispatcher
         IDoorbell doorbell,
         FlightRecorder recorder,
         HighwayServerOptions options,
-        Highway.Server.Storage.Rocks.ReplicationFeeder? replication = null,
+        Highway.Server.Storage.Replication.HighwayReplication? replication = null,
         Highway.Server.Storage.Cache.IHighwayCacheStore? cache = null,
         HighwayMetrics? metrics = null,
         InstanceRegistry? instances = null)
@@ -273,9 +273,6 @@ internal sealed class CommandDispatcher
         ["HW.STATS"]       = new(-1, () => new HwStatsCommand()),
         ["HW.REPLAY"]      = new(-2, () => new HwReplayCommand()),
         ["HW.REPL.HELLO"]  = new(-4, () => new HwReplHelloCommand()),
-        ["HW.REPL.PULL"]   = new(3,  () => new HwReplPullCommand()),
-        ["HW.REPL.ACK"]    = new(3,  () => new HwReplAckCommand()),
-        ["HW.REPL.SNAPSHOT"]= new(-2, () => new HwReplSnapshotCommand()),
         ["HW.REPL.PROMOTE"] = new(-1, () => new HwReplPromoteCommand()),
         ["HW.REPL.FENCE"]   = new(-1, () => new HwReplFenceCommand()),
         ["HW.REPL.STATUS"]  = new(1,  () => new HwReplStatusCommand()),
@@ -294,10 +291,8 @@ internal sealed class CommandDispatcher
             or "HW.REPL.GOODBYE")
             return true;
 
-        // A fenced primary still ships WAL so a replica can catch up.
-        if (role == ReplicaRole.Fenced && name is "HW.REPL.PULL" or "HW.REPL.ACK" or "HW.REPL.SNAPSHOT")
-            return true;
-
+        // A fenced primary still ships its data so a replica can catch up: over Crystal's port (076),
+        // which Highway's fence does not close.
         return false;
     }
 
@@ -305,18 +300,17 @@ internal sealed class CommandDispatcher
     /// The GOODBYE quiesce set (042-1c C-T5 / parent R12.2): completion verbs run so
     /// in-flight work drains — pending replies return, claimed messages ack or record
     /// their failure — while NEW work (calls, sends, publishes, claims, subscriptions,
-    /// job admin) is refused so the herd converges on the successor. WAL shipping stays
-    /// up so standbys catch the tail before the stand-down.
+    /// job admin) is refused so the herd converges on the successor. Replication (Crystal's
+    /// port) stays up so standbys catch the tail before the stand-down.
     /// </summary>
     private static bool AllowedWhileDraining(string name)
         => name is "HW.REPLY" or "HW.RESULT" or "HW.ACK" or "HW.FAIL" or "HW.TOUCH" or "HW.IDEM"
-            or "HW.REPL.PULL" or "HW.REPL.ACK" or "HW.REPL.SNAPSHOT"
             || AllowedWhenNotWritable(name, ReplicaRole.Primary);
 
     /// <summary>Rings the advisory TOPOLOGY narration with the current roster version (042-1a D4).</summary>
     private void NarrateTopology()
     {
-        var version = Storage.Rocks.RosterStore.Read(_store).Version;
+        var version = Storage.Replication.RosterStore.Read(_store).Version;
         _doorbell.Ring("hw:door:topology",
             System.Text.Encoding.UTF8.GetBytes($"TOPOLOGY {version}"));
     }

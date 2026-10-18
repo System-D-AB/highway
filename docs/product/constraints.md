@@ -619,7 +619,8 @@ compacts delete-heavy files on its own (compact-on-deletion collector). Same rep
 poll, flat from 2 000 to 50 000 calls, and an idle poll with messages in flight writes nothing.
 
 Observable: `highway.storage.memtable_deletes` and `highway.storage.estimated_keys`. Recovery for a
-data directory that accumulated tombstones before 2.5.4: `highways --compact` with the broker stopped.
+data directory that accumulated tombstones before 2.5.4 was `highways --compact` with the broker stopped
+(2.x only: 3.0 starts every data directory fresh, and on Crystal, 076, `--compact` is refused).
 
 **2.5.5 — the memtable, too.** Deletes still in the memtable are not reached by the collector, and a
 lightly written broker's memtable flushes only after hours, so reads that start at a range's first key
@@ -663,6 +664,14 @@ rehearsal: a blank 3.0 standby used to bootstrap a 2.x snapshot and then fail to
 **There is no in-place
 migration:** 2.x → 3.0 is a drain and a fresh start per node (see the
 [storage engine](../design/storage-engine.md) upgrade procedure).
+
+**3.0 — on Crystal (feature 076).** The data directory is a SystemD.Crystal store; Crystal stamps it
+and refuses any directory it did not stamp, and Highway writes no `highway.format` of its own. A
+directory an earlier engine wrote (2.x, or a 3.0 pre-release on RocksDB) is refused by name with the
+same way forward, naming the stamp it found. `HW.REPL.SNAPSHOT` is gone: a standby's format is
+declared in every hello and checked by the primary, the primary's in every reply, and Crystal checks
+its own format on the data path in both directions, so a standby still never holds data it would
+misread.
 
 ### C4.12 — Concurrent verbs on one queue are serialised
 
@@ -1057,6 +1066,17 @@ An ack is durable on the primary the instant the enqueue/`HW.ACK` commits (sync-
 
 The in-process pair harness (042 T8) asserts zero loss for messages that had been pulled and acked on the replica before promotion.
 
+**3.0 — on Crystal (feature 076).** The lag window is Crystal's slot lag (`repl.slot.N.lag`, now in batches and in
+time). Because a standby's control traffic (the hello) and its data (Crystal's port) now travel separately, a standby
+could reach RESP while replicating nothing — a wrong advertised host, a closed port, a mismatched secret. The window is
+kept from going silent in that case: a standby counts master contact only while the primary reports receiving its
+pulls (the hello's `dataLive`), its slot reads Lagging until Crystal shows it pulling, and a standby that holds none of
+its primary's data is never willing to take the herd. A new node is **syncing** — not a standby, never willing, with no
+master-silence clock running — until it holds the primary's data and has caught up once; its silence clock starts
+there. (Found 2026-10-15 under full-suite load: the clock ran from process start, so a standby whose first copy was
+slow could turn willing the moment the copy landed, while its primary was alive, and a client could promote it.) A node
+restarting with its data on disk is a standby from start, as before. Still Met.
+
 ### C9.2 — At most one writable node, by construction, without votes
 
 **Status: Met** — **amended 2026-09-16 (feature 042-1): mastership is client-defined, not deadman-timed.**
@@ -1087,13 +1107,18 @@ probe scenario replayed, mutation-checked).
 
 **Status: Met** — feature 042, tightened by 042-1.
 
-Mutating `HW.*` on a non-master is `-NOTPRIMARY <endpoint> <epoch>` — and 042-1 extended the gate to the raw-key write surface, so a client pointed at a standby cannot stage local state either (since 3.0 there is no such surface: reply slots and idempotency are reached only through `HW.RESULT` and `HW.IDEM`, which are gated like every mutating verb). Reads/stats/admin still run. During a **GOODBYE drain** the quiescing master serves only completion verbs (`HW.REPLY`/`RESULT`/`ACK`/`FAIL`/`TOUCH`/`IDEM`) plus WAL shipping, refusing new work so the herd converges.
+Mutating `HW.*` on a non-master is `-NOTPRIMARY <endpoint> <epoch>` — and 042-1 extended the gate to the raw-key write surface, so a client pointed at a standby cannot stage local state either (since 3.0 there is no such surface: reply slots and idempotency are reached only through `HW.RESULT` and `HW.IDEM`, which are gated like every mutating verb). Reads/stats/admin still run. During a **GOODBYE drain** the quiescing master serves only completion verbs (`HW.REPLY`/`RESULT`/`ACK`/`FAIL`/`TOUCH`/`IDEM`) plus WAL shipping, refusing new work so the herd converges. (3.0, 076: "WAL shipping" is Crystal's replication port, which
+the drain leaves open; a standby's own store also refuses local writes.)
 
 ### C9.4 — A dead replica cannot fill the disk
 
 **Status: Met** — feature 042 T4.
 
 Retention is `SetWalTtlSeconds` (24h) + `SetMaxTotalWalSize` (1 GiB) plus a slot lag cap (`SlotLagCapSequences`, default 100_000). A slot past the cap is dropped with a named event; that replica re-bootstraps via `HW.REPL.SNAPSHOT`. `DisableFileDeletions` is only the snapshot capture window.
+
+**3.0 — on Crystal (feature 076).** The same three bounds are Crystal's (`walTtlSeconds` → WAL
+time-to-live, `maxTotalWalSizeBytes` → WAL bytes per database, `slotLagCapSequences` → lag cap); a
+standby past them is dropped with a named event and re-bootstraps on its own. Still Met.
 
 ### C9.5 — Highway does not elect a leader
 
@@ -1141,6 +1166,12 @@ until a manual reconfigure + wipe + restart. 050-a closes the class:
 The root cure — a symmetric member/peer config that removes the learned-endpoint marker entirely — is
 the deferred **050-b**.
 
+**3.0 — on Crystal (feature 076).** Auto-rejoin records the new primary node-locally (the store's
+not-replicated `highway.node` database, since Crystal owns the whole directory) and, on the next start,
+the node is that primary's standby; Crystal finds its diverged history and re-bootstraps it, keeping
+the tail in its reconciliation report, beside which Highway writes its own naming each queue and
+service. The rejoin authenticates with the replica set's shared secret. Still Met.
+
 ### C9.9 — A replica pull's cost does not grow with uptime
 
 **Status: Met** — feature 062 (2.5.5).
@@ -1167,6 +1198,10 @@ catch-up pays that read once and every later page is a chunk read (300 000 batch
 the replica applies each page with one synced write. The one remaining from-the-start read is the first
 page after the primary restarts or the replica jumps.
 
+**3.0 — on Crystal (feature 076).** The pull is Crystal's: the in-memory tail, the held log readers,
+the trimming of merged records and the gap checks are Crystal's implementation of the same design,
+proven by Crystal's own suite. Highway no longer pulls over RESP. Still Met.
+
 ## C10 — Broker-local cache (feature 044)
 
 The cache is an **opt-in add-on** (`server.cache.enabled`, off by default). A broker with it off
@@ -1184,6 +1219,11 @@ uses a different physical database than the replicated dataset, so it **cannot**
 write cannot replicate). This is proven by a type test (the cache store and the feeder share no
 reference) and a behaviour test (a cache write is absent from the broker DB's `GetUpdatesSince`),
 not merely asserted.
+
+**3.0 — on Crystal (feature 076).** The cache is database `highway.cache` in the broker's Crystal
+store, created **not replicated**; Crystal replicates whole databases, so a cache write still cannot
+reach a standby. The behaviour test now proves the cache write lands in the not-replicated database
+and nowhere in the replicated one. Still Met.
 
 ### C10.2 — The cache is cold after a failover, and that is safe
 

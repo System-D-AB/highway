@@ -1,3 +1,4 @@
+using Highway.Server.Storage.Crystal;
 using System.Diagnostics.Metrics;
 using System.Text;
 using FluentAssertions;
@@ -6,7 +7,7 @@ using Highway.Server.Commands.Runtime;
 using Highway.Server.Observability;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Highway.Server.Tests.Commands;
 using Highway.Server.Tests.Storage;
 using Xunit;
@@ -83,8 +84,7 @@ public class CommandDispatcherTests
             "HW.CALL", "HW.CANCEL", "HW.REPLY", "HW.RESULT", "HW.SEND", "HW.PUBLISH", "HW.CLAIM", "HW.ACK",
             "HW.TOUCH", "HW.FAIL", "HW.DLQ", "HW.IDEM", "HW.SESSION", "HW.HEARTBEAT", "HW.UNSUBSCRIBE",
             "HW.JOB", "HW.DISCOVER", "HW.STATS", "HW.REPLAY",
-            "HW.REPL.HELLO", "HW.REPL.PULL", "HW.REPL.ACK",
-            "HW.REPL.SNAPSHOT", "HW.REPL.PROMOTE", "HW.REPL.FENCE", "HW.REPL.STATUS", "HW.REPL.WITNESS",
+            "HW.REPL.HELLO", "HW.REPL.PROMOTE", "HW.REPL.FENCE", "HW.REPL.STATUS", "HW.REPL.WITNESS",   // 076: no PULL/ACK/SNAPSHOT
             "HW.REPL.JOIN", "HW.REPL.GOODBYE",
         });
     }
@@ -154,10 +154,10 @@ public class CommandDispatcherTests
     {
         // 074 review: a broker demoted and promoted again without restarting must not suppress a re-send on the
         // strength of an id remembered under the old epoch — that write may not have survived the failover.
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 Priority = 100,
@@ -178,7 +178,7 @@ public class CommandDispatcherTests
             Reply(dispatcher, "HW.CALL", "orders.get", "r1", "body").Should().Be("+OK\r\n");
             CallDuplicates(dispatcher).Should().Be("1", "the new epoch forgot r1, so its re-send was stored, not suppressed as a second duplicate");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     private static string Reply(CommandDispatcher dispatcher, params string[] tokens)

@@ -1,5 +1,6 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
@@ -19,15 +20,15 @@ public class HealthReadinessTests
         Clock = clock,
     };
 
-    private static void With(bool replica, Action<ReplicationFeeder> act)
+    private static void With(bool replica, Action<HighwayReplication> act)
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: Opts(new ManualClock(), replica));
+            using var store = CrystalHighwayStore.Open(dir, replication: Opts(new ManualClock(), replica));
             act(store.Replication);
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
@@ -42,7 +43,20 @@ public class HealthReadinessTests
 
     [Fact]
     public void AReplica_IsNotReady_Reason_Replica()
-        => With(replica: true, feeder => feeder.Readiness().Should().Be((false, "replica")));
+    {
+        var dir = TempDirs.NewBootstrappedDir();   // a standby with its data on disk: a standby from start
+        try
+        {
+            using var store = CrystalHighwayStore.Open(dir, replication: Opts(new ManualClock(), replica: true));
+            store.Replication.Readiness().Should().Be((false, "replica"));
+        }
+        finally { TempDirs.TryDelete(dir); }
+    }
+
+    [Fact]
+    public void ABlankReplica_IsSyncing_Reason_Bootstrapping()
+        => With(replica: true, feeder => feeder.Readiness().Should().Be((false, "bootstrapping"),
+            "a node with none of its primary's data is syncing, not a standby"));
 
     [Fact]
     public void AFencedNode_IsNotReady_Reason_Fenced()

@@ -1,116 +1,46 @@
+using Highway.Server.Storage.Crystal;
 using System.Text;
 using FluentAssertions;
 using Highway.Server;
 using Highway.Server.Storage;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
 
-/// <summary>042 T1 — feeder paging, epoch stamp, slot floor. No RESP.</summary>
+/// <summary>042 — the replication policy: epoch, slots, willingness, deadman, goodbye (076: the data path is Crystal's). No RESP.</summary>
 public class ReplicationFeederTests
 {
     [Fact]
-    public void Pull_AfterSyncPuts_ReturnsWalPagesInOrder()
+    public void Hello_MinWatermarkIsTheFloor()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
-            Put(store, "a", "1");
-            Put(store, "b", "2");
-
-            var page = store.Replication.Pull(0, maxBytes: 1_000_000);
-            page.Epoch.Should().Be(1);
-            page.Batches.Should().NotBeEmpty();
-            page.NextSeq.Should().BeNull("the iterator drained inside maxBytes");
-        }
-        finally
-        {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
-        }
-    }
-
-    [Fact]
-    public void Pull_MaxBytes_SplitsIntoPages_AlwaysMakesProgress()
-    {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            using var store = RocksDbStore.Open(dir);
-            for (var i = 0; i < 8; i++)
-                Put(store, $"k{i}", new string('x', 64));
-
-            var first = store.Replication.Pull(0, maxBytes: 1);
-            first.Batches.Should().HaveCount(1, "a single oversized batch is still returned so the cursor advances");
-            first.NextSeq.Should().NotBeNull("more WAL remains");
-
-            var rest = store.Replication.Pull(first.NextSeq!.Value, maxBytes: 1_000_000);
-            rest.Batches.Should().NotBeEmpty();
-        }
-        finally
-        {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
-        }
-    }
-
-    [Fact]
-    public void Hello_ThenAck_MinWatermarkIsTheFloor()
-    {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             var feeder = store.Replication;
 
             feeder.Hello("r-slow", lastAppliedSeq: 1, replicaEpoch: 1);
             feeder.Hello("r-fast", lastAppliedSeq: 9, replicaEpoch: 1);
             feeder.MinAckedWatermark().Should().Be(1);
 
-            feeder.Ack("r-slow", 4);
+            // 076: a standby's hello carries its applied position (the ack moved to Crystal's protocol).
+            feeder.Hello("r-slow", lastAppliedSeq: 4, replicaEpoch: 1);
             feeder.MinAckedWatermark().Should().Be(4);
-
-            feeder.Ack("unknown", 99).Should().BeFalse();
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
-        }
-    }
-
-    [Fact]
-    public void EnforceCap_DropsADeadReplicaWithANamedEvent()
-    {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
-            {
-                SlotLagCapSequences = 2,
-            });
-            var feeder = store.Replication;
-            feeder.Hello("dead", lastAppliedSeq: 0, replicaEpoch: 1);
-
-            for (var i = 0; i < 8; i++)
-                Put(store, $"k{i}", "v");
-
-            feeder.EnforceCap();
-            feeder.Slots["dead"].State.Should().Be(SlotState.Dropped);
-            feeder.DropEvents.Should().Contain(e => e.Contains("slot-dropped") && e.Contains("dead"));
-        }
-        finally
-        {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
     public void Promote_IncrementsEpoch_PriorityZeroRefuses()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 Priority = 0,
@@ -121,7 +51,7 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
@@ -129,10 +59,10 @@ public class ReplicationFeederTests
     public void Deadman_FakeClock_FencesThenUnfences_AndDemotesOnHigherEpoch()
     {
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 AutoFailover = true,
                 FenceTimeout = TimeSpan.FromSeconds(5),
@@ -161,7 +91,7 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
@@ -174,10 +104,10 @@ public class ReplicationFeederTests
     public void Deadman_SilentReplica_NeverSelfPromotes_ButBecomesWilling()
     {
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewBootstrappedDir();   // 076: a standby that has bootstrapped
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 AutoFailover = true,
@@ -201,7 +131,7 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
@@ -210,10 +140,10 @@ public class ReplicationFeederTests
     [Fact]
     public void Epoch_PersistsAcrossReopen_SoResurrectionFencingSurvivesARestart()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using (var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true }))
+            using (var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true }))
             {
                 store.Replication.Promote("test");
                 store.Replication.Epoch.Should().Be(2);
@@ -221,7 +151,7 @@ public class ReplicationFeederTests
 
             // G2: the epoch is node-local durable state. A restarted promoted node must
             // come back at its promoted epoch, or the old primary is never demoted.
-            using (var reopened = RocksDbStore.Open(dir))
+            using (var reopened = CrystalHighwayStore.Open(dir))
             {
                 reopened.Replication.Epoch.Should().Be(2,
                     "a promoted node that restarts at epoch 1 cannot fence its resurrected predecessor");
@@ -229,17 +159,17 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
     public void HigherEpoch_OnAReplica_AdoptsWithoutDemoting()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true });
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true });
             var feeder = store.Replication;
 
             // G3 fix: a replica seeing its primary's higher epoch is normal operation —
@@ -251,45 +181,7 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
-        }
-    }
-
-    [Fact]
-    public void Pull_BehindTheRetainedWal_RefusesWithAGap_NeverAGappedStream()
-    {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            var store = RocksDbStore.Open(dir);
-            for (var i = 0; i < 4; i++)
-                Put(store, $"k{i}", "v");
-            store.Replication.Engine.GetLatestSequenceNumber().Should().BeGreaterThan(2);
-            store.Dispose();
-
-            // Reopen: recovery flushes the WAL's content into SSTs and retires the old
-            // WAL into archive/ (the TTL keeps it there). Deleting the archive is then
-            // exactly what WAL retention expiry does to a replica that stayed away too
-            // long — the data lives on, the shippable log does not.
-            using var reopened = RocksDbStore.Open(dir);
-            reopened.Replication.Engine.GetLatestSequenceNumber().Should().BeGreaterThan(2,
-                "recovery persisted the data and its sequence");
-            var archive = Path.Combine(dir, "archive");
-            if (Directory.Exists(archive))
-            {
-                foreach (var log in Directory.GetFiles(archive))
-                    File.Delete(log);
-            }
-
-            // A pull from sequence 0 (a replica that missed everything) must be refused —
-            // both the gapped-first-batch shape and the empty-iterator-while-behind shape.
-            var act = () => reopened.Replication.Pull(0, 1_000_000);
-            act.Should().Throw<ReplicationGapException>(
-                "serving a stream that silently skips the recovered prefix is divergence, not replication");
-        }
-        finally
-        {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
@@ -364,10 +256,10 @@ public class ReplicationFeederTests
     public void Feeder_IsWillingForHerd_ReadsRealState()
     {
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewBootstrappedDir();   // 076: a standby that has bootstrapped
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 WillingnessThreshold = TimeSpan.FromSeconds(3),
@@ -396,21 +288,21 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
     public void RedirectEndpoint_NamesThePrimary_NeverTheRefusingNodeItself()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
             // Seed the directory first: a blank dir + PrimaryServer would try a real
             // snapshot bootstrap, and this test's primary is imaginary.
-            RocksDbStore.Open(dir).Dispose();
+            CrystalHighwayStore.Open(dir).Dispose();
 
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 PrimaryServer = "primary-host:6500,password=secret",
@@ -432,38 +324,35 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
     public void ReconciliationReport_NamesTheEntitiesInTheUnreplicatedTail()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             var feeder = store.Replication;
 
-            // A replica acked nothing; every local write is unreplicated tail.
+            // A replica acked nothing; every local write is unreplicated tail. 3.0 keeps a queue in its own box (065).
             feeder.Hello("r1", 0, 1);
-            using (var batch = store.NewBatch())
-            {
-                store.ListRightPush(batch, Highway.Server.Storage.Layout.HighwayKeyspace.ListEntry("orders.create", 1), "payload"u8.ToArray());
-                batch.Commit();
-            }
+            using (var h = new Highway.Server.Tests.Commands.CommandHarness(new NonDisposingStore(store)))
+                h.Run(new Highway.Server.Commands.Ported.HwSendCommand(), "orders.create", "m-1", "payload");
 
             feeder.ObserveHigherEpoch(9, "seeded divergence");
 
             feeder.Role.Should().Be(ReplicaRole.Demoted);
             var report = File.ReadAllText(feeder.LastReconciliationPath!);
             report.Should().Contain("unreplicated tail", "the report must show WHAT diverged (G9/R4.2)");
-            report.Should().Contain("orders.create", "the operator replays by queue; the report must name it");
+            report.Should().Contain("queue orders.create", "the operator replays by queue; the report must name it");
             report.Should().Contain("the broker never merges");
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
@@ -473,10 +362,10 @@ public class ReplicationFeederTests
     public void Goodbye_DrainsThenStandsDown_AtTheDeadline()
     {
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 GoodbyeDrainTimeout = TimeSpan.FromSeconds(5),
                 Clock = clock,
@@ -506,7 +395,7 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
@@ -514,10 +403,10 @@ public class ReplicationFeederTests
     public void Goodbye_CompletesEarly_WhenTheHerdLeaves()
     {
         var clock = new ManualClock();
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 GoodbyeDrainTimeout = TimeSpan.FromSeconds(30),
                 Clock = clock,
@@ -538,70 +427,31 @@ public class ReplicationFeederTests
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
     public void Goodbye_OnANonPrimary_IsANoOp()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true });
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions { StartAsReplica = true });
             store.Replication.BeginGoodbye("noop");
             store.Replication.IsDraining.Should().BeFalse();
             store.Replication.Role.Should().Be(ReplicaRole.Replica);
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
-    public void Pull_SkipsBatchesWhollyAtOrBelowTheWatermark()   // 058 R2 — the busy-loop fix
+    public void Open_BlankReplica_UnreachablePrimary_OpensAtOnce_AsANotReadyStandby_NoData()   // 058 R3 / R3.4; 076
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            using var store = RocksDbStore.Open(dir);
-            var before = store.Replication.Engine.GetLatestSequenceNumber();
-
-            // One WriteBatch with two entries → the batch spans two consecutive sequences.
-            using (var batch = store.NewBatch())
-            {
-                store.Set(batch, "k1"u8.ToArray(), "1"u8.ToArray());
-                store.Set(batch, "k2"u8.ToArray(), "2"u8.ToArray());
-                batch.Commit();
-            }
-            var last = store.Replication.Engine.GetLatestSequenceNumber();
-            last.Should().BeGreaterThan(before + 1, "a two-entry batch spans at least two sequences");
-
-            // Caught up: a pull AT the watermark is now EMPTY — before the fix the primary
-            // re-served the batch containing `last`, so the replica busy-looped (058 bug 1).
-            store.Replication.Pull(last, maxBytes: 1_000_000).Batches
-                .Should().BeEmpty("a caught-up replica's pull returns nothing, so it can idle (058 R2)");
-
-            // fromSeq inside the batch (its last-but-one sequence): the batch is still served,
-            // because it contains a sequence above fromSeq.
-            store.Replication.Pull(last - 1, maxBytes: 1_000_000).Batches
-                .Should().ContainSingle("the batch holds a sequence above fromSeq, so it is sent");
-
-            // fromSeq below the batch: the whole batch is above the watermark and is served.
-            store.Replication.Pull(before, maxBytes: 1_000_000).Batches
-                .Should().ContainSingle("the batch is wholly above the watermark");
-        }
-        finally
-        {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
-        }
-    }
-
-    [Fact]
-    public void Open_BlankReplica_UnreachablePrimary_WaitsAndHonoursCancellation_NoPartialDb()   // 058 R3 / R3.4
-    {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
@@ -614,35 +464,35 @@ public class ReplicationFeederTests
                 PrimaryServer = "127.0.0.1:1,connectTimeout=200,connectRetry=0,abortConnect=true",
             };
 
-            Action act = () => RocksDbStore.Open(dir, replication: repl, cancellationToken: cts.Token);
+            // R3 (076): a blank standby whose primary is down opens at once and keeps trying in the background — it
+            // never crashes with a connection error (the production bug), and it serves nothing as if it were whole.
+            var opened = System.Diagnostics.Stopwatch.StartNew();
+            using var store = CrystalHighwayStore.Open(dir, replication: repl, cancellationToken: cts.Token);
+            opened.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10), "Open does not wait for the primary");
+            store.Replication.Role.Should().Be(ReplicaRole.Replica);
+            store.Replication.Readiness().Ready.Should().BeFalse("a standby takes no client traffic");
 
-            // R3: a blank replica whose primary is down retries and exits cleanly on cancellation —
-            // it must NOT crash with a connection error (the production bug).
-            act.Should().Throw<OperationCanceledException>(
-                "an unreachable primary is waited on, not fatal, and the wait is cancellable");
-
-            // R3.4: a failed bootstrap leaves no database a later start could open.
-            File.Exists(Path.Combine(dir, "CURRENT")).Should().BeFalse(
-                "nothing partial is written into the data directory on a failed bootstrap");
+            // R3.4: nothing partial: until a bootstrap lands there is no Highway data at all.
+            store.DumpData().Should().BeEmpty("a standby holds only what its primary sent, and it sent nothing");
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
     public void Commit_OfAnEmptyBatch_WritesNothingToTheWal()   // 059 — idle polls must not fsync
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             Put(store, "seed", "1");   // a non-empty WAL, so growth is measurable
-            long WalBytes() => Directory.GetFiles(dir, "*.log").Sum(f => new FileInfo(f).Length);
+            long WalBytes() => Directory.GetFiles(dir, "*.log", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
 
             var walBefore = WalBytes();
-            var seqBefore = store.Replication.Engine.GetLatestSequenceNumber();
+            var writesBefore = store.CommittedWrites;
 
             for (var i = 0; i < 200; i++)
             {
@@ -651,21 +501,52 @@ public class ReplicationFeederTests
             }
 
             WalBytes().Should().Be(walBefore, "an empty batch changes nothing, so it must not append (and fsync) a WAL record");
-            store.Replication.Engine.GetLatestSequenceNumber().Should().Be(seqBefore);
+            store.CommittedWrites.Should().Be(writesBefore);
         }
         finally
         {
-            ReplicationToolkitSurfaceTests.TryDelete(dir);
+            TempDirs.TryDelete(dir);
         }
     }
 
-    private static void Put(RocksDbStore store, string key, string value)
+    private static void Put(CrystalHighwayStore store, string key, string value)
     {
         using var batch = store.NewBatch();
         // A system-box family key (065): a raw string key would read as 2.x data on reopen.
         store.Set(batch, Highway.Server.Storage.Layout.HighwayKeyspace.Kv(key), Encoding.UTF8.GetBytes(value));
         batch.Commit();
     }
+}
+
+/// <summary>Lends a store to a harness that disposes what it is given, without closing it.</summary>
+internal sealed class NonDisposingStore(IHighwayStore inner) : IHighwayStore
+{
+    public IStoreSnapshot Snapshot() => inner.Snapshot();
+    public IStoreBatch NewBatch() => inner.NewBatch();
+    public byte[]? Read(IStoreBatch batch, byte[] key) => inner.Read(batch, key);
+    public IReadOnlyList<(byte[] Key, byte[] Value)> Scan(IStoreBatch batch, byte[] prefix, byte[] from, int limit) => inner.Scan(batch, prefix, from, limit);
+    public byte[]? Get(IStoreSnapshot snapshot, byte[] key) => inner.Get(snapshot, key);
+    public void Set(IStoreBatch batch, byte[] key, byte[] value) => inner.Set(batch, key, value);
+    public void SetEx(IStoreBatch batch, byte[] key, byte[] value, long expiresAtTicks) => inner.SetEx(batch, key, value, expiresAtTicks);
+    public void Delete(IStoreBatch batch, byte[] key) => inner.Delete(batch, key);
+    public byte[]? GetLive(IStoreSnapshot snapshot, byte[] key, long nowTicks) => inner.GetLive(snapshot, key, nowTicks);
+    public void SweepExpired(IStoreBatch batch, long nowTicks) => inner.SweepExpired(batch, nowTicks);
+    public long Increment(IStoreBatch batch, byte[] key, long delta) => inner.Increment(batch, key, delta);
+    public void ListRightPush(IStoreBatch batch, byte[] key, byte[] value) => inner.ListRightPush(batch, key, value);
+    public void ListLeftPush(IStoreBatch batch, byte[] key, byte[] value) => inner.ListLeftPush(batch, key, value);
+    public byte[]? ListLeftPop(IStoreBatch batch, byte[] key) => inner.ListLeftPop(batch, key);
+    public IReadOnlyList<byte[]> ListDrain(IStoreBatch batch, byte[] key) => inner.ListDrain(batch, key);
+    public IReadOnlyList<(byte[] Key, byte[] Value)> ListEntries(IStoreBatch batch, byte[] key) => inner.ListEntries(batch, key);
+    public long ListLength(IStoreSnapshot snapshot, byte[] key) => inner.ListLength(snapshot, key);
+    public void SortedSetAdd(IStoreBatch batch, byte[] key, long score, byte[] member) => inner.SortedSetAdd(batch, key, score, member);
+    public void SortedSetRemove(IStoreBatch batch, byte[] key, byte[] member) => inner.SortedSetRemove(batch, key, member);
+    public IReadOnlyList<byte[]> SortedSetRangeByScore(IStoreSnapshot snapshot, byte[] key, long minScore, long maxScore, int limit) => inner.SortedSetRangeByScore(snapshot, key, minScore, maxScore, limit);
+    public long SortedSetLength(IStoreSnapshot snapshot, byte[] key) => inner.SortedSetLength(snapshot, key);
+    public bool SetAdd(IStoreBatch batch, byte[] key, byte[] member) => inner.SetAdd(batch, key, member);
+    public void SetRemove(IStoreBatch batch, byte[] key, byte[] member) => inner.SetRemove(batch, key, member);
+    public void DeleteRange(IStoreBatch batch, byte[] keyPrefix) => inner.DeleteRange(batch, keyPrefix);
+    public IReadOnlyList<byte[]> SetMembers(IStoreSnapshot snapshot, byte[] key) => inner.SetMembers(snapshot, key);
+    public void Dispose() { }
 }
 
 internal sealed class ManualClock : TimeProvider

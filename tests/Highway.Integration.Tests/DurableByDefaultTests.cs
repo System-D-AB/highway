@@ -227,7 +227,10 @@ public class DurableByDefaultConfigurationTests
                 .WithDataDir(dir)
                 .Build())
             {
-                File.Exists(Path.Combine(dir, "highway.format")).Should().BeTrue();
+                // 076: the directory is a SystemD.Crystal store, stamped by Crystal when the broker opens it.
+                server.Start();
+                File.Exists(Path.Combine(dir, "crystal.format")).Should().BeTrue();
+                File.Exists(Path.Combine(dir, "highway.format")).Should().BeFalse("Crystal owns the whole directory");
             }
 
             // And a second start against its own directory is fine — the stamp matches.

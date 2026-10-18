@@ -3,7 +3,7 @@ using Highway.Server.Commands.Runtime;
 using Highway.Server.Observability;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 
 namespace Highway.Server.Resp;
 
@@ -111,14 +111,14 @@ internal sealed class StoreBrokerState(IHighwayStore store, HighwayServerOptions
     {
         try
         {
-            if (store is not RocksDbStore rocks)
-                return Task.FromResult(StateResult<IReadOnlyDictionary<string, string>>.Fail("replication requires a durable RocksDB broker"));
+            if (store is not Storage.Crystal.CrystalHighwayStore durable)
+                return Task.FromResult(StateResult<IReadOnlyDictionary<string, string>>.Fail("replication requires a durable broker"));
 
-            var map = rocks.Replication.StatsFields().ToDictionary(f => f.Name, f => f.Value, StringComparer.Ordinal);
+            var map = durable.Replication.StatsFields().ToDictionary(f => f.Name, f => f.Value, StringComparer.Ordinal);
             // 049/050 T5: the dashboard succession view reads roster.* — include the replicated roster
             // (the same fields HW.REPL.STATUS emits) so it populates from api/replication too, not only
             // from HW.REPL.STATUS. Without this the succession table was always empty on the dashboard.
-            var roster = Storage.Rocks.RosterStore.Read(store);
+            var roster = Storage.Replication.RosterStore.Read(store);
             map["roster.version"] = roster.Version.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var r = 0;
             foreach (var m in roster.Members)

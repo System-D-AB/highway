@@ -1,6 +1,7 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Server;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
@@ -16,10 +17,10 @@ public class CacheEpochHookTests
     [Fact]
     public void Promote_RaisesOnEpochChanged_Once_AndBumpsTheEpoch()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 Priority = 100,
@@ -34,16 +35,16 @@ public class CacheEpochHookTests
             feeder.Epoch.Should().Be(before + 1);
             fired.Should().Be(1, "a promotion moved mastership → wipe exactly once");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void AdoptingAHigherEpoch_RaisesOnEpochChanged_Once()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir, replication: new HighwayReplicationOptions
+            using var store = CrystalHighwayStore.Open(dir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 Priority = 100,
@@ -56,17 +57,17 @@ public class CacheEpochHookTests
 
             fired.Should().Be(1, "adopting a higher epoch means another node may have mutated data → wipe");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 
     [Fact]
     public void NoEpochChange_RaisesNothing()
     {
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = TempDirs.NewTempDir();
         try
         {
             // A default (primary) broker holding its herd — no mastership move.
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             var feeder = store.Replication;
             var fired = 0;
             feeder.OnEpochChanged += () => Interlocked.Increment(ref fired);
@@ -79,6 +80,6 @@ public class CacheEpochHookTests
 
             fired.Should().Be(0, "a master that keeps its herd without an epoch change keeps its cache");
         }
-        finally { ReplicationToolkitSurfaceTests.TryDelete(dir); }
+        finally { TempDirs.TryDelete(dir); }
     }
 }

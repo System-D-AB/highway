@@ -18,8 +18,43 @@ public sealed class HighwayReplicationOptions
     /// <summary>Endpoint advertised in <c>-NOTPRIMARY</c> replies (<c>host:port</c>).</summary>
     public string? AdvertiseEndpoint { get; set; }
 
-    /// <summary>Primary connection string a replica pulls from (SE.Redis form).</summary>
+    /// <summary>
+    /// The primary's RESP connection string (SE.Redis form). A standby says hello and joins over it; its data then flows
+    /// over the primary's replication endpoint, which the primary names in its hello reply (076).
+    /// </summary>
     public string? PrimaryServer { get; set; }
+
+    /// <summary>
+    /// Where this node's replication listener binds (<c>host:port</c>), separate from the RESP port (076 R5.5). Set, the
+    /// node listens from start and a failure to bind stops it. Null: the RESP bind address and the RESP port plus one,
+    /// bound only once replication is used — a standby's first hello, or a promotion — so a broker that is not in a
+    /// replica set opens no second port.
+    /// </summary>
+    public string? ReplicationListen { get; set; }
+
+    /// <summary>The listener a node binds when <see cref="ReplicationListen"/> is unset: set by the server from its RESP endpoint.</summary>
+    internal string? DefaultReplicationListen { get; set; }
+
+    /// <summary>
+    /// The broker's TLS certificate, set by the server when RESP serves TLS (076): replication then runs over TLS too,
+    /// as it did when it rode the RESP connection. Null: plain TCP, as RESP is.
+    /// </summary>
+    internal System.Security.Cryptography.X509Certificates.X509Certificate2? TlsCertificate { get; set; }
+
+    /// <summary>Whether RESP requires client certificates (mutual TLS): replication then requires one from a standby.</summary>
+    internal bool TlsRequireClientCertificate { get; set; }
+
+    /// <summary>
+    /// The replication endpoint peers dial (<c>host:port</c>). Null: this node's advertised host with the listener's
+    /// bound port.
+    /// </summary>
+    public string? ReplicationAdvertiseEndpoint { get; set; }
+
+    /// <summary>
+    /// The replica set's shared replication secret (076 R5.5): both ends prove they know it before any data moves.
+    /// Null: the broker password. A node with neither replicates unauthenticated, exactly as its RESP port is open.
+    /// </summary>
+    public string? ReplicationSecret { get; set; }
 
     /// <summary>
     /// The SE.Redis connection-string tail (e.g. <c>,password=…</c>) used to authenticate an
@@ -79,7 +114,7 @@ public sealed class HighwayReplicationOptions
     /// </summary>
     public TimeSpan GoodbyeDrainTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
-    /// <summary>WAL retention time. A replica silent longer than this must re-bootstrap (refused with <c>HW_REPL_GAP</c>, never fed a gapped stream). Default 24h.</summary>
+    /// <summary>WAL retention time. A replica silent longer than this re-bootstraps (it is never fed a gapped stream). Default 24h.</summary>
     public long WalTtlSeconds { get; set; } = 86_400;
 
     /// <summary>WAL retention size cap — a dead replica can never fill the disk. Default 1 GiB.</summary>

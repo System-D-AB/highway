@@ -6,64 +6,56 @@
 > Guarantees are C9 in [`constraints.md`](../product/constraints.md); the observability doctrine is
 > [`fail-safe-and-observability.md`](../product/fail-safe-and-observability.md).
 
-*Highway replication is one writable primary with warm WAL-shipping standbys, and failover with no
-elections: the master is simply the node the client herd is connected to, chosen by a deterministic
+*Highway replication is one writable primary with warm standbys that follow its write-ahead log,
+and failover with no elections: the master is simply the node the client herd is connected to, chosen by a deterministic
 successor function and fenced by a monotonic epoch, so the herd can never split into two masters.*
 
 ## Overview
 
 Replication is off by default — a single node stays writable with no standby. Configure
-`HighwayReplicationOptions` and a broker becomes one **primary** plus N **warm standbys** that pull
+`HighwayReplicationOptions` and a broker becomes one **primary** plus N **warm standbys** that follow
 its write-ahead log. Standbys serve no client traffic; they exist to take over. There is no quorum,
 no vote, and no plan to add one.
 
+Since 3.0 (feature 076) the work is split. **SystemD.Crystal moves the data**: its own replication
+port and protocol, authenticated by the replica set's shared secret (the broker password unless one
+is configured), epochs and fencing on the data path, snapshot bootstrap, gap and divergence handling,
+format checks, reconciliation reports, rejoin — and it decides nothing. **Highway decides**: who is
+primary, when a standby is willing, when to fence, the roster, the graceful drain. Every rule below
+under *Mastership* is Highway's, unchanged from 2.x.
+
 ## How it works
 
-**WAL shipping, pull-based.** A standby registers a slot and pulls paged WAL batches (`HW.REPL.PULL`)
-from a sequence, applies them, and acks a watermark (`HW.REPL.ACK`); every reply is stamped with the
-primary's **epoch**. A standby too far behind the retained WAL re-bootstraps from a chunked,
-resumable checkpoint (`HW.REPL.SNAPSHOT`) rather than being served a gapped stream. A **caught-up**
-standby pulls at a low idle cadence (≈20/s) and applies nothing — the primary returns an empty page
-for a pull at the watermark, so an idle replica set costs negligible CPU on both sides (feature 058;
-the ack keeps refreshing the slot so liveness is unaffected).
+**The data path is Crystal's.** A node in a replica set listens on a replication port (by default the
+RESP port plus one, opened when a standby first says hello or the node is promoted, so a broker outside
+a replica set opens no second port). A standby follows its primary there: it bootstraps from a snapshot when it holds nothing or
+has diverged, then pulls the primary's committed batches in order, applying each as one atomic write.
+A caught-up standby waits in a long poll, so an idle pair costs nothing; a standby too far behind the
+retained log is never fed a gapped stream — it re-bootstraps on its own. The primary keeps a slot per
+standby with its acknowledged position, its lag in batches and in time, and its state (active,
+lagging, dropped). Database `highway` is replicated; the cache and node-local state are not. A broker
+that serves TLS replicates over TLS with the same certificate (mutual when RESP requires client
+certificates); the shared-secret challenge runs inside it either way.
 
-**Pulls are served from memory, not the WAL (feature 062).** RocksDB's WAL reader
-(`GetUpdatesSince`) locates the live WAL file and reads it from its start up to the requested
-sequence; the live file rolls only on a memtable flush, which a lightly written broker reaches after
-hours. Reading the WAL on every pull therefore cost more the longer the primary ran (≈1.5 ms per pull
-after 2 000 writes, ≈54 ms after 120 000, at ≈20 pulls/s per caught-up replica). The primary now keeps
-its most recently committed batches in a bounded in-memory tail (16 MiB): a pull at the watermark
-answers without touching the WAL, and a pull just behind it gets the tail's contiguous run. The tail
-is captured after each commit's write — the batch then carries its assigned sequence and is the same
-bytes as its WAL record — holds no lock across the synced write, starts only once a replica first
-pulls, and is cleared on any epoch or role change. Anything it cannot serve contiguously (a replica
-further behind, a restarted primary, a batch still being added) falls back to the WAL path, gap
-checks included.
+**Contact is the hello.** A standby sends `HW.REPL.HELLO` to its primary over RESP every 200 ms: its
+position, the highest epoch it has seen, its storage format. Each answered hello is its **master-link
+contact**, which willingness and the fence backstop read; each arriving one is the primary's contact
+from that standby. The reply names the primary's replication endpoint, which the standby follows —
+so a standby is configured with the primary's RESP address only, as before. Crystal's own pull is a
+long poll that moves nothing while idle, so it cannot say whether a master is alive; the hello can.
 
-**Catching up reads the WAL once, not once per page (feature 066, 3.0).** A replica behind the tail
-used to pay the from-the-start WAL read on *every* page, so catching up N pages cost O(N × WAL size)
-(measured: 300 000 batches, 35 pages, 1.5 s with an 86 ms last page). The primary now keeps a few WAL
-tailers open between pulls, keyed by the sequence each will serve next: a pull that continues where the
-previous one stopped continues the same tailer, and only a pull from anywhere else opens a fresh one.
-The same catch-up takes 0.2 s. A tailer's page is one write batch made of whole WAL records, and the
-replica applies it with **one synced write per page** — a crash leaves the whole page or none of it.
-A tailer is opened only after the WAL is confirmed to still hold its starting sequence (a range
-retention already removed is refused as a gap, as before), and while tailers are open WAL file deletion
-is paused so none can be removed under them. That pause is bounded: tailers are dropped on any epoch or
-role change, closed after a few idle seconds, and never held for more than 30 s at a stretch, so a
-replica that pulls forever without catching up cannot suspend WAL retention (C9.4).
+**Start order does not matter.** A blank node opens at once and keeps saying hello until its
+primary answers; Crystal bootstraps it in the background and an interrupted bootstrap leaves nothing
+partial. The shipped systemd unit sets `TimeoutStartSec=infinity`, which 3.0 no longer needs but keeps.
 
-One consequence is handled explicitly: RocksDB's group commit merges concurrent committers into one
-WAL record, while the tail holds them separately, so a replica fed from the tail can stand *inside* a
-WAL record. When such a replica falls back to the WAL, the record is trimmed to start just after its
-watermark; a record that cannot be split with certainty is refused like a gap, and the replica
-re-syncs from a snapshot rather than risk diverging.
-
-**Start order does not matter.** A blank standby whose primary is not yet listening **waits** for it —
-retrying the snapshot bootstrap with backoff and logging each wait — instead of exiting; the snapshot
-downloads into a temporary directory and is moved into place only when complete, so an interrupted
-bootstrap never leaves a partial database (feature 058). The shipped systemd unit sets
-`TimeoutStartSec=infinity` for exactly this wait.
+**A node is syncing until it has caught up; only then is it a standby.** While it copies the primary's
+data, and until it has applied everything the primary has (lag 0), it is **syncing**: it is never
+willing, it has lost no master (its silence clock does not run), and `/ready` answers `bootstrapping`.
+It becomes a standby the first time it holds the data and has caught up, and its master-silence clock
+starts there — never at process start, so a slow start or a slow copy can never read as a dead master.
+A re-bootstrap (a rejoin, a gap, a divergence) makes it syncing again. A node that restarts with its
+data already on disk was a complete standby before it stopped and is one again from start, as on 3.0's
+RocksDB engine: otherwise a standby restarting while its primary is dead could never take over.
 
 **Mastership is client-defined — the herd, not a timer.** The master is *the node the client herd is
 connected to*; a node with no clients is not a master and performs no master-only side effects.
@@ -117,14 +109,12 @@ re-subscribes every doorbell, queue doorbells included. A promoted standby norma
 state (it is replicated), so the re-declaration is a no-op; it is what makes a *fresh* or
 re-bootstrapped master safe, where subscriptions and schedules would otherwise be silently missing.
 
-**Formats must match** (3.0). A replica applies the primary's WAL byte for byte, so both must store the
-same layout. The replica form of `HW.REPL.HELLO` declares the storage format, and a primary refuses a
-replica with another one (`HW_STORAGE_FORMAT`). The primary's reply echoes its own format, so a 3.0
-replica also refuses a 2.x primary, which ignores the declaration and echoes nothing. Bootstrapping is
-checked the same way in both directions: a blank replica declares its format in `HW.REPL.SNAPSHOT BEGIN`
-and a primary refuses another one (or none — a 2.x replica) before taking a checkpoint; the reply states
-the primary's format, and a 2.x primary's reply, which does not, is refused before any file is
-downloaded. A refused replica stays blank and waits for the primary to be upgraded. A 2.x and a 3.0 node therefore never form a pair.
+**Formats must match** (3.0). A standby holds the primary's data key for key, so both must store the
+same layout. Every hello declares the storage format, and a primary refuses a standby with another one
+(`HW_STORAGE_FORMAT`). The primary's reply echoes its own format and names its replication endpoint, so
+a 3.0 standby refuses a 2.x primary (which echoes nothing) and a 3.0 pre-release (which names no
+endpoint) and stays empty-handed until the primary is upgraded. Crystal checks its own storage format
+on the data path too, in both directions. A 2.x and a 3.0 node therefore never form a pair.
 
 **Upgrading a pair to 3.0 is a fresh start, one node at a time** (no in-place migration):
 1. Stop the standby, install 3.0 on it, run `highways --wipe-data`, and leave it stopped. The 2.x
@@ -144,10 +134,12 @@ A routine primary restart used to leave a two-node set degraded; 050-a closes th
 
 - a node that **promotes** (not just one that *starts* primary) self-registers in the roster, so the
   succession view and the successor-priority map survive a failover;
-- a demoted ex-primary **auto-rejoins** the new primary — on its next start it wipes and re-syncs as a
-  replica of the endpoint it learned, no reconfigure or wipe by hand (opt-out via
-  `server.replication.autoRejoin`); its diverged tail is written to a reconciliation report first, and
-  there is no auto-failback;
+- a demoted ex-primary **auto-rejoins** the new primary — it records the endpoint it learned
+  (node-locally, in the store's not-replicated `highway.node` database), and on its next start it is
+  that primary's standby: Crystal finds its diverged history and re-bootstraps it, no reconfigure or
+  wipe by hand (opt-out via `server.replication.autoRejoin`); its diverged tail is written to a
+  reconciliation report first — Crystal's, per box, and Highway's beside it naming each queue and
+  service — and there is no auto-failback;
 - stale slots **age out** — cleared on demotion, and a silent slot is dropped past
   `server.replication.slotStaleAfter` — so the dashboard never shows a phantom "Active" replica;
 - the leadership change is **loud**: a dashboard leadership banner, a no-redundancy alert, an event
@@ -168,11 +160,11 @@ channels it depends on — metrics (051) and health/readiness endpoints (052) �
 - **RPO is the measured replication lag window** (C9.1): a primary loss inside that window can lose
   an acked-but-not-yet-replicated message. It is surfaced (`HW.STATS repl.slot.N.lag`), bounded, and
   never silent.
-- **A replica serves no client writes** (C9.3); a dead replica cannot fill the disk (C9.4, WAL TTL +
-  size + slot-lag cap).
-- **A pull's cost does not grow with uptime** (C9.9): a caught-up or nearly caught-up replica is
-  served from the in-memory tail; a replica further behind catches up through one held WAL reader, one
-  synced write per page.
+- **A replica serves no client writes** (C9.3) — refused by Highway's gate, and by Crystal, which
+  refuses local writes on a standby; a dead replica cannot fill the disk (C9.4, WAL TTL + size +
+  slot-lag cap, enforced by Crystal).
+- **A pull's cost does not grow with uptime** (C9.9): Crystal serves a caught-up standby from memory
+  and a standby further behind through a held log reader.
 - **No auto-failback** (C9.6): a higher-priority node waits; failback is a deliberate GOODBYE.
 - **Two-to-few-node warm standby**, not cross-datacenter quorum consensus and not active-active —
   Highway stays single-writer.

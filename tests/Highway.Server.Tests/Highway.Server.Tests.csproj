@@ -20,7 +20,6 @@
     <PackageReference Include="FluentAssertions" />
     <PackageReference Include="NSubstitute" />
     <PackageReference Include="StackExchange.Redis" />
-    <PackageReference Include="RocksDB" />
   </ItemGroup>
 
 </Project>

@@ -1,82 +1,20 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Server;
 using Highway.Server.Commands.Ported;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using StackExchange.Redis;
 using Xunit;
 
 namespace Highway.Server.Tests.Commands;
 
-/// <summary>042 T3/T5/T7 — SNAPSHOT bootstrap, promote/fence/status/witness, NOTPRIMARY.</summary>
+/// <summary>042 T5/T7 — promote/fence/status/witness, NOTPRIMARY (076: snapshot bootstrap is Crystal's).</summary>
 public class HwReplRuntimeCommandTests
 {
-    [Theory]
-    [InlineData(new string[0], "3 (Highway 2.x)")]
-    [InlineData(new[] { "FORMAT", "3" }, "format 3 ")]
-    public void SnapshotBegin_FromAReplicaOfAnotherFormat_IsRefused_BeforeAnyCheckpoint(string[] tail, string named)
-    {
-        // 065 (upgrade rehearsal review): a 2.x replica sends a bare BEGIN and ignores the format in the reply, so the
-        // primary must refuse it — or the 2.x node would bootstrap format-4 data it then reads as format 3.
-        var dir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            using var store = RocksDbStore.Open(dir);
-            using var h = new CommandHarness(store);
-
-            var reply = CommandHarness.AsText(h.Run(new HwReplSnapshotCommand(), ["BEGIN", .. tail]));
-
-            reply.Should().StartWith("-ERR HW_STORAGE_FORMAT").And.Contain(named);
-        }
-        finally { Storage.ReplicationToolkitSurfaceTests.TryDelete(dir); }
-    }
-
     [Fact]
-    public void Snapshot_BeginGetEnd_IsResumable_AndDurationIsRecorded()
+    public void SeRedis_PromoteFenceStatusWitness()
     {
-        var dir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
-        try
-        {
-            using var store = RocksDbStore.Open(dir);
-            using (var batch = store.NewBatch())
-            {
-                store.Set(batch, "snap-k"u8.ToArray(), "snap-v"u8.ToArray());
-                batch.Commit();
-            }
-
-            using var h = new CommandHarness(store);
-            var started = DateTime.UtcNow;
-            var begin = CommandHarness.AsText(h.Run(new HwReplSnapshotCommand(), "BEGIN", "FORMAT", HighwayServerBuilder.StorageFormatVersion.ToString()));
-            begin.Should().StartWith("*5\r\n").And.EndWith($":{Highway.Server.HighwayServerBuilder.StorageFormatVersion}\r\n", "the storage format closes the reply (065)");
-
-            var session = store.Replication.Slots; // keep feeder alive
-            var began = store.Replication.BeginSnapshot();
-            began.Manifest.Should().NotBeEmpty();
-
-            var file = began.Manifest[0].FileName;
-            var first = store.Replication.ReadSnapshotChunk(began.SessionId, file, 0, 16);
-            if (first.NextOffset is { } next)
-            {
-                var second = store.Replication.ReadSnapshotChunk(began.SessionId, file, next, 65_536);
-                second.Offset.Should().Be(next);
-            }
-
-            store.Replication.EndSnapshot(began.SessionId);
-            var duration = DateTime.UtcNow - started;
-            duration.TotalSeconds.Should().BeLessThan(30);
-            File.WriteAllText(Path.Combine(dir, "snapshot-bootstrap.log"),
-                $"durationMs={duration.TotalMilliseconds:F0}\n");
-            File.Exists(Path.Combine(dir, "snapshot-bootstrap.log")).Should().BeTrue();
-        }
-        finally
-        {
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(dir);
-        }
-    }
-
-    [Fact]
-    public void SeRedis_SnapshotBegin_ThenPromoteFenceStatusWitness()
-    {
-        var dir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = Storage.TempDirs.NewTempDir();
         try
         {
             using var server = new HighwayTestServer(o =>
@@ -86,13 +24,6 @@ public class HwReplRuntimeCommandTests
             });
             using var redis = ConnectionMultiplexer.Connect(server.ConnectionString);
             var db = redis.GetDatabase();
-
-            var begin = (RedisResult[])db.Execute("HW.REPL.SNAPSHOT", "BEGIN", "FORMAT", HighwayServerBuilder.StorageFormatVersion.ToString())!;
-            begin.Should().HaveCount(5);
-            ((long)begin[4]).Should().Be(Highway.Server.HighwayServerBuilder.StorageFormatVersion);
-            var session = (string)begin[2]!;
-            session.Should().NotBeNullOrWhiteSpace();
-            db.Execute("HW.REPL.SNAPSHOT", "END", session);
 
             var status = (RedisResult[])db.Execute("HW.REPL.STATUS")!;
             status.Length.Should().BeGreaterThan(0);
@@ -108,14 +39,14 @@ public class HwReplRuntimeCommandTests
         }
         finally
         {
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(dir);
+            Storage.TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
     public void Stats_ServerForm_IncludesReplicationFields()
     {
-        var dir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = Storage.TempDirs.NewTempDir();
         try
         {
             using var server = new HighwayTestServer(o =>
@@ -135,7 +66,7 @@ public class HwReplRuntimeCommandTests
         }
         finally
         {
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(dir);
+            Storage.TempDirs.TryDelete(dir);
         }
     }
 }

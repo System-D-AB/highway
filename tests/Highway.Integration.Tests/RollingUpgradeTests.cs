@@ -1,7 +1,8 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Client.Engine;
 using Highway.Server;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using StackExchange.Redis;
 using Xunit;
 using Xunit.Abstractions;
@@ -13,7 +14,7 @@ namespace Highway.Integration.Tests;
 /// ends with a healthy attached pair. It exercises the real code end to end: replica-first restart,
 /// a GOODBYE hand-off, and the ex-primary <b>auto-rejoining</b> (T2/T3) as a replica of the successor
 /// on its next start. "Restart" here is <see cref="HighwayTestServer.Restart"/> — the store reopens at
-/// the same port and data directory, running <c>RocksDbStore.Open</c> exactly as a binary swap would,
+/// the same port and data directory, running <c>CrystalHighwayStore.Open</c> exactly as a binary swap would,
 /// so the rejoin marker is honoured for real.
 ///
 /// <para>Runs with authentication on, which is what makes the auth-tail plumbing (050 T3) load-bearing:
@@ -89,11 +90,14 @@ public class RollingUpgradeTests : IDisposable
     }
 
     private static async Task WaitCaughtUpAsync(HighwayTestServer primary, params HighwayTestServer[] standbys)
-        => await WaitForAsync(() =>
+    {
+        try { await WaitForAsync(() => HighwayTestServer.SameData(primary, standbys)); }   // 076: caught up = the same data
+        catch (TimeoutException)
         {
-            var latest = primary.Replication!.Engine.GetLatestSequenceNumber();
-            return standbys.All(s => s.Replication!.Engine.GetLatestSequenceNumber() == latest);
-        });
+            throw new TimeoutException("not caught up: " +
+                string.Join("; ", standbys.Select(s => HighwayTestServer.DescribeDifference(primary, s))));
+        }
+    }
 
     private static bool HasActiveSlot(HighwayTestServer primary, string replicaId)
         => primary.Replication!.Slots.Values.Any(s => s.ReplicaId == replicaId && s.State == SlotState.Active);
@@ -144,8 +148,8 @@ public class RollingUpgradeTests : IDisposable
 
         await WaitForAsync(() => a.Replication!.Role == ReplicaRole.Demoted);
         // B announced its promotion to A (a roster peer); A learns the new primary and schedules its
-        // rejoin — the marker on disk is what the next start honours.
-        await WaitForAsync(() => File.Exists(Path.Combine(aDir, ReplicaPuller.RejoinMarkerFileName)));
+        // rejoin — the node-local record is what the next start honours.
+        await WaitForAsync(() => NodeRecord.ReadRejoin(a.DurableStore!.Crystal) is not null);
 
         // ---- Swap the ex-primary: restart → auto-rejoin as B's replica, no operator step. ----
         a.Restart();

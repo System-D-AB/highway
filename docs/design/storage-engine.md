@@ -7,8 +7,10 @@
 
 *Highway's storage-engine choice was driven by two capabilities — log-structured-merge (LSM) space
 reclamation and write-ahead-log (WAL) durability — and those requirements are what selected RocksDB.
-Behind Highway's `IHighwayStore` abstraction it is a log-structured engine whose footprint tracks the
-live working set, durable by default, with per-structure byte budgets and no unbounded growth.*
+Since 3.0 Highway reaches it through SystemD.Crystal, a storage kernel built from Highway's own box
+layout, which also carries replication. Behind Highway's `IHighwayStore` abstraction it is a
+log-structured engine whose footprint tracks the live working set, durable by default, with
+per-structure byte budgets and no unbounded growth.*
 
 ## Overview
 
@@ -22,20 +24,29 @@ and both ways out — rather than degrading to memory silently.
 Highway originally ran on Garnet's append-only log; the engine was replaced by the current
 log-structured store, and the change fixed a structural problem rather than tuning one (below).
 
-**The engine is RocksDB 11.8.1** through the `RocksDB` NuGet binding (RocksDbSharp) 11.8.1.5032 —
-the version the sibling Crystal store runs (feature 064; 2.5.x shipped 11.1.2). Both versions write
-SST `format_version` 7 and open each other's data directories, and their WAL batch bytes are identical,
-so a replica pair can briefly run one of each and a node can be rolled back across the bump. Highway
-keeps the engine's on-disk defaults so that stays true; raising the SST format or enabling
-version-specific on-disk features would end it. The few engine settings the binding does not wrap
-(the compact-on-deletion collector, the memtable scan-flush trigger) are set through its native entry
-points.
+**The engine is SystemD.Crystal** (feature 076; NuGet `SystemD.Crystal`), a storage kernel over
+RocksDB 11.8.1: named boxes inside databases, atomic batches across boxes, synced commits, bounded
+scans, range deletes, and replication with no failover policy of its own. Crystal owns the whole data
+directory — it stamps it, locks it, and refuses any directory it did not stamp. A broker's store holds
+three databases:
+
+| Database | Replicated | Holds |
+|---|---|---|
+| `highway` | yes | every Highway box |
+| `highway.cache` | no | the opt-in broker-local cache |
+| `highway.node` | no | node-local state that must survive a restart (a scheduled rejoin) |
+
+Highway box `n` is the Crystal box `b/{n:x8}` in `highway`; a Highway key `[box:4][rest]` is the key
+`rest` inside it, so the key layout below is unchanged from RocksDB. A box is created the first time
+its id is written. Every box uses Crystal's `DeleteHeavy` profile — the compact-on-deletion collector
+and the memtable scan-flush trigger, the tuning Highway set on RocksDB itself before 3.0.
 
 ## How it works
 
-**Writes are durable at commit.** A queue send, an `HW.ACK`, a claim — each commits to the engine's
-**write-ahead log** with sync-per-commit durability before the client sees success. That is what
-makes "a sent message survives until processed" true across a restart.
+**Writes are durable at commit.** A queue send, an `HW.ACK`, a claim — each is **one Crystal batch**
+across every box the command touches, committed `Strict` (synced to the write-ahead log) before the
+client sees success. That is what makes "a sent message survives until processed" true across a
+restart. A command that stages nothing commits nothing, so an idle poll writes and syncs nothing.
 
 **The footprint tracks the live set, not the history.** This is the reason the engine changed. On
 the old append-only log, logical truncation moved a begin-pointer but never returned disk, and
@@ -64,7 +75,8 @@ depth, in flight, deferred, dead, bytes). So:
   floor, and an ack is a point lookup — nothing walks deleted history or a list of in-flight work;
 - every count the broker reports is a counter, never a scan, and listing every queue reads only the
   catalog (before 3.0 the dashboard and metrics dumped the whole keyspace to find queue names);
-- retiring a subscriber group is one range delete of its box;
+- retiring a subscriber group is one range delete of its box, inside the same batch as the rest of
+  the retirement, so it is atomic; the emptied Crystal box is dropped at the next start;
 - time-ordered indexes use process-local floors that are lowered on every insert below them and
   raised only after a committed scan, so a clock that steps back (another node after a failover, an
   NTP correction) can never hide an entry.
@@ -73,22 +85,24 @@ Registry, membership, reply slots and idempotency state keep their family encodi
 box. Expiring keys (reply slots, idempotency claims) are indexed by expiry and **deleted** when they
 expire — before 3.0 they were filtered on read but stayed on disk forever.
 
-**No in-place migration.** A 3.0 broker refuses a 2.x (format 3) data directory — by its
-`highway.format` stamp and, even without one, by recognising 2.x keys — rather than serving it as an
-empty, healthy-looking store. The upgrade is a fresh start per node: drain on 2.x, `highways
---wipe-data` (which keeps the node's replication identity), start 3.0; a standby re-syncs from the
-upgraded primary. A replica declares its storage format when it connects and the primary answers
-with its own; either side refuses a mismatch, so a 2.x node and a 3.0 node never replicate from each
-other in either direction.
+**No in-place migration.** A 3.0 broker refuses a data directory an earlier engine wrote — 2.x
+(format 3), or a 3.0 pre-release on RocksDB, recognised by its `highway.format` stamp or its RocksDB
+files — rather than serving it as an empty, healthy-looking store, and names what it found. The
+upgrade is a fresh start per node: drain with the version that wrote it, `highways --wipe-data`, start
+3.0; a standby re-syncs from the upgraded primary. On a Crystal store `--wipe-data` resets it: the
+databases go, the node's identity and epoch stay. A standby declares its storage format in every hello
+and the primary answers with its own; either side refuses a mismatch, so a 2.x node and a 3.0 node
+never replicate from each other in either direction.
 
 **Tombstones are also a read cost, so they are bounded in time, not just in space** (features 061,
 062). A range scan steps over every deleted key in its range until compaction removes it — in the
 memtable as well as in SST files. Three engine settings keep that bounded on a lightly written broker,
 whose memtable may otherwise sit unflushed for hours: every iterator carries an upper bound for its
 key range; `memtable_op_scan_flush_trigger` flushes the memtable once a single read step skips 1 000
-hidden entries; and the compact-on-deletion collector compacts any SST file that is delete-dense. The
-hot paths also avoid creating churn and start from a queue's known head (see
-[durable-queues](durable-queues.md)). `highways --compact` drops every tombstone offline.
+hidden entries; and the compact-on-deletion collector compacts any SST file that is delete-dense —
+both now set by Crystal's `DeleteHeavy` profile. The hot paths also avoid creating churn and start
+from a queue's known head (see [durable-queues](durable-queues.md)). `highways --compact` is refused in
+3.0: Crystal offers no offline compaction yet, and nothing in the box layout needs one.
 
 **Everything that grows with traffic is bounded.** Each queue-like structure carries a byte budget
 (`MaxQueueBytes`, default 1 GB), maintained by a running counter inside the same transaction that
@@ -99,14 +113,15 @@ queue exists to protect. A test enumerates every key shape and requires each to 
 so a new unbounded structure fails CI rather than shipping.
 
 **The cache is a separate database.** When the opt-in broker-local cache is enabled it uses its
-*own* database at `dataDir/cache` (or an in-memory store on an ephemeral broker) — a physically
-separate database, which is precisely why a cache write cannot enter the replicated WAL. See
+*own* Crystal database, `highway.cache`, created **not replicated** (or an in-memory store on an
+ephemeral broker). Crystal replicates whole databases, so a cache write cannot reach a standby. See
 [distributed-cache.md](distributed-cache.md).
 
 ## Wire surface
 
 The storage engine has no client-facing commands of its own; it is the substrate under every `HW.*`
-command. Replication ships the WAL to standbys via the `HW.REPL.*` family — see
+command. A primary's data reaches its standbys over Crystal's replication port; Highway's policy
+(heartbeat, handshake, promotion, roster) is the `HW.REPL.*` family — see
 [replication-and-failover.md](replication-and-failover.md) and the *Replication Commands* section of
 [`docs/HIGHWAY-PROTOCOL.md`](../HIGHWAY-PROTOCOL.md).
 

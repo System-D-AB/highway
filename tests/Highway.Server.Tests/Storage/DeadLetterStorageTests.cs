@@ -3,7 +3,7 @@ using FluentAssertions;
 using Highway.Server.Internal;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Boxes;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;

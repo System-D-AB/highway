@@ -1,3 +1,4 @@
+using Highway.Server.Storage.Crystal;
 using System.Text;
 using System.Text.RegularExpressions;
 using FluentAssertions;
@@ -5,7 +6,7 @@ using Highway.Server.Commands.Ported;
 using Highway.Server.Internal;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Layout;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Commands;
@@ -183,7 +184,7 @@ public class DeterminismTests
 
     private static List<(byte[] Key, byte[] Value)> RunClaimSequenceOnRocks(string dir)
     {
-        var store = RocksDbStore.Open(dir);
+        var store = CrystalHighwayStore.Open(dir);
         using var h = new CommandHarness(store: store); // the harness owns and disposes the store
         var t0 = 10_000_000_000_000L;
         h.Run(new HwCallCommand(), t0, "orders", "req-1", "payload-1");

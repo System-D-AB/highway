@@ -1,6 +1,6 @@
 using Highway.Server.Observability;
 using Highway.Server.Storage;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 
 namespace Highway.Server.Commands.Runtime;
 
@@ -44,7 +44,7 @@ internal sealed class CommandContext
     /// 042 T1: the WAL feeder, present only on a RocksDB-backed broker. Null on an
     /// ephemeral in-memory store — REPL commands refuse with HW_INVALID_ARG.
     /// </summary>
-    public ReplicationFeeder? Replication { get; }
+    public HighwayReplication? Replication { get; }
 
     /// <summary>
     /// Operational metrics (feature 051), or null when metrics are not wired (e.g. an in-process
@@ -91,7 +91,7 @@ internal sealed class CommandContext
         FlightRecorder recorder,
         HighwayServerOptions options,
         long nowTicks,
-        ReplicationFeeder? replication = null,
+        HighwayReplication? replication = null,
         HighwayMetrics? metrics = null,
         SweepThrottle? sweeps = null,
         Storage.Boxes.BoxRuntime? boxes = null,

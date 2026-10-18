@@ -1,13 +1,14 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Server;
 using Highway.Server.Commands.Ported;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using StackExchange.Redis;
 using Xunit;
 
 namespace Highway.Server.Tests.Commands;
 
-/// <summary>042 T1 — HW.REPL.HELLO / PULL / ACK, including a raw SE.Redis client against a live node.</summary>
+/// <summary>042 T1 — HW.REPL.HELLO (076: the data path is Crystal's), including a raw SE.Redis client against a live node.</summary>
 public class HwReplCommandTests
 {
     [Fact]
@@ -20,33 +21,28 @@ public class HwReplCommandTests
     }
 
     [Fact]
-    public void HelloPullAck_OnRocksStore_RoundTrips()
+    public void Hello_OnDurableStore_AnswersEpochFormatAndReplicationEndpoint()
     {
-        var dir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = Storage.TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             using var h = new CommandHarness(store);
 
             using (var batch = store.NewBatch())
             {
-                store.Set(batch, "k"u8.ToArray(), "v"u8.ToArray());
+                store.Set(batch, Highway.Server.Storage.Layout.HighwayKeyspace.Kv("k"), "v"u8.ToArray());   // a format-4 key (065)
                 batch.Commit();
             }
 
             var hello = CommandHarness.AsText(h.Run(new HwReplHelloCommand(), "r1", "0", "1", "FORMAT", "4"));
-            hello.Should().StartWith("*3\r\n").And.EndWith(":4\r\n", "the primary echoes its storage format");
-
-            var pull = CommandHarness.AsText(h.Run(new HwReplPullCommand(), "0", "1000000"));
-            pull.Should().StartWith("*3\r\n");
-            pull.Should().Contain(":1\r\n", "epoch 1 is stamped on the page");
-
-            var ack = CommandHarness.AsText(h.Run(new HwReplAckCommand(), "r1", "1"));
-            ack.Should().Be("+OK\r\n");
+            hello.Should().StartWith("*5\r\n:1\r\n", "epoch 1 leads the reply")
+                .And.Contain(":4\r\n", "the primary echoes its storage format");
+            store.Replication.Slots.Should().ContainKey("r1", "a hello opens the standby's slot");
         }
         finally
         {
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(dir);
+            Storage.TempDirs.TryDelete(dir);
         }
     }
 
@@ -56,19 +52,19 @@ public class HwReplCommandTests
     [Fact]
     public void ClientHandshake_Master_Standby_Willing_Shapes()
     {
-        var primaryDir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
-        var replicaDir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
+        var primaryDir = Storage.TempDirs.NewTempDir();
+        var replicaDir = Storage.TempDirs.NewBootstrappedDir();   // 076: a standby that has bootstrapped
         var clock = new Storage.ManualClock();
         try
         {
-            using (var primary = RocksDbStore.Open(primaryDir))
+            using (var primary = CrystalHighwayStore.Open(primaryDir))
             using (var h = new CommandHarness(primary))
             {
                 var reply = CommandHarness.AsText(h.Run(new HwReplHelloCommand(), "CLIENT", "client-1", "1"));
                 reply.Should().Contain("master").And.Contain("$1\r\n1\r\n", "epoch 1");
             }
 
-            using (var replica = RocksDbStore.Open(replicaDir, replication: new HighwayReplicationOptions
+            using (var replica = CrystalHighwayStore.Open(replicaDir, replication: new HighwayReplicationOptions
             {
                 StartAsReplica = true,
                 PrimaryServer = null,           // no bootstrap needed — role alone matters here
@@ -97,18 +93,18 @@ public class HwReplCommandTests
         }
         finally
         {
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(primaryDir);
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(replicaDir);
+            Storage.TempDirs.TryDelete(primaryDir);
+            Storage.TempDirs.TryDelete(replicaDir);
         }
     }
 
     [Fact]
     public void Join_Admits_RefusesHeldPriority_AndStatusExposesTheRoster()
     {
-        var dir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = Storage.TempDirs.NewTempDir();
         try
         {
-            using var store = RocksDbStore.Open(dir);
+            using var store = CrystalHighwayStore.Open(dir);
             using var h = new CommandHarness(store);
 
             CommandHarness.AsText(h.Run(new HwReplJoinCommand(), "node-a", "1", "hosta:6500"))
@@ -131,14 +127,14 @@ public class HwReplCommandTests
         }
         finally
         {
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(dir);
+            Storage.TempDirs.TryDelete(dir);
         }
     }
 
     [Fact]
-    public void SeRedis_PullsPagesOffALiveNode()
+    public void SeRedis_HelloOffALiveNode_NamesItsReplicationEndpoint()
     {
-        var dir = Storage.ReplicationToolkitSurfaceTests.NewTempDir();
+        var dir = Storage.TempDirs.NewTempDir();
         try
         {
             using var server = new HighwayTestServer(o =>
@@ -156,19 +152,20 @@ public class HwReplCommandTests
             legacy.Should().Throw<RedisServerException>().WithMessage("*HW_STORAGE_FORMAT*Highway 2.x*--wipe-data*");
 
             var hello = db.Execute("HW.REPL.HELLO", "replica-a", "0", "1", "FORMAT", "4");
-            ((RedisResult[])hello!).Should().HaveCount(3);
-            ((int)((RedisResult[])hello!)[2]).Should().Be(4, "the primary echoes its storage format");
+            var rows = (RedisResult[])hello!;
+            rows.Should().HaveCount(5);
+            ((int)rows[4]).Should().Be(0, "this caller pulls nothing, so its data is not live (076)");
+            ((int)rows[0]).Should().Be(1, "primary epoch");
+            ((int)rows[2]).Should().Be(4, "the primary echoes its storage format");
+            ((string)rows[3]!).Should().MatchRegex(@"^127\.0\.0\.1:\d+$", "the primary names where its data is followed (076)");
 
-            var pull = db.Execute("HW.REPL.PULL", "0", "1000000");
-            var pullRows = (RedisResult[])pull!;
-            pullRows.Should().HaveCount(3);
-            ((int)pullRows[0]).Should().Be(1, "primary epoch");
-
-            db.Execute("HW.REPL.ACK", "replica-a", "1");
+            // 076: the data path moved to the replication port; the RESP verbs that carried it are gone.
+            var pull = () => db.Execute("HW.REPL.PULL", "0", "1000000");
+            pull.Should().Throw<RedisServerException>();
         }
         finally
         {
-            Storage.ReplicationToolkitSurfaceTests.TryDelete(dir);
+            Storage.TempDirs.TryDelete(dir);
         }
     }
 }

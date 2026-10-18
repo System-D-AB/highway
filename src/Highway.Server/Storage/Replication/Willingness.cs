@@ -1,4 +1,4 @@
-namespace Highway.Server.Storage.Rocks;
+namespace Highway.Server.Storage.Replication;
 
 /// <summary>
 /// The herd contract's no-split hinge (042-1a D1): when may a standby answer a client's

@@ -1,10 +1,11 @@
+using Highway.Server.Storage.Crystal;
 using System.Text;
 using FluentAssertions;
 using Highway.Server.Internal;
 using Highway.Server.Storage;
 using Highway.Server.Storage.Boxes;
 using Highway.Server.Storage.Layout;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Xunit;
 
 namespace Highway.Server.Tests.Storage;
@@ -21,9 +22,9 @@ public class BoxLayoutTests
     private static (IHighwayStore Store, Action Cleanup) Open(string kind)
     {
         if (kind == "memory") return (new InMemoryStore(), () => { });
-        var dir = ReplicationToolkitSurfaceTests.NewTempDir();
-        var store = RocksDbStore.Open(dir);
-        return (store, () => { store.Dispose(); ReplicationToolkitSurfaceTests.TryDelete(dir); });
+        var dir = TempDirs.NewTempDir();
+        var store = CrystalHighwayStore.Open(dir);
+        return (store, () => { store.Dispose(); TempDirs.TryDelete(dir); });
     }
 
     private static byte[] Entry(string id, ushort attempts = 0, ushort requeues = 0)

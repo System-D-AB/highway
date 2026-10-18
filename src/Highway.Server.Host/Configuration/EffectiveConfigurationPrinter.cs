@@ -52,6 +52,9 @@ internal static class EffectiveConfigurationPrinter
         writer.WriteLine($"    replication.priority             : {c.Server.Replication.Priority}");
         writer.WriteLine($"    replication.advertiseEndpoint    : {c.Server.Replication.AdvertiseEndpoint ?? "(own endpoint)"}");
         writer.WriteLine($"    replication.primaryServer        : {Redact(c.Server.Replication.PrimaryServer)}");
+        writer.WriteLine($"    replication.replicationListen    : {c.Server.Replication.ReplicationListen ?? "(RESP port + 1)"}");
+        writer.WriteLine($"    replication.replicationAdvertise : {c.Server.Replication.ReplicationAdvertiseEndpoint ?? "(own host, bound port)"}");
+        writer.WriteLine($"    replication.replicationSecret    : {(string.IsNullOrEmpty(c.Server.Replication.ReplicationSecret) ? "(broker password)" : "(set)")}");
         writer.WriteLine($"    replication.slotLagCapSequences  : {c.Server.Replication.SlotLagCapSequences}");
         writer.WriteLine($"    replication.slotStaleAfter       : {c.Server.Replication.SlotStaleAfter}");
         writer.WriteLine($"    replication.autoFailover         : {c.Server.Replication.AutoFailover}");

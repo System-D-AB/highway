@@ -151,6 +151,9 @@ public class SchemaCompletenessTests
         ["Priority"] = "server.replication.priority",
         ["AdvertiseEndpoint"] = "server.replication.advertiseEndpoint",
         ["PrimaryServer"] = "server.replication.primaryServer",
+        ["ReplicationListen"] = "server.replication.replicationListen",                         // 076
+        ["ReplicationAdvertiseEndpoint"] = "server.replication.replicationAdvertiseEndpoint",   // 076
+        ["ReplicationSecret"] = "server.replication.replicationSecret",                         // 076
         ["SlotLagCapSequences"] = "server.replication.slotLagCapSequences",
         ["SlotStaleAfter"] = "server.replication.slotStaleAfter",
         ["AutoFailover"] = "server.replication.autoFailover",

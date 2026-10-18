@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using Highway.Server.Internal;
 
-namespace Highway.Server.Storage.Rocks;
+namespace Highway.Server.Storage.Replication;
 
 /// <summary>
 /// The herd roster (042-1a D5 / parent R13): who is in the set, at what priority, reachable

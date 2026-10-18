@@ -3,7 +3,7 @@ using FluentAssertions;
 using Highway.Abstractions;
 using Highway.Client.Engine;
 using Highway.Server;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using StackExchange.Redis;
 using Xunit;
 using Xunit.Abstractions;
@@ -104,11 +104,7 @@ public class HerdCohesionTests : IDisposable
 
     private static async Task WaitForReplicationCaughtUpAsync(HighwayTestServer primary, params HighwayTestServer[] standbys)
     {
-        await WaitForAsync(() =>
-        {
-            var latest = primary.Replication!.Engine.GetLatestSequenceNumber();
-            return standbys.All(s => s.Replication!.Engine.GetLatestSequenceNumber() == latest);
-        });
+        await WaitForAsync(() => HighwayTestServer.SameData(primary, standbys));   // 076: caught up = the same data
     }
 
     // ------------------------------------------------------------------ D-T2
@@ -375,7 +371,7 @@ public class HerdCohesionTests : IDisposable
         // pending registry, not yet answered anywhere.
         await using var caller = await EngineNode.StartAsync(multi, "rpc-caller");
         var callTask = caller.Client.ExecuteAsync(new ItEchoRequest { Value = "herd-rpc" });
-        await WaitForAsync(() => node1.Replication!.Engine.GetLatestSequenceNumber() > 0);
+        await WaitForAsync(() => node1.DurableStore!.CommittedWrites > 0);
 
         // The master dies with the call unanswered. The caller's registry is the sole
         // surviving copy; its Converged replay re-drives the SAME id to the successor.

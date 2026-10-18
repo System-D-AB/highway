@@ -10,16 +10,28 @@ Highway is a high-throughput, low-latency message broker and stream store built 
 2. Double-click `scripts\run.bat` (or execute `scripts\run.ps1` in PowerShell).
 3. The broker starts immediately with code defaults:
    - **Broker RESP listener:** `127.0.0.1:6500`
+   - **Replication listener:** `127.0.0.1:6501` (the RESP port + 1), opened only once the broker is in a
+     replica set
    - **Dashboard & flight recorder:** `http://127.0.0.1:7500`
-   - **Durable data store:** `./data` (beside the distribution)
+   - **Durable data store:** `./data` (beside the distribution) — a SystemD.Crystal store: leave it to
+     the broker, and keep nothing else in it
 4. Press `Ctrl+C` in the console window to stop cleanly.
 
 > **Reaching the dashboard from another machine.** Both the broker (`server.bindAddress`) and the
 > dashboard (`dashboard.bindAddress`) default to **loopback (`127.0.0.1`)**, so from a remote browser
 > the dashboard simply won't load — open it *on the server* at `http://localhost:7500`, or set
 > `dashboard.bindAddress` to `0.0.0.0` **and** a `dashboard.apiKey` (an exposed dashboard with no key
-> is an open window into the broker). These are two separate listeners: exposing the broker for
+> is an open window into the broker). These are separate listeners: exposing the broker for
 > replication does not expose the dashboard.
+>
+> **Replica sets use two ports per node.** Clients and the replica set's control traffic (hello,
+> join, handshake) use the RESP port; the data itself moves over the **replication port**
+> (`server.replication.replicationListen`, default the RESP port + 1, opened when a standby first says
+> hello or the node is promoted; set it explicitly to open it at start), authenticated by the replica
+> set's shared secret — `server.replication.replicationSecret`, or the broker password when unset — and
+> over TLS with the broker's own certificate when the broker serves TLS (a self-signed certificate the
+> nodes share is trusted as itself). Open both between the nodes. Set `server.replication.replicationAdvertiseEndpoint` when peers must dial an
+> address other than the node's own host.
 
 ---
 
@@ -148,32 +160,19 @@ without the dashboard UI, set `dashboard.enabled: false` and keep `dashboard.hea
 
 ### Offline Compaction (`--compact`)
 
-Compacts the data directory and drops every deleted-key marker ("tombstone") the storage engine is
-holding. It changes no data. Use it once after upgrading a broker that ran **2.5.3 or earlier** for a
-long time: those versions left tombstones on busy queues that every poll had to step over, so an
-idle-looking broker could spend a whole core. From 2.5.4 the broker no longer creates that churn and
-RocksDB compacts delete-heavy files on its own; from 2.5.5 it also flushes deletes out of memory as
-soon as reads start stepping over them. Routine use is not needed.
-
-```cmd
-REM stop the broker first — a running broker holds the data directory's lock
-bin\highways.exe --stop        REM Windows service; on Linux: sudo systemctl stop highway
-bin\highways.exe --compact --config config\highway.json
-bin\highways.exe --start       REM start it again
-```
-
-It prints the elapsed time and the directory size before and after. **Disk size need not shrink** —
-write-ahead-log files are kept for replication for `walTtlSeconds` (default 24 h); what compaction
-removes is the scan cost of the tombstones. The metric
-`highway.storage.memtable_deletes` shows the engine's pending deletes if you want to watch it; on 2.5.5
-it rises and falls rather than climbing for hours.
+**Not available in 3.0.** The command remains for 2.x data directories, which needed it once after
+2.5.3 or earlier (tombstones on busy queues that every poll stepped over). A 3.0 broker starts every
+data directory fresh, its storage engine (SystemD.Crystal) compacts delete-heavy data on its own, and it
+offers no offline compaction yet, so `--compact` is refused and changes nothing. The metric
+`highway.storage.memtable_deletes` still shows the engine's pending deletes.
 
 ### Emptying the Data Directory (`--wipe-data`)
 
 Deletes everything the broker stores — every queued, in-flight, delayed and dead-lettered message, the
-registry and the job schedules — and keeps only the node's replication identity (its epoch file). It is
-the step between draining on Highway 2.x and starting 3.0 (see runbook 7). Like `--compact`, it needs
-the broker stopped, and refuses while a running broker holds the directory.
+registry and the job schedules — and keeps only the node's replication identity (its node id and
+epoch). It is the step between draining on Highway 2.x and starting 3.0 (see runbook 7); a directory an
+earlier engine wrote (2.x, or a 3.0 pre-release) is emptied entirely. It needs the broker stopped, and
+refuses while a running broker holds the directory.
 
 ```cmd
 bin\highways.exe --wipe-data --config config\highway.json
@@ -188,7 +187,7 @@ When upgrading across incompatible storage format versions or performing store m
 ### When to Use
 - Startup fails with: `Highway's data directory was written in storage format X, but this build reads format Y`
   (for 2.x → 3.0, follow runbook 7 instead).
-- Performing scheduled log rotation / storage compaction.
+- Performing scheduled log rotation.
 
 ### Step-by-Step Procedure
 

@@ -26,7 +26,7 @@ internal static class StoreInspection
     public static List<(byte[] Key, byte[] Value)> Dump(IHighwayStore store) => store switch
     {
         InMemoryStore m => m.DumpData(),
-        Storage.Rocks.RocksDbStore r => r.DumpData(),
+        Storage.Crystal.CrystalHighwayStore c => c.DumpData(),
         _ => throw new NotSupportedException($"store type {store.GetType().Name} is not inspectable"),
     };
 

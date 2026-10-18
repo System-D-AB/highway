@@ -1,7 +1,7 @@
 using System.Net;
 using Highway.Server.Resp;
 using Highway.Server.Storage;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 
 namespace Highway.Server;
 
@@ -36,7 +36,6 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
     private readonly HighwayServerOptions _opts;
     private RespServer _server;
     private IHighwayStore _store;
-    private ReplicaPuller? _puller;
 
     /// <summary>
     /// Connection string valid immediately after construction and stable across
@@ -104,7 +103,7 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
             if (advertiseOwnPort) _opts.Replication.AdvertiseEndpoint = $"127.0.0.1:{Port}";
             try
             {
-                (_server, _store, _puller) = StartServer(_opts, reuseStore: null);
+                (_server, _store) = StartServer(_opts, reuseStore: null);
                 break;
             }
             catch (Exception e) when (attempt < MaxStartAttempts && IsAddressInUse(e))
@@ -137,39 +136,33 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Disposes the inner server and starts a new one on the <b>same port and data directory</b>,
     /// leaving <see cref="ConnectionString"/> valid. With a data directory configured this exercises
-    /// RocksDB recovery (the store reopens the same on-disk path); memory-only, the new server
+    /// recovery (the store reopens the same on-disk path); memory-only, the new server
     /// starts empty (a fresh store).
     /// </summary>
     public void Restart()
     {
-        // Dispose first so a durable store releases its RocksDB directory lock before the new
+        // Dispose first so a durable store releases its directory lock before the new
         // server reopens the same path (recovery). A memory-only restart opens a fresh store, so
         // state is genuinely lost — the two behaviours the durability/memory tests rely on.
         DisposeServerAsync().GetAwaiter().GetResult();
-        (_server, _store, _puller) = StartServer(_opts, reuseStore: null);
+        (_server, _store) = StartServer(_opts, reuseStore: null);
     }
 
     /// <summary>
     /// Builds the store and starts a RESP server on the configured loopback port. A null
     /// <see cref="HighwayServerOptions.DataDir"/> means an in-memory store (the default); a set one
-    /// opens — and, on restart, reopens — a RocksDB directory whose data survives.
+    /// opens — and, on restart, reopens — a Crystal store whose data survives.
     /// </summary>
-    private static (RespServer Server, IHighwayStore Store, ReplicaPuller? Puller) StartServer(
+    private static (RespServer Server, IHighwayStore Store) StartServer(
         HighwayServerOptions opts, IHighwayStore? reuseStore)
     {
-        // 050 T3: an auto-rejoin's snapshot pull authenticates with the node's own shared secret,
-        // since the learned rejoin endpoint carries no credentials. Set before Open honours a marker.
+        // 050 T3: a rejoined standby says hello to the learned primary with the node's own shared
+        // secret, since the learned rejoin endpoint carries no credentials. Set before Open.
         opts.Replication.AuthTail = string.IsNullOrEmpty(opts.Authentication.Password)
             ? null : $",password={opts.Authentication.Password}";
-
-        var store = reuseStore
-            ?? (opts.DataDir is { } dir
-                ? Storage.Rocks.RocksDbStore.Open(dir, ownsDirectory: false, opts.Replication)
-                : new InMemoryStore());
-
-        // The test server authenticates even on loopback (exemptLoopback: false) so every
-        // integration test exercises AUTH — the SecurityPolicy posture for the suite.
-        var authenticator = new PasswordAuthenticator(opts.Authentication, exemptLoopback: false);
+        // 076: Crystal replicates on its own loopback port, chosen by the OS when first used, under the broker password.
+        opts.Replication.DefaultReplicationListen ??= "127.0.0.1:0";
+        opts.Replication.ReplicationSecret ??= opts.Authentication.Password;
 
         // TLS pass-through (040: the fixture-swap gap Kiro's handoff named). A test that sets
         // Tls.CertFileName/CertPassword gets a real TLS endpoint — same RespServer path
@@ -181,6 +174,18 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
             cert = System.Security.Cryptography.X509Certificates.X509CertificateLoader
                 .LoadPkcs12FromFile(certFile, opts.Tls.CertPassword);
         }
+
+        opts.Replication.TlsCertificate = cert;   // 076: replication over TLS when RESP is
+        opts.Replication.TlsRequireClientCertificate = opts.Tls.ClientCertificateRequired;
+
+        var store = reuseStore
+            ?? (opts.DataDir is { } dir
+                ? Storage.Crystal.CrystalHighwayStore.Open(dir, ownsDirectory: false, opts.Replication)
+                : new InMemoryStore());
+
+        // The test server authenticates even on loopback (exemptLoopback: false) so every
+        // integration test exercises AUTH — the SecurityPolicy posture for the suite.
+        var authenticator = new PasswordAuthenticator(opts.Authentication, exemptLoopback: false);
 
         RespServer server;
         try
@@ -200,14 +205,7 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
             throw;
         }
 
-        ReplicaPuller? puller = null;
-        if (store is Storage.Rocks.RocksDbStore rocks &&
-            !string.IsNullOrWhiteSpace(opts.Replication.PrimaryServer))
-        {
-            puller = new ReplicaPuller(rocks, opts.Replication);
-        }
-
-        return (server, store, puller);
+        return (server, store);
     }
 
     /// <inheritdoc/>
@@ -218,20 +216,52 @@ public sealed class HighwayTestServer : IDisposable, IAsyncDisposable
 
     private async Task DisposeServerAsync()
     {
-        if (_puller is not null)
-        {
-            await _puller.DisposeAsync();
-            _puller = null;
-        }
         await _server.DisposeAsync();
-        // A RocksDB store must be disposed to release the directory; the in-memory store's Dispose
+        // A durable store must be disposed to release the directory; the in-memory store's Dispose
         // is a no-op. A durable store's directory is NOT deleted (ownsDirectory: false) so a later
         // Restart / reopen recovers it.
         _store.Dispose();
     }
 
-    /// <summary>042 replication runtime, when this instance is a durable RocksDB broker.</summary>
-    internal ReplicationFeeder? Replication => (_store as RocksDbStore)?.Replication;
+    /// <summary>042 replication runtime, when this instance is a durable broker.</summary>
+    internal HighwayReplication? Replication => (_store as Storage.Crystal.CrystalHighwayStore)?.Replication;
+
+    /// <summary>The durable store, when this instance has a data directory (076: caught-up checks compare its content).</summary>
+    internal Storage.Crystal.CrystalHighwayStore? DurableStore => _store as Storage.Crystal.CrystalHighwayStore;
+
+    /// <summary>
+    /// Whether every standby holds exactly what <paramref name="primary"/> holds — key for key (076). Stricter than
+    /// comparing log positions: a standby is caught up when its data is the primary's.
+    /// </summary>
+    internal static bool SameData(HighwayTestServer primary, params HighwayTestServer[] standbys)
+    {
+        try
+        {
+            var expected = primary.DurableStore!.DumpData();
+            return standbys.All(s => s.DurableStore is { } d && Same(expected, d.DumpData()));
+        }
+        catch (ObjectDisposedException) { return false; }   // a node mid-restart: not caught up yet
+    }
+
+    /// <summary>Where <paramref name="standby"/>'s data differs from <paramref name="primary"/>'s — for a caught-up wait that timed out.</summary>
+    internal static string DescribeDifference(HighwayTestServer primary, HighwayTestServer standby)
+    {
+        var p = primary.DurableStore!.DumpData();
+        var s = standby.DurableStore?.DumpData() ?? [];
+        static string Hex(byte[] b) => Convert.ToHexString(b);
+        var pk = p.ToDictionary(e => Hex(e.Key), e => Hex(e.Value));
+        var sk = s.ToDictionary(e => Hex(e.Key), e => Hex(e.Value));
+        var missing = pk.Keys.Except(sk.Keys).Take(5).ToList();
+        var extra = sk.Keys.Except(pk.Keys).Take(5).ToList();
+        var changed = pk.Keys.Intersect(sk.Keys).Where(k => pk[k] != sk[k]).Take(5).ToList();
+        return $"primary {p.Count} keys, standby {s.Count}; standby role {standby.Replication?.Role}, " +
+               $"followed position {standby.Replication?.FollowedPosition()}; missing [{string.Join(", ", missing)}], " +
+               $"extra [{string.Join(", ", extra)}], changed [{string.Join(", ", changed)}]; " +
+               $"standby transitions: {string.Join(" | ", standby.Replication?.Transitions.TakeLast(6) ?? [])}";
+    }
+
+    private static bool Same(List<(byte[] Key, byte[] Value)> a, List<(byte[] Key, byte[] Value)> b)
+        => a.Count == b.Count && a.Zip(b).All(p => p.First.Key.AsSpan().SequenceEqual(p.Second.Key) && p.First.Value.AsSpan().SequenceEqual(p.Second.Value));
 
     /// <summary>
     /// Reads live queue state directly from the in-process store (040 T8). Under Garnet this went

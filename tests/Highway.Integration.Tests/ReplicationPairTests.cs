@@ -1,9 +1,10 @@
+using Highway.Server.Storage.Crystal;
 using FluentAssertions;
 using Highway.Abstractions;
 using Highway.Client;
 using Highway.Client.Engine;
 using Highway.Server;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using StackExchange.Redis;
 using Xunit;
 
@@ -41,7 +42,7 @@ public class ReplicationPairTests : IDisposable
         return dir;
     }
 
-    private static async Task WaitForAsync(Func<bool> condition, int timeoutMs = 10_000)
+    private static async Task WaitForAsync(Func<bool> condition, int timeoutMs = 10_000, Func<string>? diagnose = null)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         while (DateTime.UtcNow < deadline)
@@ -49,7 +50,15 @@ public class ReplicationPairTests : IDisposable
             if (condition()) return;
             await Task.Delay(50);
         }
-        throw new TimeoutException("condition not met");
+        throw new TimeoutException("condition not met" + (diagnose is null ? "" : "; " + diagnose()));
+    }
+
+    /// <summary>Both nodes' replication state, for a wait that timed out.</summary>
+    private static string Diagnose(HighwayTestServer primary, HighwayTestServer replica)
+    {
+        static string Fields(HighwayTestServer s)
+            => s.Replication is { } r ? string.Join(" ", r.StatsFields().Select(f => $"{f.Name}={f.Value}")) : "(none)";
+        return $"primary: {Fields(primary)} | replica: holdsData={replica.Replication?.HoldsReplicatedData()} {Fields(replica)}";
     }
 
     [Fact]
@@ -84,9 +93,7 @@ public class ReplicationPairTests : IDisposable
         // Caught up with EVERYTHING the primary holds — not merely "applied something": the replica's
         // own HELLO/JOIN writes replicate first, so "> 0" could pass before the SEND batch arrived.
         // That race was hidden while every test connect paid a ~2 s failed IPv6 attempt (063).
-        var primaryLatest = primary.Replication!.Engine.GetLatestSequenceNumber();
-        await WaitForAsync(() =>
-            replica.Replication is { } f && f.Engine.GetLatestSequenceNumber() >= primaryLatest);
+        await WaitForAsync(() => HighwayTestServer.SameData(primary, replica));   // 076: caught up = the same data
 
         replica.Replication!.IsWritable.Should().BeFalse();
         var sendOnReplica = () =>
@@ -267,7 +274,7 @@ public class ReplicationPairTests : IDisposable
             .Should().NotBeNullOrWhiteSpace();
 
         // Let the standby join the roster and the client learn it.
-        await WaitForAsync(() => replica.Replication!.HasSeenMaster);
+        await WaitForAsync(() => replica.Replication!.HasSeenMaster, diagnose: () => Diagnose(primary, replica));
         await Task.Delay(400);
 
         using (var p = ConnectionMultiplexer.Connect(primary.ConnectionString))
@@ -354,7 +361,7 @@ public class ReplicationPairTests : IDisposable
         {
             var reply = (RedisResult[])r.GetDatabase().Execute("HW.REPL.HELLO", "CLIENT", "client-1", "1")!;
             return (string)reply[0]! == "willing";
-        });
+        }, diagnose: () => replica.Replication!.ReadinessDebug());
         replica.Replication!.Role.Should().Be(ReplicaRole.Replica,
             "answering willing never promotes — the herd's first accepted verb does (042-1c)");
     }
@@ -435,6 +442,7 @@ public class ReplicationPairTests : IDisposable
     public async Task Goodbye_NarratesDrains_StandsDown_AndTheStandbyTurnsWilling()
     {
         const string password = "pair-bye";
+        using var hog = PoolHog.FromEnvironment();
         var primaryDir = NewDir();
         var replicaDir = NewDir();
 
@@ -468,6 +476,10 @@ public class ReplicationPairTests : IDisposable
 
         primary.Replication!.ConnectedClients.Should().BeGreaterThan(0, "the herd count sees the client");
 
+        // A new node syncs (copies the primary's data and catches up) before it is a standby; until then it is never
+        // willing. v3.0's standby did not open until it held the data, so this wait was implicit there.
+        await WaitForAsync(() => replica.Replication!.IsReadyStandby);
+
         db.Execute("HW.REPL.GOODBYE", "maintenance").ToString().Should().Be("OK");
 
         (await Task.WhenAny(goodbyeHeard.Task, Task.Delay(5_000))).Should().Be(goodbyeHeard.Task,
@@ -481,8 +493,10 @@ public class ReplicationPairTests : IDisposable
 
         // The standby heard the narration on its own subscription: immediately willing.
         await WaitForAsync(() => replica.Replication!.GoodbyeSeen);
-        replica.Replication!.IsWillingForHerd().Should().BeTrue(
-            "GOODBYE makes the standby willing without waiting out W");
+        var r = replica.Replication!;
+        r.IsWillingForHerd().Should().BeTrue(
+            "GOODBYE makes the standby willing without waiting out W (role {0}, ready standby {1}, outranked {2})",
+            r.Role, r.IsReadyStandby, r.OutrankedByHigherPeer(out _));
     }
 
     /// <summary>042-1c C-T2 — the roster: master self-registers, the standby's JOIN announce lands, STATUS serves both.</summary>

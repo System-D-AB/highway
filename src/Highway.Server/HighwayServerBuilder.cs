@@ -414,65 +414,20 @@ public sealed class HighwayServerBuilder
     /// </summary>
     public static readonly int StorageFormatVersion = 4;
 
-    private const string StorageFormatFile = "highway.format";
-
     /// <summary>
-    /// Refuses a data directory written by an incompatible build, before Garnet tries to
-    /// recover from it (feature 016 follow-up).
-    ///
-    /// <para><b>Why this is needed, and why the 018 check was not enough.</b> Garnet's AOF
-    /// stores a stored-procedure <i>id</i> per record, and those ids are positional. Feature 018
-    /// removed two commands, so every id after them shifted, and replaying an older AOF fails
-    /// with "Transaction procedure N not found". Recovery then aborts and the broker carries on
-    /// with an <b>empty store</b> — healthy-looking, and missing every message it was asked to
-    /// keep. The 018 check scanned for leftover <c>hw:ch:*:grp:*</c> keys, which can only be
-    /// found if recovery <i>succeeded</i>: it looked for a symptom that is absent in the worst
-    /// case.</para>
-    ///
-    /// <para>Feature 016 made this everyone's problem by turning durability on by default, so
-    /// the next command-set change would silently empty every existing broker.</para>
-    ///
-    /// <para><b>Feature 041 note.</b> The engine is now RocksDB, not Garnet, so the positional
-    /// stored-procedure-id hazard described above no longer exists on new data. This guard is kept
-    /// because it still earns its place: a directory carrying Garnet-era <c>checkpoints/</c> or
-    /// <c>log/</c> subdirectories, or a <c>highway.format</c> stamp below the current version, is a
-    /// pre-041 broker's directory that this build must refuse rather than hand to RocksDB recovery.
-    /// The stamp remains the forward-compatible mechanism for any future format change.</para>
+    /// Refuses a data directory written by an earlier storage engine (076 R3.2), at Build() rather than at start.
+    /// Since 076 the directory is a SystemD.Crystal store, owned wholly by Crystal: Highway writes no stamp of its own
+    /// (its storage format is the key layout, <see cref="StorageFormatVersion"/>), and Crystal refuses any directory
+    /// it did not stamp. A directory Highway's RocksDB engine wrote (a <c>highway.format</c> stamp or a <c>CURRENT</c>
+    /// file), or Garnet before it (<c>checkpoints/</c>, <c>log/</c>), is named here with its way forward, because
+    /// handing it to a new engine would leave a broker that looks healthy and holds nothing it was asked to keep.
     /// </summary>
     private static void VerifyStorageFormat(string dir)
     {
-        var stampPath = Path.Combine(dir, StorageFormatFile);
-        var hasData = Directory.Exists(Path.Combine(dir, "checkpoints"))
-                   || Directory.Exists(Path.Combine(dir, "log"));
-
-        if (File.Exists(stampPath))
-        {
-            var text = File.ReadAllText(stampPath).Trim();
-
-            if (int.TryParse(text, out var found) && found == StorageFormatVersion)
-                return;
-
-            if (int.TryParse(text, out var older) && older == 3)
-                throw new InvalidOperationException(Storage.Rocks.RocksDbStore.StorageLayoutMessage(dir));
-
-            throw new InvalidOperationException(
-                $"Highway's data directory '{dir}' was written in storage format '{text}', but this " +
-                $"build reads format {StorageFormatVersion}. Recovering it would fail part-way and " +
-                "leave the broker running with an empty store, which looks healthy and is not. " +
-                "Drain it with the previous version, or delete the directory to start fresh. " +
-                "Use Ephemeral() if this broker does not need to keep anything.");
-        }
-
-        if (hasData)
-        {
-            throw new InvalidOperationException(
-                $"Highway's data directory '{dir}' holds data written before storage formats were " +
-                $"stamped, and cannot be read by this build (format {StorageFormatVersion}). " +
-                "Drain it with the previous version, or delete the directory to start fresh. " +
-                "Use Ephemeral() if this broker does not need to keep anything.");
-        }
-
-        File.WriteAllText(stampPath, StorageFormatVersion.ToString(CultureInfo.InvariantCulture));
+        if (File.Exists(Path.Combine(dir, "crystal.format"))) return;
+        if (File.Exists(Path.Combine(dir, "highway.format")) || File.Exists(Path.Combine(dir, "CURRENT"))
+            || Directory.Exists(Path.Combine(dir, "checkpoints")) || Directory.Exists(Path.Combine(dir, "log")))
+            throw new InvalidOperationException(Storage.Crystal.CrystalHighwayStore.StorageLayoutMessage(dir));
     }
 
     /// <summary>

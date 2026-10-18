@@ -4,7 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using Highway.Server.Commands.Runtime;
 using Highway.Server.Observability;
 using Highway.Server.Storage;
-using Highway.Server.Storage.Rocks;
+using Highway.Server.Storage.Replication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Hosting;
@@ -68,16 +68,16 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
         _registry = new SubscriptionRegistry();
 
         var locks = new StripedLock();
-        var replication = store is RocksDbStore rocks ? rocks.Replication : null;
+        var replication = store is Storage.Crystal.CrystalHighwayStore durableStore ? durableStore.Replication : null;
 
         // 044: the broker-local cache — a SEPARATE, non-replicated store. Durable brokers get
-        // their own RocksDB at dataDir/cache (by convention, no setting); ephemeral brokers get
-        // an in-memory store. The dispatcher routes hw:cache:* to it; it never touches the
+        // database highway.cache in their Crystal store, created not replicated (076 R4); ephemeral
+        // brokers get an in-memory store. The dispatcher routes hw:cache:* to it; it never touches the
         // replicated store, and the replication feeder never learns it exists.
         if (options.Cache.Enabled)
         {
-            _cache = store is RocksDbStore && options.DataDir is { } dir
-                ? Storage.Cache.RocksDbCacheStore.Open(Path.Combine(dir, "cache"))
+            _cache = store is Storage.Crystal.CrystalHighwayStore crystal
+                ? Storage.Cache.CrystalCacheStore.Open(crystal.Crystal, Storage.Crystal.CrystalHighwayStore.CacheDatabaseName)
                 : new Storage.Cache.InMemoryCacheStore();
             _cacheSweeper = new Storage.Cache.CacheSweeper(
                 _cache, options.Cache.MaxSizeBytes, options.Cache.SweepInterval);
@@ -91,7 +91,7 @@ internal sealed class RespServer : IRespServerHost, IAsyncDisposable
             replication,
             () => brokerState.QueuesAsync().GetAwaiter().GetResult().Value ?? [],
             Recorder,
-            storageProperty: store is RocksDbStore durable ? durable.SumProperty : null,
+            storageProperty: store is Storage.Crystal.CrystalHighwayStore durable ? durable.StorageProperty : null,
             sampleFeeds: () => brokerState.DeadFeeds());
 
         _deadLetterSweeper = new DeadLetterSweeper(store, options, () => Recorder.Logger);
