@@ -36,8 +36,8 @@ public class LeadershipVisibilityTests
         try
         {
             using var store = CrystalHighwayStore.Open(dir);   // primary
-            RosterStore.TryUpsert(store, new RosterMember("node-a", 50, "10.0.0.1:6500"), out _, out _);
-            RosterStore.TryUpsert(store, new RosterMember("node-b", 100, "10.0.0.2:6500"), out _, out _);
+            RosterStore.TryUpsert(store, new RosterMember("node-a", 50, "192.0.2.1:6500"), out _, out _);
+            RosterStore.TryUpsert(store, new RosterMember("node-b", 100, "192.0.2.2:6500"), out _, out _);
 
             Stats(store.Replication)["repl.redundancy"].Should().Be("no-standby", "roster expects a standby, none attached");
         }
@@ -54,8 +54,8 @@ public class LeadershipVisibilityTests
         try
         {
             using var store = CrystalHighwayStore.Open(dir);
-            RosterStore.TryUpsert(store, new RosterMember("node-a", 50, "10.0.0.1:6500"), out _, out _);
-            RosterStore.TryUpsert(store, new RosterMember("node-b", 100, "10.0.0.2:6500"), out _, out _);
+            RosterStore.TryUpsert(store, new RosterMember("node-a", 50, "192.0.2.1:6500"), out _, out _);
+            RosterStore.TryUpsert(store, new RosterMember("node-b", 100, "192.0.2.2:6500"), out _, out _);
             store.Replication.Hello("node-b", 0, store.Replication.Epoch, crystalNodeId: Guid.NewGuid().ToString());
 
             Stats(store.Replication)["repl.redundancy"].Should().Be("no-standby");
@@ -72,7 +72,7 @@ public class LeadershipVisibilityTests
         try
         {
             using var store = CrystalHighwayStore.Open(dir);
-            store.Replication.ObserveHigherEpoch(store.Replication.Epoch + 1, "superseded", "10.0.0.9:6500");
+            store.Replication.ObserveHigherEpoch(store.Replication.Epoch + 1, "superseded", "192.0.2.9:6500");
 
             Stats(store.Replication)["repl.redundancy"].Should().Be("demoted");
         }

@@ -54,7 +54,7 @@ public class RespServerAuthTests
     [Fact]
     public void Authenticator_NoConfig_IsPreAuthorized()
         => new PasswordAuthenticator(new HighwayServerOptions().Authentication)
-            .IsPreAuthorized(new IPEndPoint(IPAddress.Parse("10.0.0.1"), 1)).Should().BeTrue();
+            .IsPreAuthorized(new IPEndPoint(IPAddress.Parse("192.0.2.1"), 1)).Should().BeTrue();
 
     [Fact]
     public void Authenticator_LoopbackExempt_WhenEnabled()

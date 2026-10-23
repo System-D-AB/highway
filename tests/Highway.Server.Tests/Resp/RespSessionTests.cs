@@ -51,11 +51,11 @@ public class RespSessionTests
     {
         var observed = new Highway.Server.Resp.InstanceRegistry();
         var session = new RespSession(Dispatcher(out _), new FakeAuth(preAuthorized: true), new FakeSink(),
-            new IPEndPoint(IPAddress.Parse("10.0.0.9"), 6500), connectionId: "c1", observed: observed);
+            new IPEndPoint(IPAddress.Parse("192.0.2.9"), 6500), connectionId: "c1", observed: observed);
 
         session.Handle(F("CLIENT", "SETNAME", "nodeA"));
 
-        observed.AddressOf("nodeA").Should().Be("10.0.0.9:6500",
+        observed.AddressOf("nodeA").Should().Be("192.0.2.9:6500",
             "CLIENT SETNAME names the connection; the broker records where it sees it from");
     }
 

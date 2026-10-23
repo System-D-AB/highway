@@ -20,7 +20,7 @@ public class SlotAgingTests
         StartAsReplica = false,
         Priority = 50,
         ReplicaId = "node-a",
-        AdvertiseEndpoint = "10.0.0.1:6500",
+        AdvertiseEndpoint = "192.0.2.1:6500",
         Clock = clock,
         SlotStaleAfter = staleAfter ?? TimeSpan.FromSeconds(30),
     };
@@ -36,7 +36,7 @@ public class SlotAgingTests
             feeder.Hello("replica-1", 0, feeder.Epoch);
             feeder.Slots.Should().ContainKey("replica-1");
 
-            feeder.ObserveHigherEpoch(feeder.Epoch + 1, "successor promoted", "10.0.0.9:6500");
+            feeder.ObserveHigherEpoch(feeder.Epoch + 1, "successor promoted", "192.0.2.9:6500");
 
             feeder.Role.Should().Be(ReplicaRole.Demoted);
             feeder.Slots.Should().BeEmpty("a demoted node holds no replicas — the phantom slot is dropped at once");

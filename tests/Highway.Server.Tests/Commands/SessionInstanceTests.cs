@@ -17,7 +17,7 @@ public class SessionInstanceTests
     private static (CommandHarness H, InstanceRegistry Reg) Harness()
     {
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"node-1@{Id}", "10.0.0.9:50001");
+        reg.Record("c1", $"node-1@{Id}", "192.0.2.9:50001");
         return (new CommandHarness { Instances = reg }, reg);
     }
 
@@ -33,7 +33,7 @@ public class SessionInstanceTests
             .Should().Be("+OK\r\n");
 
         reg.InstancesOf("node-1").Should().ContainSingle().Which.Should().Be(new InstanceView(
-            Id, "10.0.0.9:50001", "WEB1", 4120, "shop2", new DateTimeOffset(2026, 10, 1, 8, 59, 0, TimeSpan.Zero), "3.0.0"));
+            Id, "192.0.2.9:50001", "WEB1", 4120, "shop2", new DateTimeOffset(2026, 10, 1, 8, 59, 0, TimeSpan.Zero), "3.0.0"));
     }
 
     [Theory]
@@ -59,7 +59,7 @@ public class SessionInstanceTests
         Session(h, $$$"""{"subscriptions":[],"instance":{"id":"{{{Id}}}","host":7,"pid":"x","started":"yesterday","client":"3.0.0"}}""")
             .Should().Be("+OK\r\n");
 
-        reg.InstancesOf("node-1").Single().Should().Be(new InstanceView(Id, "10.0.0.9:50001", null, null, null, null, "3.0.0"));
+        reg.InstancesOf("node-1").Single().Should().Be(new InstanceView(Id, "192.0.2.9:50001", null, null, null, null, "3.0.0"));
     }
 
     [Fact]

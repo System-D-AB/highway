@@ -33,18 +33,18 @@ public class ClientFailoverVisibilityTests
     {
         var logs = new List<string>();
         var source = new HighwayConnectionSource(
-            new HighwayOptions { Server = "10.0.0.1:6500,10.0.0.2:6500" },
+            new HighwayOptions { Server = "192.0.2.1:6500,192.0.2.2:6500" },
             new CapturingLoggerFactory(logs));
         try
         {
             HighwayConnectionSource.MasterChange? seen = null;
             source.MasterChanged += mc => seen = mc;
 
-            source.SwitchTo("10.0.0.2:6500");   // the initial active endpoint is the first host
+            source.SwitchTo("192.0.2.2:6500");   // the initial active endpoint is the first host
 
             seen.Should().NotBeNull("adopting a different master raises the event");
-            seen!.Value.Endpoint.Should().Be("10.0.0.2:6500");
-            logs.Should().Contain(l => l.Contains("master changed to 10.0.0.2:6500"));
+            seen!.Value.Endpoint.Should().Be("192.0.2.2:6500");
+            logs.Should().Contain(l => l.Contains("master changed to 192.0.2.2:6500"));
         }
         finally { source.Dispose(); }
     }
@@ -52,13 +52,13 @@ public class ClientFailoverVisibilityTests
     [Fact]
     public void SwitchTo_TheSameMaster_DoesNotRaiseMasterChanged()
     {
-        var source = new HighwayConnectionSource(new HighwayOptions { Server = "10.0.0.1:6500,10.0.0.2:6500" });
+        var source = new HighwayConnectionSource(new HighwayOptions { Server = "192.0.2.1:6500,192.0.2.2:6500" });
         try
         {
             var fired = 0;
             source.MasterChanged += _ => fired++;
 
-            source.SwitchTo("10.0.0.1:6500");   // already the active endpoint
+            source.SwitchTo("192.0.2.1:6500");   // already the active endpoint
 
             fired.Should().Be(0, "no change of master means no event");
         }
@@ -70,13 +70,13 @@ public class ClientFailoverVisibilityTests
     {
         var logs = new List<string>();
         var source = new HighwayConnectionSource(
-            new HighwayOptions { Server = "10.0.0.1:6500" },   // ONE endpoint, no failover target
+            new HighwayOptions { Server = "192.0.2.1:6500" },   // ONE endpoint, no failover target
             new CapturingLoggerFactory(logs));
 
         source.SetRosterForTests(
             [
-                new HighwayConnectionSource.RosterEntry("node-a", 50, "10.0.0.1:6500"),
-                new HighwayConnectionSource.RosterEntry("node-b", 100, "10.0.0.2:6500"),
+                new HighwayConnectionSource.RosterEntry("node-a", 50, "192.0.2.1:6500"),
+                new HighwayConnectionSource.RosterEntry("node-b", 100, "192.0.2.2:6500"),
             ],
             version: 1);
 
@@ -84,7 +84,7 @@ public class ClientFailoverVisibilityTests
         source.MaybeWarnSingleEndpoint(2);   // a second learn must not warn again
 
         logs.Should().ContainSingle(l => l.Contains("NO failover"))
-            .Which.Should().Contain("10.0.0.2:6500", "the warning names the endpoint the client is missing");
+            .Which.Should().Contain("192.0.2.2:6500", "the warning names the endpoint the client is missing");
     }
 
     [Fact]
@@ -92,7 +92,7 @@ public class ClientFailoverVisibilityTests
     {
         var logs = new List<string>();
         var source = new HighwayConnectionSource(
-            new HighwayOptions { Server = "10.0.0.1:6500,10.0.0.2:6500" },
+            new HighwayOptions { Server = "192.0.2.1:6500,192.0.2.2:6500" },
             new CapturingLoggerFactory(logs));
 
         source.MaybeWarnSingleEndpoint(2);

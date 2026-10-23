@@ -22,9 +22,9 @@ public class InstanceRegistryTests
     public void Record_ThenAddressOf_ReturnsTheEndpoint()
     {
         var reg = new InstanceRegistry();
-        reg.Record("conn-1", "nodeA", "10.0.0.9:6500");
+        reg.Record("conn-1", "nodeA", "192.0.2.9:6500");
 
-        reg.AddressOf("nodeA").Should().Be("10.0.0.9:6500");
+        reg.AddressOf("nodeA").Should().Be("192.0.2.9:6500");
         reg.AddressOf("unknown").Should().BeNull("a node with no named connection is 'not connected'");
     }
 
@@ -32,7 +32,7 @@ public class InstanceRegistryTests
     public void Remove_ClearsTheEntry()
     {
         var reg = new InstanceRegistry();
-        reg.Record("conn-1", "nodeA", "10.0.0.9:6500");
+        reg.Record("conn-1", "nodeA", "192.0.2.9:6500");
 
         reg.Remove("conn-1");
 
@@ -65,9 +65,9 @@ public class InstanceRegistryTests
     public void AddressOf_MatchesTheInstanceSuffixedName()
     {
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:6500");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:6500");
 
-        reg.AddressOf("nodeA").Should().Be("10.0.0.9:6500");
+        reg.AddressOf("nodeA").Should().Be("192.0.2.9:6500");
     }
 
     [Fact]
@@ -76,9 +76,9 @@ public class InstanceRegistryTests
         // The client replaces whitespace with '_' (CLIENT SETNAME rejects spaces); before 072 the broker
         // compared the raw name and such a node always showed "not connected".
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"web shop_1@{A}".Replace(' ', '_'), "10.0.0.9:6500");
+        reg.Record("c1", $"web shop_1@{A}".Replace(' ', '_'), "192.0.2.9:6500");
 
-        reg.AddressOf("web shop 1").Should().Be("10.0.0.9:6500");
+        reg.AddressOf("web shop 1").Should().Be("192.0.2.9:6500");
         reg.InstancesOf("web shop 1").Should().ContainSingle();
     }
 
@@ -88,9 +88,9 @@ public class InstanceRegistryTests
     public void SeveralConnectionsOfOneProcess_CountOnce()
     {
         var reg = new InstanceRegistry();
-        reg.Record("interactive", $"nodeA@{A}", "10.0.0.9:50001");
-        reg.Record("subscription", $"nodeA@{A}", "10.0.0.9:50002");
-        reg.Record("purge", $"nodeA@{A}", "10.0.0.9:50003");
+        reg.Record("interactive", $"nodeA@{A}", "192.0.2.9:50001");
+        reg.Record("subscription", $"nodeA@{A}", "192.0.2.9:50002");
+        reg.Record("purge", $"nodeA@{A}", "192.0.2.9:50003");
 
         reg.InstancesOf("nodeA").Should().ContainSingle().Which.Id.Should().Be(A);
     }
@@ -99,10 +99,10 @@ public class InstanceRegistryTests
     public void TwoProcesses_OneName_CountTwice()
     {
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
-        reg.Record("c2", $"nodeA@{B}", "10.0.0.7:50001");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
+        reg.Record("c2", $"nodeA@{B}", "192.0.2.7:50001");
 
-        reg.InstancesOf("nodeA").Select(i => (i.Id, i.SeenFrom)).Should().Equal((A, "10.0.0.9:50001"), (B, "10.0.0.7:50001"));
+        reg.InstancesOf("nodeA").Select(i => (i.Id, i.SeenFrom)).Should().Equal((A, "192.0.2.9:50001"), (B, "192.0.2.7:50001"));
     }
 
     [Fact]
@@ -110,8 +110,8 @@ public class InstanceRegistryTests
     {
         // An older client's two SE.Redis connections must not read as two processes.
         var reg = new InstanceRegistry();
-        reg.Record("c1", "nodeA", "10.0.0.9:50001");
-        reg.Record("c2", "nodeA", "10.0.0.9:50002");
+        reg.Record("c1", "nodeA", "192.0.2.9:50001");
+        reg.Record("c2", "nodeA", "192.0.2.9:50002");
 
         reg.InstancesOf("nodeA").Should().ContainSingle().Which.Id.Should().Be(InstanceRegistry.Unidentified);
     }
@@ -120,8 +120,8 @@ public class InstanceRegistryTests
     public void AConnectionRenamedToAnotherNode_LeavesTheFirst()
     {
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
-        reg.Record("c1", $"nodeB@{A}", "10.0.0.9:50001");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
+        reg.Record("c1", $"nodeB@{A}", "192.0.2.9:50001");
 
         reg.InstancesOf("nodeA").Should().BeEmpty();
         reg.InstancesOf("nodeB").Should().ContainSingle();
@@ -133,18 +133,18 @@ public class InstanceRegistryTests
     public void Describe_AttachesTheProcessDetails()
     {
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
         reg.Describe("nodeA", new InstanceMeta(A, "WEB1", 4120, "shop2", DateTimeOffset.UnixEpoch, "3.0.0"));
 
         reg.InstancesOf("nodeA").Should().ContainSingle().Which.Should().Be(
-            new InstanceView(A, "10.0.0.9:50001", "WEB1", 4120, "shop2", DateTimeOffset.UnixEpoch, "3.0.0"));
+            new InstanceView(A, "192.0.2.9:50001", "WEB1", 4120, "shop2", DateTimeOffset.UnixEpoch, "3.0.0"));
     }
 
     [Fact]
     public void Describe_WithAnInvalidId_IsIgnored()
     {
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
         reg.Describe("nodeA", new InstanceMeta("not-an-id", "WEB1", 1, null, null, null));
 
         reg.InstancesOf("nodeA").Single().Host.Should().BeNull();
@@ -154,7 +154,7 @@ public class InstanceRegistryTests
     public void Describe_ClipsOverlongFields()
     {
         var reg = new InstanceRegistry();
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
         reg.Describe("nodeA", new InstanceMeta(A, new string('h', 10_000), 1, null, null, null));
 
         reg.InstancesOf("nodeA").Single().Host.Should().HaveLength(256);
@@ -165,17 +165,17 @@ public class InstanceRegistryTests
     {
         var now = DateTime.UtcNow.Ticks;
         var reg = new InstanceRegistry(clock: () => now);
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
         reg.Describe("nodeA", new InstanceMeta(A, "WEB1", 1, null, null, null));
         reg.Remove("c1");
 
         now += TimeSpan.FromMinutes(5).Ticks;
-        reg.Record("c2", $"nodeA@{A}", "10.0.0.9:50009");   // reconnect, no new HW.SESSION
+        reg.Record("c2", $"nodeA@{A}", "192.0.2.9:50009");   // reconnect, no new HW.SESSION
         reg.InstancesOf("nodeA").Single().Host.Should().Be("WEB1", "a reconnect must not blank the view");
 
         reg.Remove("c2");
         now += InstanceRegistry.Retention.Ticks + 1;
-        reg.Record("c3", $"nodeA@{A}", "10.0.0.9:50010");
+        reg.Record("c3", $"nodeA@{A}", "192.0.2.9:50010");
         reg.InstancesOf("nodeA").Single().Host.Should().BeNull("details of an instance gone longer than the retention are dropped");
     }
 
@@ -184,7 +184,7 @@ public class InstanceRegistryTests
     {
         var now = 1_000L;
         var reg = new InstanceRegistry(clock: () => now);
-        reg.Record("live", $"live@{A}", "10.0.0.9:1");
+        reg.Record("live", $"live@{A}", "192.0.2.9:1");
         reg.Describe("live", new InstanceMeta(A, "LIVE", 1, null, null, null));
 
         for (var i = 0; i < InstanceRegistry.MaxDescribed; i++)
@@ -212,12 +212,12 @@ public class InstanceRegistryTests
     public void ASecondProcess_RaisesOneSharedEvent_AndItsDepartureOneMore()
     {
         var (reg, recorder) = WithRecorder();
-        reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
-        reg.Record("c1b", $"nodeA@{A}", "10.0.0.9:50002");
+        reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
+        reg.Record("c1b", $"nodeA@{A}", "192.0.2.9:50002");
         Shared(recorder, "nodeA").Should().BeEmpty("one process, however many connections");
 
-        reg.Record("c2", $"nodeA@{B}", "10.0.0.7:50001");
-        reg.Record("c2b", $"nodeA@{B}", "10.0.0.7:50002");
+        reg.Record("c2", $"nodeA@{B}", "192.0.2.7:50001");
+        reg.Record("c2b", $"nodeA@{B}", "192.0.2.7:50002");
         var shared = Shared(recorder, "nodeA");
         shared.Should().ContainSingle("the count crossed one once").Which.Count.Should().Be(2);
         shared[0].ErrorCode.Should().Contain(A).And.Contain(B);
@@ -234,13 +234,13 @@ public class InstanceRegistryTests
         for (var round = 0; round < 200; round++)
         {
             var (reg, recorder) = WithRecorder();
-            reg.Record("c1", $"nodeA@{A}", "10.0.0.9:50001");
+            reg.Record("c1", $"nodeA@{A}", "192.0.2.9:50001");
 
             using var start = new Barrier(4);
             var threads = Enumerable.Range(0, 4).Select(i => new Thread(() =>
             {
                 start.SignalAndWait();
-                reg.Record($"b{i}", $"nodeA@{B}", $"10.0.0.7:{50000 + i}");
+                reg.Record($"b{i}", $"nodeA@{B}", $"192.0.2.7:{50000 + i}");
             })).ToList();
             threads.ForEach(t => t.Start());
             threads.ForEach(t => t.Join());
