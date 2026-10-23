@@ -223,6 +223,21 @@ builder.Services.AddHighway(o =>
 
 Assembly scanning finds all `ISend`, `IPublish`, `AsyncService`, and `ISubscribe` implementations automatically.
 
+### 3. Run the broker
+
+Download the server archive from [GitHub Releases](https://github.com/System-D-AB/highway/releases), then on Linux:
+
+```bash
+sudo mkdir -p /opt/highway
+sudo tar -xzf highway-<version>-linux-x64.tar.gz -C /opt/highway        # creates server/3/
+sudo nano /opt/highway/server/3/config/highway.json                     # ports, password, TLS, replication
+sudo bash /opt/highway/server/3/scripts/install-service.sh              # installs and starts the `highway` unit
+```
+
+On Windows, unzip into `C:\highway` and run `server\3\scripts\install-service.bat`. The broker listens on
+`6500` (RESP), `6501` (replication) and `7500` (dashboard, `/health`, `/ready`). See the
+[server distribution guide](docs/distribution/README.md) for configuration, replica sets and upgrades.
+
 ---
 
 ## Contributor & Sample Workflow
