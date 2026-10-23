@@ -6,15 +6,17 @@ Highway is a high-throughput, low-latency message broker and stream store built 
 
 ## 1. Quickstart (Zero-Configuration First Run)
 
-1. Unpack the distribution archive (`highway-{version}-win-x64.zip`).
-2. Double-click `scripts\run.bat` (or execute `scripts\run.ps1` in PowerShell).
+1. Unpack the distribution archive (`highway-{version}-win-x64.zip`) into your Highway root — for example
+   `C:\highway`. It creates `server\{line}\`, this version line's own directory (see
+   [Directory Layout](#2-directory-layout)); every path below is inside it.
+2. In `server\{line}\`, double-click `scripts\run.bat` (or execute `scripts\run.ps1` in PowerShell).
 3. The broker starts immediately with code defaults:
    - **Broker RESP listener:** `127.0.0.1:6500`
    - **Replication listener:** `127.0.0.1:6501` (the RESP port + 1), opened only once the broker is in a
      replica set
    - **Dashboard & flight recorder:** `http://127.0.0.1:7500`
-   - **Durable data store:** `./data` (beside the distribution) — a SystemD.Crystal store: leave it to
-     the broker, and keep nothing else in it
+   - **Durable data store:** `server\{line}\data` — a SystemD.Crystal store: leave it to the broker, and
+     keep nothing else in it
 4. Press `Ctrl+C` in the console window to stop cleanly.
 
 > **Reaching the dashboard from another machine.** Both the broker (`server.bindAddress`) and the
@@ -37,25 +39,36 @@ Highway is a high-throughput, low-latency message broker and stream store built 
 
 ## 2. Directory Layout
 
+Each **major version line** has its own directory under `server\`, with its own binaries, configuration, data and
+logs. The data format never changes within a major version, so every `{line}.x` release upgrades in place in
+`server\{line}\`; a new major installs **beside** it, on new data, and the old line stays untouched until you remove
+it — which is what makes a major upgrade reversible (see [runbook 7](#7-runbook-upgrading-from-2x-to-3-side-by-side)).
+
 ```
-highway-{version}-win-x64/
-├── bin/
-│   ├── highways.exe              Self-contained broker host
-│   └── *.dll                     Runtime dependencies
-├── config/
-│   └── highway.json              Server and dashboard configuration
-├── data/                         Persistent storage (checkpoints and AOF)
-├── logs/                         Rolling daily broker logs (highway-YYYYMMDD.log)
-├── scripts/
-│   ├── run.bat                   Double-clickable foreground runner
-│   ├── run.ps1                   PowerShell foreground runner
-│   ├── install-service.bat       Double-clickable Windows service installer (elevated)
-│   ├── install-service.ps1       PowerShell Windows service installer
-│   └── uninstall-service.ps1     PowerShell Windows service uninstaller
-├── README.md                     This operational guide
-├── LICENSE                       Highway MIT License
-└── THIRD-PARTY-NOTICES.md        Third-party open-source attributions
+C:\highway\                     Your Highway root (any directory; /opt/highway on Linux)
+└── server\
+    ├── 2.5\                    An older line, if one was installed this way — left as it was
+    └── {line}\                 This line — everything below
+        ├── bin\
+        │   ├── highways.exe    Self-contained broker host
+        │   └── *.dll           Runtime dependencies
+        ├── config\
+        │   └── highway.json    Server and dashboard configuration (dataDir "../data")
+        ├── data\               This line's SystemD.Crystal store
+        ├── logs\               Rolling daily broker logs (highway-YYYYMMDD.log)
+        ├── scripts\
+        │   ├── run.bat, run.ps1                Foreground runners
+        │   ├── install-service.bat, .ps1       Installs the Highway service from this line
+        │   └── uninstall-service.ps1           Removes the Highway service
+        ├── LINE                The line's name ({line}), read by the service scripts
+        ├── README.md           This operational guide
+        ├── LICENSE             Highway MIT License
+        └── THIRD-PARTY-NOTICES.md
 ```
+
+Two lines are installed side by side but **never run at once**: there is one `Highway` service, and installing a
+line points it at that line (section 3). On Linux the same tree sits under `/opt/highway/server/{line}/`, with
+`run.sh`, `install-service.sh`, `uninstall-service.sh` and the `highway.service` unit template.
 
 ---
 
@@ -64,7 +77,14 @@ highway-{version}-win-x64/
 To install Highway as an automatic Windows Service with crash recovery:
 
 ### Installation
-Run `scripts\install-service.bat` (will request Administrator elevation) or run:
+From the line's directory, run `scripts\install-service.bat` (it requests Administrator elevation). It installs and
+starts the **`Highway`** service from this line. If a `Highway` service already exists and runs **another line**, the
+script stops it, removes it and says which line it replaced — that line's data and configuration are left untouched,
+so running *its* `install-service` again goes back. It refuses to start while the broker or dashboard port is still
+held (a broker started by hand), naming the process. On Linux, `sudo bash scripts/install-service.sh` does the same
+for the `highway` unit.
+
+The bare equivalent, without the line handling:
 ```powershell
 bin\highways.exe --install --start --config config\highway.json
 ```
@@ -160,11 +180,15 @@ without the dashboard UI, set `dashboard.enabled: false` and keep `dashboard.hea
 
 ### Offline Compaction (`--compact`)
 
-**Not available in 3.0.** The command remains for 2.x data directories, which needed it once after
-2.5.3 or earlier (tombstones on busy queues that every poll stepped over). A 3.0 broker starts every
-data directory fresh, its storage engine (SystemD.Crystal) compacts delete-heavy data on its own, and it
-offers no offline compaction yet, so `--compact` is refused and changes nothing. The metric
-`highway.storage.memtable_deletes` still shows the engine's pending deletes.
+Compacts every database of a **stopped** broker's data directory, dropping every tombstone; it changes
+no data. It is rarely needed: the storage engine (SystemD.Crystal) compacts delete-heavy data on its
+own while the broker runs. Use it to reclaim scan cost after an unusual burst of deletes. It is refused,
+and changes nothing, while a broker holds the directory or for a directory that is not a Highway data
+directory:
+```cmd
+bin\highways.exe --compact --config config\highway.json
+```
+The metric `highway.storage.memtable_deletes` shows the engine's pending deletes.
 
 ### Emptying the Data Directory (`--wipe-data`)
 
@@ -269,13 +293,13 @@ The herd converges back onto the higher-priority node.
 
 ---
 
-## 7. Runbook: Upgrading from 2.x to 3.0 (Fresh Start)
+## 7. Runbook: Upgrading from 2.x to 3 (Side by Side)
 
-Highway 3.0 changes both the wire protocol (5.0) and the storage format (4), and **does not migrate data
-in place**. A 3.0 broker refuses a 2.x data directory rather than serving it as empty, a 2.x client
-cannot talk to a 3.0 broker, and a 3.0 node never replicates from a 2.x one (or the reverse). So the
-upgrade is a planned short stop: empty the broker on 2.x, start 3.0 on an empty directory, and bring
-the applications back on the 3.0 client.
+Highway 3 changes both the wire protocol (5.0) and the storage format (4), and **does not migrate data in place**. A
+3.x broker refuses a 2.x data directory rather than serving it as empty, a 2.x client cannot talk to a 3.x broker,
+and a 3.x node never replicates from a 2.x one (or the reverse). So the upgrade is a planned short stop: empty the
+broker on 2.x, start line 3 **in its own directory** on empty data, and bring the applications back on the 3.x
+client. The 2.x installation and its data are not touched, so the way back stays open.
 
 ### 1. Drain on 2.x
 1. Stop or pause everything that **sends** (queue sends, publishes, RPC callers).
@@ -284,38 +308,46 @@ the applications back on the 3.0 client.
    due time — decide whether to wait or accept losing them.
 3. Dead letters are **not** carried over. Re-drive or export anything in a dead-letter queue you want
    to keep.
-4. Stop the Highway applications. Recurring jobs and subscriptions need no action — every 3.0 client
+4. Stop the Highway applications. Recurring jobs and subscriptions need no action — every 3.x client
    re-declares its own at start.
 
-### 2. Upgrade the broker(s) — standby first
-In a replica set, do the standby, then the primary. Each node keeps its role and configuration.
+### 2. Install line 3 beside 2.x — standby first
+On each node, unpack the 3.x archive into the Highway root (it creates `server\3\`) and copy your settings into
+`server\3\config\highway.json` — ports, bind addresses, password, TLS, replication (`primaryServer`, `replicaId`,
+`priority`). Open the **replication port** (RESP + 1) between the nodes: 3.x replicates over it.
 
-On the **standby**:
-```cmd
-bin\highways.exe --stop
-:: swap the bin\ files for 3.0
-bin\highways.exe --wipe-data --config config\highway.json
-```
-Leave it stopped.
+In a replica set, do the standby, then the primary. Each node keeps its role.
 
-On the **primary** (or the single broker):
-```cmd
-bin\highways.exe --stop
-:: swap the bin\ files for 3.0
-bin\highways.exe --wipe-data --config config\highway.json
-bin\highways.exe --start
-```
+On the **standby**: stop its 2.x broker (`bin\highways.exe --stop` in the 2.x directory). Leave it stopped.
 
-Then start the standby: `bin\highways.exe --start`. Its data directory is empty, so it bootstraps
-from the primary's snapshot and follows it; the primary's **Replication** tab shows it **Active**.
+On the **primary** (or the single broker): stop its 2.x broker, then from `server\3\` run
+`scripts\install-service.bat`. The `Highway` service now runs line 3, on empty data.
+
+Then on the standby, from `server\3\`, run `scripts\install-service.bat`. Its data directory is empty, so it
+bootstraps from the primary's snapshot and follows it; the primary's **Replication** tab shows it **Active**.
+
+> **An existing flat install** (2.x, or a 3.0 pre-release unpacked straight into the Highway root, with `bin\` at the
+> top) works the same way: it is the old line. Stop it, install line 3 under `server\3\` as above, and delete the
+> flat directories once line 3 is trusted.
 
 ### 3. Bring the applications back
 Deploy the applications built against the 3.0 client packages and start them, then resume the
 senders. Each node establishes its session (services, subscriptions, jobs) on connect.
 
+### Rolling back
+Until you remove the old line, going back is one step per node, primary first: drain line 3 as in step 1, then run
+the **old line's** `scripts\install-service.bat` (or start it as you did before). Its data directory is exactly as you
+left it; messages sent while line 3 ran stay in line 3's data, so drain line 3 first.
+
+### Removing the old line
+Once line 3 is trusted, delete the old line's directory (`server\2.5\`, or the flat 2.x install) — data, logs and
+all. Nothing in line 3 refers to it.
+
 ### What can go wrong, and what you will see
-- **A 3.0 broker started on an undrained 2.x directory** refuses to start and names the directory and
-  the `--wipe-data` step. Nothing is lost: start 2.x on it again to drain it.
+- **A 3.x broker pointed at a 2.x data directory** (a copied config with an old `dataDir`) refuses to start and names
+  the directory. Nothing is lost: point `dataDir` back at `../data`.
+- **The install script refuses because a port is in use.** A broker from the old line is still running by hand;
+  stop it.
 - **Mixed versions in a replica set** do not replicate: a 3.0 primary refuses a 2.x standby with
   `HW_STORAGE_FORMAT`, and a 3.0 standby logs that its primary stores format 3 and does not pull. Finish
   upgrading the other node.

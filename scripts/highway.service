@@ -1,5 +1,5 @@
 [Unit]
-Description=Highway broker (RESP + RocksDB)
+Description=Highway broker (RESP + SystemD.Crystal)
 Documentation=https://github.com/systemdab/highway
 After=network-online.target
 Wants=network-online.target

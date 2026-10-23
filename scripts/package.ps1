@@ -29,6 +29,7 @@ Write-Host "=========================================="
 Write-Host " Packaging Highway Distribution"
 Write-Host " Version : $Version"
 Write-Host " RID     : $Rid"
+Write-Host " Layout  : server/$(($Version -split '[.-]')[0])/"
 Write-Host " Target  : $archivePath"
 Write-Host "=========================================="
 
@@ -41,11 +42,19 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -Path $OutputDir -ItemType Directory -Force | Out-Null
 }
 
-$binDir = Join-Path $stageDir "bin"
-$configDir = Join-Path $stageDir "config"
-$dataDir = Join-Path $stageDir "data"
-$logsDir = Join-Path $stageDir "logs"
-$scriptsDir = Join-Path $stageDir "scripts"
+# 079: the archive holds server/{line}/..., so extracting it in the highway root installs this line beside any other.
+# The line is the major version: the data format never changes within a major, so every 3.x upgrades in place in
+# server/3/, and only a new major gets a new directory with new data.
+$line = ($Version -split '[.-]')[0]
+$lineDir = Join-Path $stageDir "server\$line"
+New-Item -Path $lineDir -ItemType Directory -Force | Out-Null
+Set-Content -Path (Join-Path $lineDir "LINE") -Value $line -NoNewline -Encoding ascii   # read by the service scripts
+
+$binDir = Join-Path $lineDir "bin"
+$configDir = Join-Path $lineDir "config"
+$dataDir = Join-Path $lineDir "data"
+$logsDir = Join-Path $lineDir "logs"
+$scriptsDir = Join-Path $lineDir "scripts"
 
 New-Item -Path $configDir -ItemType Directory -Force | Out-Null
 New-Item -Path $dataDir -ItemType Directory -Force | Out-Null
@@ -83,7 +92,14 @@ $scriptsToCopy = if ($winTarget) {
 foreach ($s in $scriptsToCopy) {
     $srcScript = Join-Path $repoRoot "scripts\$s"
     if (Test-Path $srcScript) {
-        Copy-Item -Path $srcScript -Destination (Join-Path $scriptsDir $s) -Force
+        $target = Join-Path $scriptsDir $s
+        if (-not $winTarget) {
+            # A Windows checkout may hold these with CRLF (core.autocrlf); bash and systemd need LF.
+            $text = [System.IO.File]::ReadAllText($srcScript) -replace "`r`n", "`n"
+            [System.IO.File]::WriteAllText($target, $text, (New-Object System.Text.UTF8Encoding($false)))
+        } else {
+            Copy-Item -Path $srcScript -Destination $target -Force
+        }
     }
 }
 
@@ -91,18 +107,18 @@ foreach ($s in $scriptsToCopy) {
 $readmeTemplate = Join-Path $repoRoot "docs\distribution\README.md"
 if (Test-Path $readmeTemplate) {
     $readmeContent = Get-Content -Path $readmeTemplate -Raw
-    $readmeContent = $readmeContent -replace '\{version\}', $Version
-    Set-Content -Path (Join-Path $stageDir "README.md") -Value $readmeContent -Encoding UTF8
+    $readmeContent = $readmeContent -replace '\{version\}', $Version -replace '\{line\}', $line
+    Set-Content -Path (Join-Path $lineDir "README.md") -Value $readmeContent -Encoding UTF8
 }
 
 $licenseFile = Join-Path $repoRoot "LICENSE"
 if (Test-Path $licenseFile) {
-    Copy-Item -Path $licenseFile -Destination (Join-Path $stageDir "LICENSE") -Force
+    Copy-Item -Path $licenseFile -Destination (Join-Path $lineDir "LICENSE") -Force
 }
 
 $noticesFile = Join-Path $repoRoot "THIRD-PARTY-NOTICES.md"
 if (Test-Path $noticesFile) {
-    Copy-Item -Path $noticesFile -Destination (Join-Path $stageDir "THIRD-PARTY-NOTICES.md") -Force
+    Copy-Item -Path $noticesFile -Destination (Join-Path $lineDir "THIRD-PARTY-NOTICES.md") -Force
 }
 
 # 5. Create the archive
@@ -154,7 +170,10 @@ else {
     # bsdtar on Windows cannot stamp the Unix execute bit, so the shipped run.sh /
     # install-service.sh chmod +x the `highways` binary on first use, and the scripts
     # are invoked as `bash <script>` (documented) — no execute bit required to install.
-    & tar -czf $archivePath -C $stageDir .
+    # On Windows, call its own bsdtar by path: a Git or MSYS tar earlier on PATH reads "C:" as a remote host.
+    $windowsTar = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\tar.exe' } else { $null }
+    $tarExe = if ($windowsTar -and (Test-Path $windowsTar)) { $windowsTar } else { 'tar' }
+    & $tarExe -czf $archivePath -C $stageDir .
     if ($LASTEXITCODE -ne 0) {
         throw "tar failed with exit code $LASTEXITCODE"
     }

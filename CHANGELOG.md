@@ -13,13 +13,19 @@ package changes and links there rather than restating command-level detail.
 A major release: a new storage layout, protocol 5.0, and a failover that no longer splits under
 load. **The broker, the client packages and every data directory move together** — a 3.0 broker
 refuses a 2.x data directory, a 2.x client cannot talk to it, and 2.x and 3.0 nodes never replicate
-from each other. Upgrading is a drain and a fresh start per node: see runbook 7 in the
-[server distribution guide](docs/distribution/README.md). The public client API is unchanged.
+from each other. Upgrading is a drain and a fresh start per node, **beside** the 2.x installation: see runbook 7 in
+the [server distribution guide](docs/distribution/README.md). The public client API is unchanged.
 
 ### Breaking
 
+- **The server archive installs per version line** (feature 079): it unpacks as `server/3/…` under your Highway
+  root, so a major version sits beside the previous one with its own data, and every 3.x upgrades in place in
+  `server/3/`. There is still one `Highway` service: a line's `install-service` script points it at that line,
+  stopping and removing one that runs another line (and refusing while a port is still held), so going back is the
+  old line's `install-service` again, on its untouched data.
+
 - **Storage and replication run on SystemD.Crystal** (feature 076). The broker's data directory is a
-  SystemD.Crystal store (NuGet `SystemD.Crystal` 1.0.0-rc.2, over RocksDB 11.8.1): Highway's key layout is
+  SystemD.Crystal store (NuGet `SystemD.Crystal` 1.0.0, over RocksDB 11.8.1): Highway's key layout is
   unchanged, and Crystal supplies the boxes, the atomic multi-box batch and **replication**. A replica
   set's data now moves over a separate **replication port** (`server.replication.replicationListen`,
   default the RESP port + 1), authenticated by the shared secret (`replicationSecret`, default the
@@ -28,8 +34,9 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   reply names the primary's replication endpoint. Highway's failover policy is unchanged — the herd,
   willingness, the roster, the deadman, GOODBYE, auto-rejoin, `-NOTPRIMARY` — and clients do not
   change. A directory a 3.0 pre-release wrote on RocksDB is refused like a 2.x one; `highways
-  --compact` is refused (no offline compaction yet). Proven by re-running every suite against 3.0 on
-  RocksDB.
+  --compact` is Crystal's offline compaction of a stopped broker's store. The fence backstop fences the
+  storage too (Crystal refuses writes while fenced) and lifts at the same epoch when contact returns.
+  Proven by re-running every suite against 3.0 on RocksDB.
 - **A new node is syncing until it has caught up** (feature 076). A blank standby opens at once and
   copies its primary's data in the background; until it holds the data and has caught up it is not a
   standby — never willing to take the herd, no master-silence clock running — and `/ready` answers
@@ -68,6 +75,11 @@ from each other. Upgrading is a drain and a fresh start per node: see runbook 7 
   (`server.rpcDuplicateFilter`).
 
 ### Fixed
+
+- **A client no longer storms after a primary change** (feature 078). Every operation that hit the lost connection
+  ran its own failover walk; with hundreds in flight they queued on one lock and the client never recovered. Now the
+  wave shares one walk, and an operation keeps rejoining it (every 250 ms, up to 15 s or its own deadline) until the
+  new primary answers, so the whole wave succeeds together.
 
 - **An outage left a backlog that ran for nobody, and a hung service needed a restart** (feature 074).
   Requests queued while workers were down ran in full when they came back, long after their callers had
