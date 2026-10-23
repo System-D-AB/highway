@@ -28,11 +28,19 @@ server for development and tests), so every call is a round trip through a local
 somebody else's cloud. It needs the **.NET 10 SDK** and nothing else — no Docker, no external
 infrastructure, not even for the integration tests.
 
-> **2.0.** The broker now runs on a purpose-built stack — a solid embedded storage engine behind a
-> Highway-native RESP server (Garnet is gone) — with **replication and client-herd failover**,
-> and a **built-in `IDistributedCache`** (with `HybridCache` L2) so caching needs no separate
-> Redis. The packages ship on nuget.org as `2.0.0`. See [Status](#status) and
-> [Known limits](#known-limits).
+> **3.0 — storage and replication on [SystemD.Crystal](https://github.com/System-D-AB/crystal).**
+> The broker's storage now runs on Crystal, an embedded storage kernel for .NET over RocksDB: Highway's data lives
+> in Crystal *boxes*, and every command commits one atomic batch across the boxes it touches. **Replication comes
+> with Crystal** — WAL shipping in batches over its own port, snapshot bootstrap, epochs and fencing, offline
+> compaction — so Highway **removed its own RocksDB store and its own WAL-shipping replication** and keeps only its
+> failover policy (the client herd, willingness, the roster, GOODBYE, auto-rejoin). Under the same load harness, on the same
+> machine, RPC handling is about **30 % faster** than Highway's own RocksDB store (p50 2.3 ms against 3.4 ms) and a
+> queue message reaches its worker about **2.5× sooner** (p50 20 ms against 48 ms).
+>
+> 3.0 is a **breaking release**: protocol 5.0, storage format 4, and every server line in its own directory, so a
+> 2.x broker is upgraded **side by side** and can be rolled back. It ships as **`3.0.0-rc.4`**, a pre-release:
+> see [Status](#status), [Known limits](#known-limits) and the
+> [upgrade runbook](docs/distribution/README.md#7-runbook-upgrading-from-2x-to-3-side-by-side).
 
 ---
 
@@ -139,21 +147,24 @@ your code rather than a `catch` block.
 
 ## High availability via replication
 
-Run more than one broker and Highway tolerates a server failure without losing acked work.
-Standbys follow the primary by **WAL shipping**; on a failure the model is **client-herd
-mastership** — the master is simply the node the client herd is connected to, and the herd
-converges on the highest-priority reachable successor.
+Run more than one broker and Highway tolerates a server failure. The **mechanism** is
+[SystemD.Crystal](https://github.com/System-D-AB/crystal)'s: standbys follow the primary by **WAL shipping** over a
+replication port of their own (the RESP port + 1), bootstrap from a snapshot, and are fenced by epochs. The
+**policy** is Highway's: the master is simply the node the client herd is connected to, and the herd converges on
+the highest-priority reachable successor. A new node is *syncing* — never eligible to take over — until it holds the
+primary's data and has caught up.
 
 - **No elections, no quorum, no votes.** Succession is a deterministic priority order, and
   **epoch fencing** guarantees at most one writable master — no split-brain.
 - **Clients replay their own in-flight work** with the same request id across the failover, so a
   call in flight when the master dies gets its answer from the successor, not a duplicate or a loss.
-- **Graceful handover** (`HW.REPL.GOODBYE`) drains a node before it steps down; failover is
+- **Graceful handover** (`highways --goodbye`) drains a node before it steps down and loses nothing; failover is
   automatic and there is no auto-failback to surprise you.
 
 Turn it on with `HighwayReplicationOptions` (start-as-replica, a primary to follow, a priority).
-The RPO is the async-replication lag window — bounded and reported, never silent
-([C9](docs/product/constraints.md)); see
+Replication is asynchronous: a write acknowledged in the last few milliseconds before a primary is **hard-killed**
+can be missing on its successor (about one Crystal shipping window, ~10–16 ms). That window is bounded and reported,
+never silent ([C9](docs/product/constraints.md)); see
 [Replication & Failover](docs/design/replication-and-failover.md).
 
 ---
@@ -181,8 +192,12 @@ Highway is distributed via **NuGet** for application libraries and **GitHub Rele
 
 | Channel | Carries | Target Audience |
 |---|---|---|
-| **NuGet** | `Highway.Abstractions`, `Highway.Client`, `Highway.LocalServer` | Developers building applications and running in-process tests |
-| **GitHub Releases** | `highways` distribution zip (Feature 031) | Operators deploying a standalone broker daemon or service |
+| **NuGet** | `Highway.Abstractions`, `Highway.Client`, `Highway.Client.Hosting`, `Highway.LocalServer` | Developers building applications and running in-process tests |
+| **GitHub Releases** | `highways` server archives for **Linux** (`linux-x64`, systemd unit) and **Windows** (`win-x64`, Windows service) | Operators deploying a standalone broker |
+
+The server archive unpacks as `server/3/` under your Highway root (for example `/opt/highway/server/3`), so each
+major version lives in its own directory with its own data; see the
+[server distribution guide](docs/distribution/README.md).
 
 ### 1. Add NuGet Packages
 
@@ -248,16 +263,19 @@ while published events reach both. See [samples/README.md](samples/README.md).
 
 ## Status
 
-**2.0 — released.** Queues, pub/sub, RPC, dead letters, delayed delivery, recurring jobs,
-dashboard, authentication, TLS, and NuGet packaging (`2.0.0`) all ship today, now on a
-purpose-built storage-engine + RESP broker (Garnet removed in feature 041). **2.0 adds replication with client-herd
-failover** (features 042 + 042-1 — WAL-shipping standbys, epoch fencing, no elections; the master
-is the node the client herd is on) and an **opt-in broker-local cache** (feature 044 —
-`IDistributedCache`/`HybridCache` L2, never replicated). **More than 1,200 tests pass.**
+**3.0 — release candidate (`3.0.0-rc.4`).** Everything 2.x does, on a new foundation:
+- **Storage and replication on [SystemD.Crystal](https://github.com/System-D-AB/crystal) 1.0** — Highway's own
+  RocksDB store and WAL-shipping replication are gone; `highways --compact` is Crystal's offline compaction.
+- **Protocol 5.0** — one work path for RPC and queues with claim tokens, and a declarative session per node.
+- **Storage format 4** — every queue, group and service in its own box, with bounded growth.
+- **Failover that does not split under load** — the herd hard-kill test passes 20/20 with a starved thread pool;
+  a client keeps one shared failover search per wave of failures, so hundreds of calls in flight converge together.
+- **One server directory per major version** — upgrade 2.x side by side, roll back to its untouched data.
+- **Server archives for Linux and Windows** (a systemd unit and a Windows service). Metrics (`Meter`) and the
+  `/health` and `/ready` endpoints carry over from 2.5.
 
-**Not yet done:** metrics (`Meter`) and health endpoints, and prebuilt broker distributions for
-Linux and macOS. The Windows (`win-x64`) distribution — the `highways` zip with service
-installers — ships as of 2.0.
+**More than 1,800 tests pass**, on Windows; the Linux archive is smoke-tested (single node and a replicated pair).
+The 2.x line stays on nuget.org as `2.5.0`.
 
 ---
 
@@ -271,10 +289,12 @@ Highway declines to promise these, and says so rather than letting you find out:
   ([C10](docs/product/constraints.md)).
 - **Not a replayable log.** Pub/sub does not retain history for groups that never registered.
 - **No transactional enlistment**, message priority, or per-message TTL.
-- **No characterised throughput.** No benchmark exists, so no figure is claimed anywhere.
-- **The prebuilt broker distribution is Windows (`win-x64`) only.** Linux and macOS are fully
-  supported from source (a self-contained `dotnet publish`), but no prebuilt zip ships for them
-  yet.
+- **No published benchmark suite.** The figures above come from Highway's load harness on one machine, against
+  Highway's own previous store; they show a relative change, not what your hardware will do.
+- **Replication is asynchronous.** A hard kill can lose writes acknowledged in the last ~10–16 ms; a planned
+  GOODBYE handover loses none ([C9](docs/product/constraints.md)).
+- **Prebuilt server archives are `linux-x64` and `win-x64`.** macOS is supported from source (a self-contained
+  `dotnet publish`), without a prebuilt archive.
 - **Retention over time is still unbounded** ([C4.1](docs/product/constraints.md), awaiting a
   breaking framing change). Storage growth itself is now bounded — the storage engine's compaction
   reclaims consumed messages ([C4.6](docs/product/constraints.md), met on the current engine).
@@ -288,7 +308,7 @@ implementation status, so intent and reality can be compared line by line.
 
 ```bash
 dotnet build Highway.slnx --no-incremental   # expected: zero warnings
-dotnet test Highway.slnx                     # ~7 minutes
+dotnet test Highway.slnx                     # a few minutes
 ```
 
 Integration tests run against a real embedded broker in-process — no Docker, no external infrastructure.
@@ -299,9 +319,9 @@ Integration tests run against a real embedded broker in-process — no Docker, n
 
 [MIT](LICENSE).
 
-Highway's broker uses [RocksDB](https://github.com/facebook/rocksdb) for storage (via the
-`RocksDB` .NET binding) and [StackExchange.Redis](https://github.com/StackExchange/StackExchange.Redis)
-(MIT) as the RESP client. One RESP output-formatter source file is vendored from
+Highway's broker stores and replicates its data with [SystemD.Crystal](https://github.com/System-D-AB/crystal)
+(MIT), which runs on [RocksDB](https://github.com/facebook/rocksdb), and uses
+[StackExchange.Redis](https://github.com/StackExchange/StackExchange.Redis) (MIT) as the RESP client. One RESP output-formatter source file is vendored from
 [Microsoft Garnet](https://github.com/microsoft/garnet) (MIT) with its copyright header intact —
 see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Garnet itself is no longer a dependency
 (removed in feature 041).
