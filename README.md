@@ -235,7 +235,7 @@ sudo bash /opt/highway/server/3/scripts/install-service.sh              # instal
 ```
 
 On Windows, unzip into `C:\highway` and run `server\3\scripts\install-service.bat`. The broker listens on
-`6500` (RESP), `6501` (replication) and `7500` (dashboard, `/health`, `/ready`). See the
+`6500` (RESP), `7500` (dashboard, `/health`, `/ready`), and `6501` for replication in a replica set. See the
 [server distribution guide](docs/distribution/README.md) for configuration, replica sets and upgrades.
 
 ---
