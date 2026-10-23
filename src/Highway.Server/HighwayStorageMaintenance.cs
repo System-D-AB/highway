@@ -14,15 +14,22 @@ public sealed record CompactionResult(long BytesBefore, long BytesAfter, TimeSpa
 public static class HighwayStorageMaintenance
 {
     /// <summary>
-    /// Refused since 076: Crystal compacts delete-heavy boxes on its own, and does not yet offer an offline compaction
-    /// of a whole store (the feature this command needs). The data directory is untouched.
+    /// <c>highways --compact</c> (feature 061; on Crystal's offline compaction since Crystal 1.0.0-rc.3): compacts every
+    /// database of the stopped broker's store, dropping every tombstone. It changes no data. Refused — and nothing
+    /// touched — while a broker holds the store, or for a directory that is not a Crystal store.
     /// </summary>
     public static CompactionResult Compact(string dataDir)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dataDir);
-        throw new NotSupportedException(
-            "'highways --compact' is not available in this release: the storage engine (SystemD.Crystal) compacts " +
-            "delete-heavy data on its own and does not yet offer an offline compaction. Nothing was changed.");
+        if (!File.Exists(Path.Combine(dataDir, "crystal.format")))
+            throw new InvalidOperationException($"'{dataDir}' is not a Highway data directory (no Crystal store in it).");
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var result = SystemD.Crystal.CrystalStore.Compact(dataDir);   // refused while the store is open anywhere
+        return new CompactionResult(
+            result.Databases.Sum(d => d.BytesBefore),
+            result.Databases.Sum(d => d.BytesAfter),
+            System.Diagnostics.Stopwatch.GetElapsedTime(started));
     }
 
     /// <summary>

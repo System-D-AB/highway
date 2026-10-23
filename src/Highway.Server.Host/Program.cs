@@ -168,7 +168,7 @@ public static class Program
     /// <summary>
     /// <c>--compact</c> (061 T5): offline compaction of the configured data directory. Resolves the data
     /// directory exactly as a run would (config file, environment, <c>--data-dir</c>), then compacts it.
-    /// The broker must be stopped; RocksDB's LOCK refuses a second opener and that is reported plainly.
+    /// The broker must be stopped; Crystal's store lock refuses a second opener and that is reported plainly.
     /// </summary>
     private static int RunCompact(HostArguments parsed, System.Collections.IDictionary? environment)
     {
@@ -196,12 +196,12 @@ public static class Program
             Console.Error.WriteLine(ex.Message);
             return ExitCodes.ConfigurationInvalid;
         }
-        catch (NotSupportedException ex)
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not a Highway data directory", StringComparison.Ordinal))
         {
-            Console.Error.WriteLine(ex.Message);   // 076: the storage engine offers no offline compaction yet
+            Console.Error.WriteLine(ex.Message);
             return ExitCodes.ConfigurationInvalid;
         }
-        catch (Exception ex) when (ex.Message.Contains("lock", StringComparison.OrdinalIgnoreCase))
+        catch (Exception ex) when (ex is SystemD.Crystal.StoreLockedException || ex.Message.Contains("lock", StringComparison.OrdinalIgnoreCase))
         {
             Console.Error.WriteLine("The data directory is in use - stop the Highway broker (service) first, then run --compact.");
             Console.Error.WriteLine(ex.Message);

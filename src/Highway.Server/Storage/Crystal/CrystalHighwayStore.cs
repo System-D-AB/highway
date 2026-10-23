@@ -17,7 +17,7 @@ namespace Highway.Server.Storage.Crystal;
 /// box the command touches and commits it <see cref="DurabilityMode.Strict"/>. An empty batch commits nothing.</para>
 ///
 /// <para><b>Retirement stays atomic (R2.4).</b> A range delete of a whole Highway box is a range delete of the whole
-/// Crystal box inside the same batch. The emptied Crystal box is dropped at the next start (<see cref="SweepEmptyBoxes"/>):
+/// Crystal box inside the same batch. The emptied Crystal box is dropped at the next start (<see cref="SweepEmptyBoxes()"/>):
 /// dropping it at run time would race readers that still hold its handle, and an empty box costs one catalogue entry.</para>
 ///
 /// <para><b>Standby.</b> A standby's database arrives by replication. Until its bootstrap lands, and while a re-bootstrap
@@ -211,7 +211,7 @@ public sealed class CrystalHighwayStore : IHighwayStore
         foreach (var info in view.Database.Boxes.List())
         {
             if (!CrystalBoxMap.TryParse(info.Name, out var id) || id == 0) continue;
-            if (view.Database.Boxes.Find(info.Name) is not { } box) continue;   // a handle must come from the database
+            var box = info.Handle;   // the listing carries each box's handle (Crystal 1.0.0-rc.3)
             if (snapshot.Scan(box, [], [], 1).Any()) continue;
             view.Database.Boxes.Drop(box);
             view.Boxes.Forget(id);
@@ -462,12 +462,13 @@ public sealed class CrystalHighwayStore : IHighwayStore
 
     // ---- observability ----------------------------------------------------------------------------------------------
 
-    private long _committedWrites;
-
-    /// <summary>Commits that handed writes to Crystal (empty ones write nothing) — what "an idle poll writes nothing" is measured by.</summary>
-    internal long CommittedWrites => Interlocked.Read(ref _committedWrites);
-
-    internal void NoteCommittedWrite() => Interlocked.Increment(ref _committedWrites);
+    /// <summary>
+    /// Database <c>highway</c>'s latest committed position (Crystal 1.0.0-rc.3 <c>DatabaseStatus.LatestPosition</c>) — what
+    /// "an idle poll writes nothing" is measured by: the engine's own sequence, not a count Highway keeps. 0 before the
+    /// database exists.
+    /// </summary>
+    internal long LatestPosition
+        => _crystal.Status().Databases.FirstOrDefault(d => d.Name == DatabaseName)?.LatestPosition ?? 0;
 
     /// <summary>
     /// A storage figure of database <c>highway</c> under the RocksDB property name the <c>highway.storage.*</c> gauges
@@ -500,8 +501,8 @@ public sealed class CrystalHighwayStore : IHighwayStore
         using var snapshot = view.Database.Snapshot();
         var boxes = new List<(uint Id, CrystalBox Box)>();
         foreach (var info in view.Database.Boxes.List())
-            if (CrystalBoxMap.TryParse(info.Name, out var id) && view.Database.Boxes.Find(info.Name) is { } box)
-                boxes.Add((id, box));
+            if (CrystalBoxMap.TryParse(info.Name, out var id))
+                boxes.Add((id, info.Handle));
         foreach (var (id, box) in boxes.OrderBy(b => b.Id))
             foreach (var kv in snapshot.Scan(box, [], [], int.MaxValue))
                 result.Add((CrystalBoxMap.Join(id, kv.Key), kv.Value));

@@ -492,7 +492,7 @@ public class ReplicationFeederTests
             long WalBytes() => Directory.GetFiles(dir, "*.log", SearchOption.AllDirectories).Sum(f => new FileInfo(f).Length);
 
             var walBefore = WalBytes();
-            var writesBefore = store.CommittedWrites;
+            var writesBefore = store.LatestPosition;
 
             for (var i = 0; i < 200; i++)
             {
@@ -501,7 +501,7 @@ public class ReplicationFeederTests
             }
 
             WalBytes().Should().Be(walBefore, "an empty batch changes nothing, so it must not append (and fsync) a WAL record");
-            store.CommittedWrites.Should().Be(writesBefore);
+            store.LatestPosition.Should().Be(writesBefore);
         }
         finally
         {

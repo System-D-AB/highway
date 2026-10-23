@@ -86,7 +86,7 @@ internal sealed class CrystalCacheStore : IHighwayCacheStore
     }
 
     /// <summary>RocksDB's estimate for the entries box (memtables included), as the RocksDB store read it: no scan.</summary>
-    public long ApproximateSizeBytes() => (long)_db.ApproximateBytes(_entries, KeyRange.All);
+    public long ApproximateSizeBytes() => _db.ApproximateBytes(_entries, KeyRange.All);
 
     /// <summary>The database belongs to the broker's Crystal store, which closes it.</summary>
     public void Dispose() { }

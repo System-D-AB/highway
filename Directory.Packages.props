@@ -28,7 +28,7 @@
          (SST format_version 7 both), identical WAL batch bytes. A bump must re-run 042 T2v. -->
     <PackageVersion Include="RocksDB" Version="11.8.1.5032" />
     <!-- Feature 076: Highway's storage and replication run on SystemD.Crystal (pins RocksDB 11.8.1.5032 itself). -->
-    <PackageVersion Include="SystemD.Crystal" Version="1.0.0-rc.2" />
+    <PackageVersion Include="SystemD.Crystal" Version="1.0.0" />
     <PackageVersion Include="Serilog.Extensions.Hosting" Version="9.0.0" />
     <PackageVersion Include="Serilog.Sinks.File" Version="7.0.0" />
     <PackageVersion Include="Serilog.Sinks.Console" Version="6.0.0" />

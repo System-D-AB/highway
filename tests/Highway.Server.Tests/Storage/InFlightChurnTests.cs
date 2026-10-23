@@ -88,12 +88,12 @@ public class InFlightChurnTests
                 h.Run(new HwCallCommand(), T0, "svc.echo", "r" + i, "body");
                 h.ClaimOne("SVC", "svc.echo", "worker-1", T0);
             }
-            var sequence = store.CommittedWrites;
+            var sequence = store.LatestPosition;
 
             for (var i = 0; i < 20; i++)
                 h.ClaimOne("SVC", "svc.echo", "worker-1", T0 + i).Should().BeNull();   // empty queue, 8 in flight
 
-            store.CommittedWrites.Should().Be(sequence,
+            store.LatestPosition.Should().Be(sequence,
                 "an idle claim whose lease sweep finds nothing expired stages nothing, so nothing is written (061 A2)");
         }
         finally { h.Dispose(); TempDirs.TryDelete(dir); }
@@ -111,11 +111,11 @@ public class InFlightChurnTests
             h.ClaimOne("Q", "orders", "w", t += TimeSpan.FromSeconds(11).Ticks);   // attempt 1: redelivered
             for (var i = 0; i < 5; i++) h.ClaimOne("Q", "orders", "w", t);
             h.ClaimOne("Q", "orders", "w", t += TimeSpan.FromSeconds(11).Ticks).Should().BeNull("all five dead-lettered");
-            var sequence = store.CommittedWrites;
+            var sequence = store.LatestPosition;
 
             Highway.Server.Tests.Commands.CommandHarness.AsText(h.Run(new HwDlqCommand(), t, "PEEK", "Q", "orders")).Should().StartWith("*5");
 
-            store.CommittedWrites.Should().Be(sequence, "PEEK is read-only (061 A1)");
+            store.LatestPosition.Should().Be(sequence, "PEEK is read-only (061 A1)");
         }
         finally { h.Dispose(); TempDirs.TryDelete(dir); }
     }
@@ -220,29 +220,52 @@ public class InFlightChurnTests
     }
 
     [Fact]
-    public void Compact_IsRefused_AndChangesNothing()
+    public void Compact_DropsTombstones_AndKeepsTheData()
     {
-        // 076 R3.3: the storage engine (SystemD.Crystal) compacts delete-heavy boxes on its own and offers no offline
-        // compaction yet, so --compact is refused by name and the data is untouched.
+        // 061 T5, on Crystal's offline compaction since Crystal 1.0.0-rc.3: a stopped broker's store is compacted and
+        // reads back exactly what it held.
         var dir = TempDirs.NewTempDir();
         try
         {
             using (var store = CrystalHighwayStore.Open(dir))
             {
-                using var keep = store.NewBatch();
-                PushTail(store, keep, "kept", Encoding.UTF8.GetBytes("survivor"));
-                keep.Commit();
+                using var fill = store.NewBatch();
+                for (var i = 0; i < 200; i++)
+                    PushTail(store, fill, "churn", Encoding.UTF8.GetBytes($"m{i}"));
+                PushTail(store, fill, "kept", Encoding.UTF8.GetBytes("survivor"));
+                fill.Commit();
+                using var drain = store.NewBatch();
+                store.ListDrain(drain, HighwayKeyspace.ListPrefix("churn"));   // 200 tombstones
+                drain.Commit();
             }
 
-            var act = () => HighwayStorageMaintenance.Compact(dir);
-            act.Should().Throw<NotSupportedException>().WithMessage("*--compact*not available*Nothing was changed*");
+            var result = HighwayStorageMaintenance.Compact(dir);
+            result.BytesBefore.Should().BeGreaterThan(0);
 
             using var reopened = CrystalHighwayStore.Open(dir);
             using var read = reopened.NewBatch();
             reopened.ListEntries(read, HighwayKeyspace.ListPrefix("kept"))
                 .Select(e => Encoding.UTF8.GetString(e.Value)).Should().Equal("survivor");
+            reopened.ListEntries(read, HighwayKeyspace.ListPrefix("churn")).Should().BeEmpty();
         }
         finally { TempDirs.TryDelete(dir); }
+    }
+
+    [Fact]
+    public void Compact_RefusesADirectoryThatIsNotABrokerDatabase_AndALiveBroker()
+    {
+        var empty = TempDirs.NewTempDir();
+        var live = TempDirs.NewTempDir();
+        try
+        {
+            var notAStore = () => HighwayStorageMaintenance.Compact(empty);
+            notAStore.Should().Throw<InvalidOperationException>().WithMessage("*not a Highway data directory*");
+
+            using var store = CrystalHighwayStore.Open(live);
+            var whileOpen = () => HighwayStorageMaintenance.Compact(live);
+            whileOpen.Should().Throw<SystemD.Crystal.StoreLockedException>("a running broker holds the store");
+        }
+        finally { TempDirs.TryDelete(empty); TempDirs.TryDelete(live); }
     }
 
     [Fact]

@@ -544,6 +544,14 @@ internal sealed class HighwayReplication : IDisposable
         try
         {
             var before = _crystal.LastReconciliationReport;
+            // Crystal demotes only a primary: a node Highway fenced is unfenced first, under the role lock, so its demote
+            // writes the reconciliation report. Nothing writes in between — Highway's own gate still refuses commands —
+            // and the unfence cannot be refused here: a fenced Crystal node follows nobody, so its epoch has not moved.
+            if (_crystal.Role == CrystalRole.Fenced)
+            {
+                try { _crystal.Unfence("standing down"); }
+                catch (InvalidOperationException ex) { Note($"unfence-before-demote-refused reason={ex.Message}", LogLevel.Warning); }
+            }
             _crystal.Demote();
             var crystalReport = _crystal.LastReconciliationReport is { } after && after != before ? after : null;
             if (crystalReport is not null || reportEvenIfEmpty)
@@ -676,14 +684,12 @@ internal sealed class HighwayReplication : IDisposable
     /// </summary>
     internal const ulong MaxEpochLead = 1_000;
 
-    /// <summary>Promotes Crystal to an epoch above any Highway has heard of. Bounded by <see cref="MaxEpochLead"/>.</summary>
+    /// <summary>
+    /// Promotes Crystal to an epoch above any Highway has heard of, in one persisted step (Crystal 1.0.0-rc.3
+    /// <c>Promote(reason, minimumEpoch)</c>). The floor is bounded on the way in by <see cref="MaxEpochLead"/>.
+    /// </summary>
     private long PromoteCrystal(string reason)
-    {
-        var epoch = _crystal.Promote(reason);
-        while ((ulong)epoch <= Interlocked.Read(ref _observedEpoch))
-            epoch = _crystal.Promote(reason);   // at most MaxEpochLead times: observed epochs are bounded on the way in
-        return epoch;
-    }
+        => _crystal.Promote(reason, (long)Interlocked.Read(ref _observedEpoch) + 1);
 
     private void AnnouncePromotionAsync(IReadOnlyCollection<string> endpoints, ulong epoch)
         => _ = Task.Run(async () =>
@@ -747,16 +753,30 @@ internal sealed class HighwayReplication : IDisposable
         {
             if (Role != ReplicaRole.Primary) return;
             Role = ReplicaRole.Fenced;
+            // The storage refuses writes too (Crystal's fence): Highway's write gate is no longer the only guard.
+            try { _crystal.Fence(reason); }
+            catch (ObjectDisposedException) { /* closing */ }
             Note($"fence epoch={Epoch} reason={reason} at={Options.Clock.GetUtcNow():o}", LogLevel.Warning);
         }
         OnFenced?.Invoke();
     }
 
+    /// <summary>
+    /// The fence backstop lifts at the same epoch when contact returns (Crystal 1.0.0-rc.3 <c>Unfence</c>). Crystal
+    /// refuses if another node has been primary since; the node then stays fenced until that higher epoch demotes it.
+    /// </summary>
     public void UnfenceIfContact()
     {
         lock (_roleLock)
         {
             if (Role != ReplicaRole.Fenced) return;
+            try { _crystal.Unfence("contact returned"); }
+            catch (ObjectDisposedException) { return; }   // closing (it derives from InvalidOperationException)
+            catch (InvalidOperationException ex)
+            {
+                Note($"unfence-refused epoch={Epoch} reason={ex.Message}", LogLevel.Warning);
+                return;
+            }
             Role = ReplicaRole.Primary;
             Note($"unfence epoch={Epoch} at={Options.Clock.GetUtcNow():o}");
         }
@@ -994,6 +1014,23 @@ internal sealed class HighwayReplication : IDisposable
             _knownPrimaryReplicationEndpoint = replicationEndpoint;
             Note($"follow primary={replicationEndpoint}");
         }
+    }
+
+    /// <summary>
+    /// Whether Crystal's follower holds an authenticated replication connection to <paramref name="replicationEndpoint"/>
+    /// (Crystal 1.0.0-rc.3 <c>ConnectedToPrimary</c>): this standby's own evidence that replication runs (H1). A wrong
+    /// advertised host, a closed port or a mismatched secret leaves it false, whatever RESP says.
+    /// </summary>
+    internal bool ReplicatingFrom(string? replicationEndpoint)
+    {
+        if (string.IsNullOrEmpty(replicationEndpoint)) return false;
+        try
+        {
+            var status = _crystal.Status();
+            return status.ConnectedToPrimary
+                   && string.Equals(status.FollowedPrimary, replicationEndpoint, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ObjectDisposedException) { return false; }
     }
 
     /// <summary>The position this standby has applied (its hello's watermark).</summary>

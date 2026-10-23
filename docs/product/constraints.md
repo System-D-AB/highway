@@ -620,7 +620,7 @@ poll, flat from 2 000 to 50 000 calls, and an idle poll with messages in flight 
 
 Observable: `highway.storage.memtable_deletes` and `highway.storage.estimated_keys`. Recovery for a
 data directory that accumulated tombstones before 2.5.4 was `highways --compact` with the broker stopped
-(2.x only: 3.0 starts every data directory fresh, and on Crystal, 076, `--compact` is refused).
+(2.x; 3.0 starts every data directory fresh — on Crystal `--compact` is Crystal's offline compaction, rarely needed).
 
 **2.5.5 — the memtable, too.** Deletes still in the memtable are not reached by the collector, and a
 lightly written broker's memtable flushes only after hours, so reads that start at a range's first key
@@ -1067,7 +1067,10 @@ An ack is durable on the primary the instant the enqueue/`HW.ACK` commits (sync-
 The in-process pair harness (042 T8) asserts zero loss for messages that had been pulled and acked on the replica before promotion.
 
 **3.0 — on Crystal (feature 076).** The lag window is Crystal's slot lag (`repl.slot.N.lag`, now in batches and in
-time). Because a standby's control traffic (the hello) and its data (Crystal's port) now travel separately, a standby
+time). Crystal ships to a standby near the head in batches, at most once per gather window (10 ms, rounded up to the
+15.6 ms timer on Windows), so under load a standby trails by about one window: a write acknowledged in the last
+window before a primary is **hard-killed** can be missing on the successor (measured: 2 of 9 410 queue messages under
+the load harness's kill). A planned GOODBYE handover drains first and lost none. Because a standby's control traffic (the hello) and its data (Crystal's port) now travel separately, a standby
 could reach RESP while replicating nothing — a wrong advertised host, a closed port, a mismatched secret. The window is
 kept from going silent in that case: a standby counts master contact only while the primary reports receiving its
 pulls (the hello's `dataLive`), its slot reads Lagging until Crystal shows it pulling, and a standby that holds none of

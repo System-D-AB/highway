@@ -370,8 +370,9 @@ public class HerdCohesionTests : IDisposable
         // stays IN FLIGHT (the R4 scenario's whole point). It lives in the caller's
         // pending registry, not yet answered anywhere.
         await using var caller = await EngineNode.StartAsync(multi, "rpc-caller");
+        var before = node1.DurableStore!.LatestPosition;
         var callTask = caller.Client.ExecuteAsync(new ItEchoRequest { Value = "herd-rpc" });
-        await WaitForAsync(() => node1.DurableStore!.CommittedWrites > 0);
+        await WaitForAsync(() => node1.DurableStore!.LatestPosition > before);
 
         // The master dies with the call unanswered. The caller's registry is the sole
         // surviving copy; its Converged replay re-drives the SAME id to the successor.

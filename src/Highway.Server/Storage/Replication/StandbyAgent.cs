@@ -170,14 +170,17 @@ internal sealed class StandbyAgent : IAsyncDisposable
 
             var primaryEpoch = (ulong)(long)hello[0];
             var replicationEndpoint = Reachable((string?)hello[3], _options.PrimaryServer);
-            var dataLive = hello.Length >= 5 && (long)hello[4] == 1;
             if (primaryEpoch > _replication.Epoch)
                 _replication.ObserveHigherEpoch(primaryEpoch, "HELLO saw a higher primary epoch",
                     HighwayReplication.HostOf(_options.PrimaryServer), replicationEndpoint);
 
-            // H1: master contact is a hello answered while the primary is receiving this standby's pulls — what a
-            // successful pull was on v3.0. A standby that reaches RESP but replicates nothing does not count as in touch.
-            if (dataLive)
+            if (!string.IsNullOrEmpty(replicationEndpoint))
+                _replication.EnsureFollowing(replicationEndpoint);
+
+            // H1: master contact is a hello answered while this standby's Crystal follower is connected to the primary the
+            // hello named — what a successful pull was on v3.0. A standby that reaches RESP but replicates nothing does not
+            // count as in touch. (The reply's dataLive, the primary's view of the same, stays on the wire.)
+            if (_replication.ReplicatingFrom(replicationEndpoint))
             {
                 _replication.NotePeerContact();
                 if (_replication.HoldsReplicatedData())
@@ -186,8 +189,6 @@ internal sealed class StandbyAgent : IAsyncDisposable
             // Settle syncing → standby now, while the primary answers: checked only on demand, a standby that caught up
             // but was never asked before its primary died could no longer prove it (Crystal drops the positions then).
             _replication.RefreshStandbyReadiness();
-            if (!string.IsNullOrEmpty(replicationEndpoint))
-                _replication.EnsureFollowing(replicationEndpoint);
             _replication.ClearResyncIfCaughtUp();
 
             await Task.Delay(HelloIntervalMs, ct).ConfigureAwait(false);

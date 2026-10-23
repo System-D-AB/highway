@@ -89,10 +89,12 @@ public class NodeDecommissioningTests : IDisposable
         Register(db, "dead-node");
         db.Subscribe(channel, "dead-node");
 
-        // Fill the dead node's queue until the channel refuses.
+        // Fill the dead node's queue until the channel refuses. The node heartbeats while it is filled, so a machine stall
+        // past the 300 ms threshold cannot retire it mid-fill (seen under full-suite load); it goes silent only after.
         RedisServerException? refusal = null;
         for (var i = 0; i < 50 && refusal is null; i++)
         {
+            db.Execute("HW.HEARTBEAT", "dead-node");
             try { db.Execute("HW.PUBLISH", channel, Payload()); }
             catch (RedisServerException ex) { refusal = ex; }
         }

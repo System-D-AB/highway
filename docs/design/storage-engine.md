@@ -101,8 +101,8 @@ whose memtable may otherwise sit unflushed for hours: every iterator carries an 
 key range; `memtable_op_scan_flush_trigger` flushes the memtable once a single read step skips 1 000
 hidden entries; and the compact-on-deletion collector compacts any SST file that is delete-dense —
 both now set by Crystal's `DeleteHeavy` profile. The hot paths also avoid creating churn and start
-from a queue's known head (see [durable-queues](durable-queues.md)). `highways --compact` is refused in
-3.0: Crystal offers no offline compaction yet, and nothing in the box layout needs one.
+from a queue's known head (see [durable-queues](durable-queues.md)). `highways --compact` runs Crystal's
+offline compaction of a stopped broker's store; nothing in the box layout needs it routinely.
 
 **Everything that grows with traffic is bounded.** Each queue-like structure carries a byte budget
 (`MaxQueueBytes`, default 1 GB), maintained by a running counter inside the same transaction that

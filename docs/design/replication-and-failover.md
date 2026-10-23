@@ -38,9 +38,11 @@ that serves TLS replicates over TLS with the same certificate (mutual when RESP 
 certificates); the shared-secret challenge runs inside it either way.
 
 **Contact is the hello.** A standby sends `HW.REPL.HELLO` to its primary over RESP every 200 ms: its
-position, the highest epoch it has seen, its storage format. Each answered hello is its **master-link
-contact**, which willingness and the fence backstop read; each arriving one is the primary's contact
-from that standby. The reply names the primary's replication endpoint, which the standby follows —
+position, the highest epoch it has seen, its storage format. A hello answered **while the standby's
+Crystal follower is connected to the replication endpoint that hello named** is its **master-link
+contact**, which willingness and the fence backstop read; a standby that reaches RESP but replicates
+nothing (a wrong advertised host, a closed port, a mismatched secret) is not in contact. Each arriving
+hello is the primary's contact from that standby. The reply names the primary's replication endpoint, which the standby follows —
 so a standby is configured with the primary's RESP address only, as before. Crystal's own pull is a
 long poll that moves nothing while idle, so it cannot say whether a master is alive; the hello can.
 
@@ -76,7 +78,9 @@ reconciliation report and auto-rejoins the other as its replica. Promotion happe
 **first accepted client verb** and bumps the durable epoch; a resurrected lower-epoch node demotes on
 first contact, writes a reconciliation report, and never merges. The old two-timeout deadman survives
 only as a **fence backstop** (a herd-less, peer-less primary goes read-only) — no timer ever
-promotes.
+promotes. The fence is Crystal's too: the storage refuses writes and serves no pages while fenced, and
+when contact returns the node is unfenced at the **same epoch** (Crystal refuses that if another node has
+been primary since, and the higher epoch then demotes it).
 
 **Standbys never take writes.** A mutating command on a non-master is refused
 `-NOTPRIMARY <endpoint> <epoch>`, redirecting the client to the current master — extended to the raw

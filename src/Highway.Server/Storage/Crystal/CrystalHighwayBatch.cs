@@ -207,7 +207,6 @@ internal sealed class CrystalHighwayBatch : IStoreBatch
         if (_staged)
         {
             _batch!.Commit(DurabilityMode.Strict);
-            _store.NoteCommittedWrite();
         }
         // else: an empty batch writes and syncs nothing (Highway 059; Crystal R6.3)
         _store.ApplyHeadHints(this);             // only after the commit succeeded (061 A4)
