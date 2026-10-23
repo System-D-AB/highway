@@ -35,7 +35,7 @@ public sealed class ProcessOrder : ISend
 
 ## Documentation & Resources
 
-- [Highway User Guide](https://github.com/System-D-AB/highway/blob/main/docs/product/UserGuide.md)
-- [Highway Wire Protocol Specification](https://github.com/System-D-AB/highway/blob/main/docs/HIGHWAY-PROTOCOL.md)
-- [Guarantees and Known Limits (constraints.md)](https://github.com/System-D-AB/highway/blob/main/docs/product/constraints.md)
+- [Highway User Guide](https://github.com/System-D-AB/highway/blob/v3.0/docs/product/UserGuide.md)
+- [Highway Wire Protocol Specification](https://github.com/System-D-AB/highway/blob/v3.0/docs/HIGHWAY-PROTOCOL.md)
+- [Guarantees and Known Limits (constraints.md)](https://github.com/System-D-AB/highway/blob/v3.0/docs/product/constraints.md)
 - [GitHub Repository](https://github.com/System-D-AB/highway)

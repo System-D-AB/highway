@@ -31,7 +31,8 @@ services.AddHighway(o =>
 });
 ```
 
-The server is memory-only by default and disposed with the test. Every guarantee the deployed
+The server is memory-only by default and disposed with the test; give it a data directory and it is durable, on a
+[SystemD.Crystal](https://github.com/System-D-AB/crystal) store — the same storage and replication the deployed broker uses. Every guarantee the deployed
 broker makes — at-least-once delivery, dead-lettering, competing consumers, subscription
 groups — behaves identically here, because it is the same broker.
 
@@ -51,9 +52,9 @@ distribution is less work and behaves the same.
 
 ## Documentation
 
-- [User Guide](https://github.com/System-D-AB/highway/blob/main/docs/product/UserGuide.md) — the three verbs, jobs, cache, deployment
-- [Wire protocol](https://github.com/System-D-AB/highway/blob/main/docs/HIGHWAY-PROTOCOL.md) — every command, reply and error code
-- [Constraints](https://github.com/System-D-AB/highway/blob/main/docs/product/constraints.md) — every guarantee Highway makes, and whether the code keeps it
+- [User Guide](https://github.com/System-D-AB/highway/blob/v3.0/docs/product/UserGuide.md) — the three verbs, jobs, cache, deployment
+- [Wire protocol](https://github.com/System-D-AB/highway/blob/v3.0/docs/HIGHWAY-PROTOCOL.md) — every command, reply and error code
+- [Constraints](https://github.com/System-D-AB/highway/blob/v3.0/docs/product/constraints.md) — every guarantee Highway makes, and whether the code keeps it
 
 ## Licence
 
