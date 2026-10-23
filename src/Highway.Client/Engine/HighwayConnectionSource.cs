@@ -354,13 +354,46 @@ public sealed class HighwayConnectionSource : IAsyncDisposable, IDisposable
     /// Returns false when nothing answers; the caller's bounded retry then runs out
     /// exactly as before.
     ///
-    /// <para><b>Serialized.</b> Every in-flight operation hits connection loss at once;
-    /// one sweep runs, the rest wait on the gate and inherit the adopted multiplexer.
-    /// <paramref name="excludeCurrent"/> is the GOODBYE shape: the incumbent said go, so
-    /// it is not a candidate even though it still answers.</para>
+    /// <para><b>One walk, shared (078).</b> Every in-flight operation hits connection loss at once.
+    /// The first starts the walk; every other caller of the same kind awaits that same walk and
+    /// inherits its result, instead of queueing a walk of its own (a wave of failures used to queue
+    /// hundreds behind the gate and convoy on its lock). A caller's token ends only its own wait.
+    /// <paramref name="excludeCurrent"/> is the GOODBYE shape: the incumbent said go, so it is not a
+    /// candidate even though it still answers — a GOODBYE caller never shares a plain walk.</para>
     /// </summary>
-    public async Task<bool> TryFailoverAsync(CancellationToken ct = default, bool excludeCurrent = false)
+    public Task<bool> TryFailoverAsync(CancellationToken ct = default, bool excludeCurrent = false)
     {
+        // A concurrent sweep may already have adopted a live endpoint (not good enough when the
+        // incumbent is saying GOODBYE — then we must move).
+        if (!excludeCurrent && _multiplexer is { IsConnected: true })
+            return Task.FromResult(true);
+
+        Task<bool> walk;
+        lock (_syncLock)
+        {
+            ref var slot = ref excludeCurrent ? ref _departureWalk : ref _plainWalk;
+            if (slot is not { IsCompleted: false } running)
+            {
+                Interlocked.Increment(ref _walksStarted);
+                running = slot = WalkAsync(excludeCurrent);
+            }
+            walk = running;
+        }
+        return ct.CanBeCanceled ? walk.WaitAsync(ct) : walk;
+    }
+
+    private Task<bool>? _plainWalk;
+    private Task<bool>? _departureWalk;
+    private int _walksStarted;
+
+    /// <summary>Walks started since construction (test seam, 078 R5): one per wave of concurrent failures.</summary>
+    internal int WalksStarted => Volatile.Read(ref _walksStarted);
+
+    /// <summary>The walk itself, run once per wave with no caller's token; behind the gate so a plain and a GOODBYE walk never run together.</summary>
+    private async Task<bool> WalkAsync(bool excludeCurrent)
+    {
+        await Task.Yield();   // never run the walk inline under the caller's lock
+        var ct = CancellationToken.None;
         await _failoverGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {

@@ -1015,16 +1015,38 @@ internal sealed class HighwayConnection : IHighwayConnection, IAsyncDisposable
     /// <c>-NOTPRIMARY</c> to follow), so ask the source to probe the other configured
     /// endpoints for the writable node. Only meaningful with a multi-endpoint connection
     /// string; a single-endpoint client keeps the plain bounded retry.
+    ///
+    /// <para><b>Patient, and shared (078).</b> A successor turns willing only after its own wait (the
+    /// willingness threshold and its stagger), so one sweep right after the loss may find nobody. The call
+    /// keeps joining the source's shared walk every <see cref="FailoverRetryInterval"/> until one adopts
+    /// a node, <see cref="FailoverPatience"/> runs out, or the call's own token ends — every call in the
+    /// wave waits on the same walk and they all succeed together once the successor is up. (Before 078
+    /// each call ran its own walk; queued one behind another they reached the successor by accident, and
+    /// under a large wave the queue itself convoyed.)</para>
     /// </summary>
     private async Task<bool> TryFailoverOnConnectionLossAsync(CancellationToken ct)
     {
         if (_source is null || !_source.HasAlternateEndpoints)
             return false;
-        if (!await _source.TryFailoverAsync(ct).ConfigureAwait(false))
-            return false;
-        AdoptCurrentMultiplexer();
-        return true;
+        var deadline = Environment.TickCount64 + (long)FailoverPatience.TotalMilliseconds;
+        while (true)
+        {
+            if (await _source.TryFailoverAsync(ct).ConfigureAwait(false))
+            {
+                AdoptCurrentMultiplexer();
+                return true;
+            }
+            if (Environment.TickCount64 + (long)FailoverRetryInterval.TotalMilliseconds > deadline)
+                return false;
+            await Task.Delay(FailoverRetryInterval, ct).ConfigureAwait(false);
+        }
     }
+
+    /// <summary>How long a call keeps looking for a new primary after its connection was lost (078): covers a herd takeover.</summary>
+    internal static readonly TimeSpan FailoverPatience = TimeSpan.FromSeconds(15);
+
+    /// <summary>The pause between joins of the shared failover walk while no node has been adopted yet (078).</summary>
+    internal static readonly TimeSpan FailoverRetryInterval = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// Re-points this connection at the source's current multiplexer, re-subscribes
