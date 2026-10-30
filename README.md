@@ -29,17 +29,16 @@ somebody else's cloud. It needs the **.NET 10 SDK** and nothing else — no Dock
 infrastructure, not even for the integration tests.
 
 > **3.0 — storage and replication on [SystemD.Crystal](https://github.com/System-D-AB/crystal).**
-> The broker's storage now runs on Crystal, an embedded storage kernel for .NET over RocksDB: Highway's data lives
-> in Crystal *boxes*, and every command commits one atomic batch across the boxes it touches. **Replication comes
+> Highway's backend storage system is now Crystal, an embedded storage kernel for .NET: Highway's data lives in
+> Crystal *boxes*, and every command commits one atomic batch across the boxes it touches. **Replication comes
 > with Crystal** — WAL shipping in batches over its own port, snapshot bootstrap, epochs and fencing, offline
-> compaction — so Highway **removed its own RocksDB store and its own WAL-shipping replication** and keeps only its
+> compaction — so Highway **removed its own storage engine and its own WAL-shipping replication** and keeps only its
 > failover policy (the client herd, willingness, the roster, GOODBYE, auto-rejoin). Under the same load harness, on the same
-> machine, RPC handling is about **30 % faster** than Highway's own RocksDB store (p50 2.3 ms against 3.4 ms) and a
+> machine, RPC handling is about **30 % faster** than on Highway's previous storage engine (p50 2.3 ms against 3.4 ms) and a
 > queue message reaches its worker about **2.5× sooner** (p50 20 ms against 48 ms).
 >
 > 3.0 is a **breaking release**: protocol 5.0, storage format 4, and every server line in its own directory, so a
-> 2.x broker is upgraded **side by side** and can be rolled back. It ships as **`3.0.0-rc.4`**, a pre-release:
-> see [Status](#status), [Known limits](#known-limits) and the
+> 2.x broker is upgraded **side by side** and can be rolled back. See [Status](#status), [Known limits](#known-limits) and the
 > [upgrade runbook](docs/distribution/README.md#7-runbook-upgrading-from-2x-to-3-side-by-side).
 
 ---
@@ -203,12 +202,12 @@ major version lives in its own directory with its own data; see the
 
 In your domain contracts library (zero dependencies):
 ```bash
-dotnet add package Highway.Abstractions --prerelease
+dotnet add package Highway.Abstractions
 ```
 
 In your application / worker service:
 ```bash
-dotnet add package Highway.Client --prerelease
+dotnet add package Highway.Client
 ```
 
 ### 2. Register Highway in DI
@@ -221,7 +220,8 @@ builder.Services.AddHighway(o =>
 });
 ```
 
-Assembly scanning finds all `ISend`, `IPublish`, `AsyncService`, and `ISubscribe` implementations automatically.
+Assembly scanning finds every message (`ISend`, `IPublish`) and handler (`IProcess`, `AsyncService`, `ISubscribe`)
+automatically.
 
 ### 3. Run the broker
 
@@ -278,9 +278,9 @@ while published events reach both. See [samples/README.md](samples/README.md).
 
 ## Status
 
-**3.0 — release candidate (`3.0.0-rc.4`).** Everything 2.x does, on a new foundation:
+**3.0.** Everything 2.x does, on a new foundation:
 - **Storage and replication on [SystemD.Crystal](https://github.com/System-D-AB/crystal) 1.0** — Highway's own
-  RocksDB store and WAL-shipping replication are gone; `highways --compact` is Crystal's offline compaction.
+  storage engine and WAL-shipping replication are gone; `highways --compact` is Crystal's offline compaction.
 - **Protocol 5.0** — one work path for RPC and queues with claim tokens, and a declarative session per node.
 - **Storage format 4** — every queue, group and service in its own box, with bounded growth.
 - **Failover that does not split under load** — the herd hard-kill test passes 20/20 with a starved thread pool;
@@ -335,7 +335,7 @@ Integration tests run against a real embedded broker in-process — no Docker, n
 [MIT](LICENSE).
 
 Highway's broker stores and replicates its data with [SystemD.Crystal](https://github.com/System-D-AB/crystal)
-(MIT), which runs on [RocksDB](https://github.com/facebook/rocksdb), and uses
+(MIT), its backend storage system, and uses
 [StackExchange.Redis](https://github.com/StackExchange/StackExchange.Redis) (MIT) as the RESP client. One RESP output-formatter source file is vendored from
 [Microsoft Garnet](https://github.com/microsoft/garnet) (MIT) with its copyright header intact —
 see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Garnet itself is no longer a dependency

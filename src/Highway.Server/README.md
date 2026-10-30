@@ -16,7 +16,7 @@ with no Docker, no external infrastructure and nothing to install.
 ## Installation
 
 ```bash
-dotnet add package Highway.LocalServer --prerelease
+dotnet add package Highway.LocalServer
 ```
 
 ## Integration tests
@@ -52,9 +52,9 @@ distribution is less work and behaves the same.
 
 ## Documentation
 
-- [User Guide](https://github.com/System-D-AB/highway/blob/v3.0/docs/product/UserGuide.md) — the three verbs, jobs, cache, deployment
-- [Wire protocol](https://github.com/System-D-AB/highway/blob/v3.0/docs/HIGHWAY-PROTOCOL.md) — every command, reply and error code
-- [Constraints](https://github.com/System-D-AB/highway/blob/v3.0/docs/product/constraints.md) — every guarantee Highway makes, and whether the code keeps it
+- [User Guide](https://github.com/System-D-AB/highway/blob/main/docs/product/UserGuide.md) — the three verbs, jobs, cache, deployment
+- [Wire protocol](https://github.com/System-D-AB/highway/blob/main/docs/HIGHWAY-PROTOCOL.md) — every command, reply and error code
+- [Constraints](https://github.com/System-D-AB/highway/blob/main/docs/product/constraints.md) — every guarantee Highway makes, and whether the code keeps it
 
 ## Licence
 

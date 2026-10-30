@@ -8,7 +8,7 @@ The wire protocol has its own authoritative history in
 [`docs/HIGHWAY-PROTOCOL.md`](docs/HIGHWAY-PROTOCOL.md); this file records the product and
 package changes and links there rather than restating command-level detail.
 
-## [3.0.0] — Unreleased
+## [3.0.0] — 2026-10-30
 
 A major release: a new storage layout, protocol 5.0, and a failover that no longer splits under
 load. **The broker, the client packages and every data directory move together** — a 3.0 broker
